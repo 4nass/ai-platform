@@ -15,6 +15,11 @@ def ensure_clean_worktree(repo: git.Repo) -> None:
         )
 
 
+def current_commit(repo: git.Repo) -> str:
+    """Snapshot of HEAD before branching, used later to diff this run's own changes."""
+    return repo.head.commit.hexsha
+
+
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:40] or "task"
@@ -45,3 +50,8 @@ def commit_all(repo: git.Repo, summary: str) -> list[str]:
     if changed:
         repo.index.commit(f"hermes: {summary}")
     return changed
+
+
+def diff_since(repo: git.Repo, base_sha: str) -> str:
+    """Diff of this run's own commit(s), not the (now-empty) working tree."""
+    return repo.git.diff(base_sha, "HEAD")

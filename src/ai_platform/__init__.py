@@ -13,6 +13,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import typer  # noqa: E402
+from rich.console import Console  # noqa: E402
+
+console = Console()
 
 app = typer.Typer(help="ai-platform — prototype 1: request -> RAG context -> agent -> verified modification.")
 
@@ -28,21 +31,16 @@ def run(
     agent: str = typer.Option("backend", help="Agent role to use (see config/agents.yaml)."),
 ) -> None:
     """Indexes the repo, selects relevant context, drives the provider, applies and verifies the result."""
-    from core.context.manager import ContextManager
-    from core.orchestrator import planner, scheduler, supervisor
+    from core.orchestrator import supervisor
 
-    context_manager = ContextManager(REPO_ROOT)
+    try:
+        report = supervisor.run(REPO_ROOT, request, agent)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
 
-    n_chunks = context_manager.index_repo()
-    typer.echo(f"Repo indexed: {n_chunks} chunks.")
-
-    selected_context = context_manager.select_context(request)
-    tasks = planner.plan(request)
-    supervisor.apply_and_verify(
-        REPO_ROOT,
-        request,
-        run_provider=lambda: scheduler.execute(REPO_ROOT, tasks, selected_context, agent),
-    )
+    if report.summary != "done":
+        raise typer.Exit(1)
 
 
 def main() -> None:

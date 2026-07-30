@@ -43,3 +43,15 @@ def load_role_prompt(repo_root: Path, agent: str) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
+
+
+PROVIDER_DISPLAY_NAMES = {
+    "claude_code": "Claude Code",
+    "codex_cli": "Codex CLI",
+    "anthropic_api": "Anthropic API",
+    "openai_api": "OpenAI API",
+}
+
+
+def display_name(provider_name: str) -> str:
+    return PROVIDER_DISPLAY_NAMES.get(provider_name, provider_name)

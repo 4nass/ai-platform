@@ -2,11 +2,11 @@
 
 ## Vision
 
-AI Software Engineering Platform is an AI agent orchestration platform meant to automate and speed up the full software development lifecycle.
+AI Software Engineering Platform is **not a multi-tenant platform** — it's one engineer's own augmented software engineering copilot: a single-user system meant to automate and speed up the full software development lifecycle on the projects its owner works on.
 
-The goal isn't to replace developers, but to build a virtual team of specialized agents able to collaborate on a software project: requirement analysis, architecture design, code generation, technical review, testing, security, documentation, deployment.
+The goal isn't to replace the developer, but to build a virtual team of specialized agents able to collaborate on a software project: requirement analysis, architecture design, code generation, technical review, testing, security, documentation, deployment.
 
-The platform acts as an **Engineering Operating System**, coordinating several AI models (Claude, Codex, local models, etc.) while optimizing context and token usage.
+It acts as a personal **Engineering Operating System**, coordinating several AI models (Claude, Codex, local models, etc.) while optimizing context and token usage. Because it's single-user by design, the stack stays deliberately minimal: no server processes to administer beyond what already runs locally (embedded vector index, SQLite, Markdown files) — no Redis, no PostgreSQL, no Kubernetes.
 
 ---
 
@@ -150,7 +150,7 @@ Each agent has a specialization.
 - **Architect Agent** — technical analysis, architecture choices, diagram creation, technical decisions.
 - **Backend Agent** — API development, business logic, database, backend integration.
 - **Frontend Agent** — user interfaces, UI components, API integration.
-- **DevOps Agent** — Docker/Podman, Kubernetes, CI/CD, infrastructure as code.
+- **DevOps Agent** — Docker/Podman, CI/CD, infrastructure as code. No Kubernetes: it's an admin layer a single-user copilot doesn't need.
 - **Security Agent** — vulnerability analysis, OWASP, secrets, compliance.
 - **Documentation Agent** — README, API docs, architecture, ADRs.
 
@@ -179,13 +179,16 @@ LLM Agent
 
 #### 4. Code Intelligence Engine
 
-Understands the project via Tree-sitter, AST analysis, git history, dependency graphs. Goal: understand relationships between files, identify the impact of a change, avoid sending irrelevant code to the models.
+Understands the project via Tree-sitter (already used for chunking today), AST analysis, git history, and a dependency graph built with **NetworkX** (already a dependency, not yet wired in — see Roadmap). Goal: understand relationships between files, identify the impact of a change, avoid sending irrelevant code to the models.
 
 Example: modifying `JwtService.java` — the system detects `AuthController`, `SecurityConfig`, and `TokenRepository` as impacted.
 
-#### 5. Memory System
+#### 5. Memory & History
 
-Retains project knowledge.
+Two different kinds of persisted knowledge, kept deliberately separate:
+
+- **Markdown, for human-authored knowledge** — decisions and project rules a person wrote and can read/edit directly: `memory/architecture.md`, `memory/coding_rules.md`, `memory/business_rules.md`, `memory/roadmap.md`, `memory/adr/ADR-*.md`.
+- **SQLite, for machine-generated history** — task runs, which agent/provider handled each one, and token/cost metrics per run. A local `.sqlite` file, no server, queryable directly (`sqlite3`, or a `history` CLI command later). Not yet implemented — see Roadmap.
 
 ```
 memory/
@@ -193,21 +196,19 @@ memory/
 ├── coding_rules.md
 ├── business_rules.md
 ├── roadmap.md
-├── decisions/
-│   ├── ADR-001.md
-│   └── ADR-002.md
-└── glossary.md
-```
+└── adr/
+    └── ADR-001-*.md
 
-Three kinds: **technical memory** (chosen architecture, frameworks, conventions), **business memory** (functional rules, business constraints), **decision memory** (ADRs — why a decision was made).
+hermes.sqlite   # runs(id, agent, provider, request, branch, success, tokens, cost, ts)
+```
 
 #### 6. Vector Database / RAG
 
-Semantic search over the project. Example: the question *"Where is authentication handled?"* resolves to `AuthenticationService`, `JWTProvider`, `SecurityConfig`, `OAuthController`. Prototype 1 already uses an embedded, file-mode Qdrant index (`qdrant-client`, no server) — the target architecture keeps this local/embedded approach rather than a separate Qdrant service.
+Semantic search over the project. Example: the question *"Where is authentication handled?"* resolves to `AuthenticationService`, `JWTProvider`, `SecurityConfig`, `OAuthController`. This stays an **embedded, file-mode Qdrant index** (`qdrant-client`, no server) permanently — not a "for now": a single-user copilot has no reason to run a separate vector database service.
 
 #### 7. MCP Integration Layer
 
-Model Context Protocol lets agents reach external tools: GitHub, Git, Podman, Kubernetes, Database, Cloud. Agents would be able to create a git branch, analyze a repo, run tests, open a pull request, interact with infrastructure.
+Model Context Protocol lets agents reach external tools: GitHub, Git, Podman, Database, Cloud. Agents would be able to create a git branch, analyze a repo, run tests, open a pull request, interact with infrastructure.
 
 ### Workflow management (example)
 
@@ -256,7 +257,7 @@ Windows
        +-- Hermes
 ```
 
-Prototype 1 needs nothing beyond this: no Podman/Kubernetes, no Redis, no PostgreSQL — the vector index is a local embedded Qdrant (file mode, no server process). Container orchestration (Podman/Kubernetes) stays a target for the DevOps Agent once it exists, not a current dependency.
+This is the full target, not just what prototype 1 needs — deliberately: no Redis, no PostgreSQL, no Kubernetes, ever. The vector index (Qdrant), the graph (NetworkX), and the run history (SQLite) are all local, embedded, file-based — no service to start or administer. Podman shows up only as a tool the DevOps Agent can call for the user's own project builds, not as infrastructure this platform depends on.
 
 ---
 
@@ -271,9 +272,10 @@ Prototype 1 needs nothing beyond this: no Podman/Kubernetes, no Redis, no Postgr
 ### Phase 2 - Context Engine
 - [x] Git diff analysis
 - [x] Code parsing with Tree-sitter
-- [ ] Dependency graph (`use_graph` acknowledged, not implemented)
+- [ ] Dependency graph with NetworkX (`use_graph` acknowledged, not implemented)
 - [x] Vector search (embedded Qdrant + sentence-transformers)
 - [x] Memory Manager (loads `memory/*.md`; files still empty)
+- [ ] SQLite run history (task, agent, provider, tokens, cost per run)
 
 ### Phase 3 - Agent System
 - [x] Architect Agent (prompt written, not yet exercised end-to-end)
@@ -307,4 +309,4 @@ Prototype 1 needs nothing beyond this: no Podman/Kubernetes, no Redis, no Postgr
 
 ## Final Vision
 
-Build a platform able to turn an idea into working software by orchestrating a full team of AI agents, while keeping code control, cost control, decision traceability, security, and software quality.
+A personal copilot able to turn an idea into working software by orchestrating a small team of AI agents on the user's own projects, while keeping code control, cost control, decision traceability, security, and software quality — with a stack minimal enough that one person can run and understand every part of it.
