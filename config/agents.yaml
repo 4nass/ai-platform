@@ -1,0 +1,20 @@
+architect:
+  model: claude
+
+backend:
+  model: codex
+
+frontend:
+  model: claude
+
+reviewer:
+  model: claude
+
+security:
+  model: claude
+
+tests:
+  model: codex
+
+documentation:
+  model: claude

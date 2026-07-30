@@ -1,0 +1,13 @@
+providers:
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+  openai:
+    api_key: ${OPENAI_API_KEY}
+
+models:
+  claude:
+    provider: anthropic
+    model: claude-sonnet
+  codex:
+    provider: openai
+    model: codex

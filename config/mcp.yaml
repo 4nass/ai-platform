@@ -1,0 +1,6 @@
+filesystem: true
+git: true
+github: true
+postgres: true
+podman: true
+kubernetes: false

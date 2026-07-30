@@ -1,0 +1,3 @@
+summary_every: 20
+max_history: 100
+persist: true

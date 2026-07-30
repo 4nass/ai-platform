@@ -1,0 +1,5 @@
+use_git_diff: true
+use_graph: true
+use_vector_db: true
+use_memory: true
+max_files: 20
