@@ -1,4 +1,4 @@
-"""Chargement de la mémoire projet (memory/*.md)."""
+"""Loads project memory (memory/*.md)."""
 
 from __future__ import annotations
 

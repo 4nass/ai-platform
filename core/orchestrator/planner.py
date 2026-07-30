@@ -1,7 +1,8 @@
-"""Planner (v1) : découpage de la demande en tâches.
+"""Planner (v1): breaks the request down into tasks.
 
-Le prototype 1 ne découpe pas la demande : une tâche unique, exécutée
-synchrone par le scheduler. Le découpage multi-étapes viendra avec Hermes.
+Prototype 1 doesn't actually break the request down: a single task,
+executed synchronously by the scheduler. Multi-step breakdown will come
+with Hermes.
 """
 
 from __future__ import annotations

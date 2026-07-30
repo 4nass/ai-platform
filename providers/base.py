@@ -1,9 +1,9 @@
-"""Interface commune à tous les providers (CLI ou API).
+"""Common interface for all providers (CLI or API).
 
-Contrat : au retour de `run()`, le disque est déjà à jour — peu importe
-comment (un provider CLI édite lui-même via ses propres outils ; un
-provider API doit écrire les fichiers reçus avant de retourner). Ça permet
-à l'orchestrateur de rester agnostique au provider utilisé.
+Contract: by the time `run()` returns, the disk is already up to date —
+however that happens (a CLI provider edits files itself via its own tools;
+an API provider must write the files it receives before returning). This
+keeps the orchestrator agnostic to which provider is used.
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ class AgentTask:
     repo_root: Path
     context_paths: list[str] = field(default_factory=list)
     context_render: str = ""
-    """Contexte complet (contenu des fichiers, git diff, mémoire) pour les
-    providers API sans accès disque. Les providers CLI utilisent plutôt
-    `context_paths` (juste les chemins — ils lisent les fichiers eux-mêmes)."""
+    """Full context (file content, git diff, memory) for API providers with
+    no disk access. CLI providers use `context_paths` instead (just the
+    paths — they read the files themselves)."""
 
 
 @dataclass

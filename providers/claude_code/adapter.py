@@ -1,15 +1,15 @@
-"""Provider Claude Code CLI : Hermes ne parle pas au modèle, il pilote le CLI.
+"""Claude Code CLI provider: Hermes doesn't talk to the model, it drives the CLI.
 
-`claude -p` s'exécute en mode non-interactif, authentifié via la session
-d'abonnement déjà active (`claude auth login`) — pas de clé API. Le CLI édite
-lui-même les fichiers (Read/Edit/Write) ; ce provider ne fait qu'invoquer le
-process et relayer son résumé, conformément au contrat providers.base.Provider.
+`claude -p` runs in non-interactive mode, authenticated via the already
+active subscription session (`claude auth login`) — no API key. The CLI
+edits files itself (Read/Edit/Write); this provider only invokes the
+process and relays its summary, per the providers.base.Provider contract.
 
-Flags vérifiés via la documentation Claude Code, et la forme du JSON de sortie
-confirmée empiriquement (`result`, `is_error`, `subtype`, `session_id`,
-`total_cost_usd`) — le binaire est présent dans ce sandbox mais non
-authentifié, ce qui suffit à valider le parsing sans pouvoir tester une
-véritable exécution de tâche.
+Flags verified against the Claude Code documentation, and the shape of the
+output JSON confirmed empirically (`result`, `is_error`, `subtype`,
+`session_id`, `total_cost_usd`) — the binary is present in this sandbox but
+not authenticated, which is enough to validate parsing without being able
+to test an actual task run.
 """
 
 from __future__ import annotations
@@ -20,14 +20,28 @@ import subprocess
 from providers.base import AgentTask, ProviderResult, load_role_prompt
 
 TIMEOUT_SECONDS = 900
-ALLOWED_TOOLS = "Read,Edit,Write,Bash(uv run pytest*)"
+DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash(uv run pytest*)"
+# The reviewer/security roles must never edit files (see prompts/reviewer.md,
+# prompts/security.md: their output is a report, not a modification) —
+# enforced here at the tool level, not just via the prompt.
+# architect/documentation write documents but don't need to run commands.
+ROLE_ALLOWED_TOOLS = {
+    "reviewer": "Read,Grep,Glob",
+    "security": "Read,Grep,Glob",
+    "architect": "Read,Edit,Write,Grep,Glob",
+    "documentation": "Read,Edit,Write,Grep,Glob",
+}
+
+
+def _allowed_tools(agent: str) -> str:
+    return ROLE_ALLOWED_TOOLS.get(agent, DEFAULT_ALLOWED_TOOLS)
 
 
 def _build_prompt(task: AgentTask) -> str:
     if not task.context_paths:
         return task.description
     listing = "\n".join(f"- {p}" for p in task.context_paths)
-    return f"{task.description}\n\nFichiers de contexte probablement pertinents (lis-les toi-même si besoin) :\n{listing}"
+    return f"{task.description}\n\nLikely relevant context files (read them yourself if needed):\n{listing}"
 
 
 def run(task: AgentTask) -> ProviderResult:
@@ -42,7 +56,7 @@ def run(task: AgentTask) -> ProviderResult:
         "--permission-mode",
         "acceptEdits",
         "--allowedTools",
-        ALLOWED_TOOLS,
+        _allowed_tools(task.agent),
         "--output-format",
         "json",
     ]
@@ -61,16 +75,15 @@ def run(task: AgentTask) -> ProviderResult:
         return ProviderResult(
             success=False,
             summary=(
-                "Binaire `claude` introuvable dans le PATH. Installe le CLI Claude Code "
-                "et lance `claude auth login` avant de relancer."
+                "`claude` binary not found in PATH. Install the Claude Code CLI "
+                "and run `claude auth login` before retrying."
             ),
         )
     except subprocess.TimeoutExpired as exc:
-        return ProviderResult(success=False, summary=f"claude CLI : timeout après {exc.timeout}s")
+        return ProviderResult(success=False, summary=f"claude CLI: timed out after {exc.timeout}s")
 
-    # L'info d'erreur (ex. "Not logged in · Please run /login") arrive dans le
-    # JSON sur stdout, pas sur stderr — on tente le parsing avant de se fier
-    # au seul code de sortie.
+    # Error info (e.g. "Not logged in · Please run /login") arrives in the
+    # JSON on stdout, not stderr — try parsing before trusting the exit code alone.
     data: dict | None = None
     if proc.stdout.strip():
         try:
@@ -83,23 +96,23 @@ def run(task: AgentTask) -> ProviderResult:
         if data and data.get("result"):
             return ProviderResult(
                 success=False,
-                summary=f"claude CLI (code {proc.returncode}) : {data['result']}",
+                summary=f"claude CLI (code {proc.returncode}): {data['result']}",
                 raw=data,
             )
         return ProviderResult(
             success=False,
-            summary=f"claude CLI a échoué (code {proc.returncode}) : {proc.stderr.strip() or proc.stdout.strip()}",
+            summary=f"claude CLI failed (code {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}",
             raw=proc.stderr or proc.stdout,
         )
 
     if data is None:
         return ProviderResult(
             success=False,
-            summary="Sortie non-JSON du CLI claude — voir `raw` pour le contenu brut.",
+            summary="Non-JSON output from the claude CLI — see `raw` for the raw content.",
             raw=proc.stdout,
         )
 
     if data.get("is_error"):
-        return ProviderResult(success=False, summary=data.get("result", "Erreur inconnue"), raw=data)
+        return ProviderResult(success=False, summary=data.get("result", "Unknown error"), raw=data)
 
     return ProviderResult(success=True, summary=data.get("result", ""), raw=data)

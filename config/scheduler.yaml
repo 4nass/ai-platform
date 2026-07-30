@@ -1,5 +1,0 @@
-parallelism: 6
-retry: 2
-timeout: 600
-max_cost_per_task: 0.50
-max_tokens: 12000

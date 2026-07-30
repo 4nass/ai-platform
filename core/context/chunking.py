@@ -1,5 +1,5 @@
-"""Découpage du repo en chunks indexables : par fonction/classe pour le Python
-(via tree-sitter), par section pour le Markdown, par fichier entier sinon."""
+"""Splits the repo into indexable chunks: per function/class for Python
+(via tree-sitter), per section for Markdown, whole file otherwise."""
 
 from __future__ import annotations
 

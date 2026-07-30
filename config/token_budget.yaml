@@ -2,4 +2,6 @@ architect: 12000
 backend: 10000
 frontend: 10000
 reviewer: 14000
+security: 14000
+tests: 10000
 documentation: 5000

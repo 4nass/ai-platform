@@ -1,4 +1,4 @@
-"""Embeddings locaux (sentence-transformers) pour l'indexation et la recherche."""
+"""Local embeddings (sentence-transformers) for indexing and search."""
 
 from __future__ import annotations
 

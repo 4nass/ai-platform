@@ -1,9 +1,9 @@
-"""Provider API Anthropic directe (client.messages.parse).
+"""Direct Anthropic API provider (client.messages.parse).
 
-Contrairement au provider claude_code (CLI), ce provider n'a aucun accès au
-disque : il reçoit un plan de modification structuré (validé par Pydantic)
-et doit écrire les fichiers lui-même avant de retourner, pour respecter le
-contrat commun de providers.base.Provider.
+Unlike the claude_code provider (CLI), this provider has no disk access at
+all: it receives a structured modification plan (validated by Pydantic) and
+must write the files itself before returning, to honor the shared
+providers.base.Provider contract.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ def run(task: AgentTask) -> ProviderResult:
     max_tokens = token_budget.get(task.agent, 10000)
     system_prompt = load_role_prompt(task.repo_root, task.agent)
 
-    context_note = f"\n\nContexte :\n{task.context_render}" if task.context_render else ""
-    user_prompt = f"Demande :\n{task.description}{context_note}"
+    context_note = f"\n\nContext:\n{task.context_render}" if task.context_render else ""
+    user_prompt = f"Request:\n{task.description}{context_note}"
 
     client = anthropic.Anthropic()
     response = client.messages.parse(

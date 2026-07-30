@@ -1,40 +1,40 @@
-"""Point d'entrée CLI du prototype 1 (Hermes minimal)."""
+"""CLI entry point for prototype 1 (minimal Hermes)."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# core/ et providers/ vivent à la racine du repo (hors du package installé
-# src/ai_platform) : on les rend importables en ajoutant la racine du repo à
-# sys.path, indépendamment du cwd depuis lequel le script est lancé.
+# core/ and providers/ live at the repo root (outside the installed
+# src/ai_platform package): make them importable by adding the repo root to
+# sys.path, regardless of the cwd the script is launched from.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import typer  # noqa: E402
 
-app = typer.Typer(help="ai-platform — prototype 1 : demande -> contexte RAG -> agent -> modification vérifiée.")
+app = typer.Typer(help="ai-platform — prototype 1: request -> RAG context -> agent -> verified modification.")
 
 
 @app.callback()
 def callback() -> None:
-    """ai-platform — prototype 1 : demande -> contexte RAG -> agent -> modification vérifiée."""
+    """ai-platform — prototype 1: request -> RAG context -> agent -> verified modification."""
 
 
 @app.command()
 def run(
-    request: str = typer.Argument(..., help="Demande en langage naturel à réaliser sur le repo."),
-    agent: str = typer.Option("backend", help="Rôle d'agent à mobiliser (voir config/agents.yaml)."),
+    request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
+    agent: str = typer.Option("backend", help="Agent role to use (see config/agents.yaml)."),
 ) -> None:
-    """Indexe le repo, sélectionne le contexte pertinent, pilote le provider, applique et vérifie le résultat."""
+    """Indexes the repo, selects relevant context, drives the provider, applies and verifies the result."""
     from core.context.manager import ContextManager
     from core.orchestrator import planner, scheduler, supervisor
 
     context_manager = ContextManager(REPO_ROOT)
 
     n_chunks = context_manager.index_repo()
-    typer.echo(f"Repo indexé : {n_chunks} chunks.")
+    typer.echo(f"Repo indexed: {n_chunks} chunks.")
 
     selected_context = context_manager.select_context(request)
     tasks = planner.plan(request)

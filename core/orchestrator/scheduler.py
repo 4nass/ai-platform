@@ -1,6 +1,6 @@
-"""Scheduler (v1) : exécution synchrone de la tâche unique via un provider.
+"""Scheduler (v1): synchronous execution of the single task via a provider.
 
-Pas de parallélisme (config/scheduler.yaml reste pour la version complète).
+No parallelism yet — that's reserved for the full version.
 """
 
 from __future__ import annotations

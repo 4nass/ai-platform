@@ -1,4 +1,4 @@
-"""Index vectoriel local (Qdrant en mode fichier, pas de serveur)."""
+"""Local vector index (Qdrant in file mode, no server)."""
 
 from __future__ import annotations
 

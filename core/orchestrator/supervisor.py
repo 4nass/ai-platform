@@ -1,8 +1,8 @@
-"""Supervisor (v1) : crée la branche, lance le provider, commit, teste, rapporte.
+"""Supervisor (v1): creates the branch, runs the provider, commits, tests, reports.
 
-La branche doit être créée AVANT l'exécution du provider : un provider CLI
-(claude_code) édite les fichiers directement sur disque pendant son exécution,
-donc l'isolation par branche n'a de sens que si elle précède l'appel.
+The branch must be created BEFORE the provider runs: a CLI provider
+(claude_code) edits files directly on disk while it runs, so branch
+isolation only makes sense if it happens before the call.
 """
 
 from __future__ import annotations
@@ -36,30 +36,30 @@ def apply_and_verify(
     git_ops.ensure_clean_worktree(repo)
     branch = git_ops.create_branch(repo, request)
 
-    console.rule("Hermes — rapport d'exécution")
-    console.print(f"Branche créée : [bold]{branch}[/bold]")
+    console.rule("Hermes — run report")
+    console.print(f"Branch created: [bold]{branch}[/bold]")
 
     result = run_provider()
 
     if not result.success:
-        console.print(f"[bold red]Le provider a échoué[/bold red] : {result.summary}")
+        console.print(f"[bold red]Provider failed[/bold red]: {result.summary}")
         return RunReport(
             branch=branch, provider_success=False, files_changed=[], tests_passed=False, tests_output=""
         )
 
-    console.print(f"Résumé : {result.summary}")
+    console.print(f"Summary: {result.summary}")
 
     changed = git_ops.commit_all(repo, result.summary or request)
-    console.print("Fichiers modifiés :")
+    console.print("Files changed:")
     if changed:
         for path in changed:
             console.print(f"  - {path}")
     else:
-        console.print("  (aucun)")
+        console.print("  (none)")
 
     test_result = test_runner.run_tests(repo_root)
     status = "[bold green]PASS[/bold green]" if test_result.passed else "[bold red]FAIL[/bold red]"
-    console.print(f"Tests : {status}")
+    console.print(f"Tests: {status}")
     if test_result.output:
         console.print(test_result.output)
 

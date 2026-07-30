@@ -1,4 +1,4 @@
-"""Opérations git : jamais de merge/push automatique, toujours une branche dédiée."""
+"""Git operations: never auto-merge/push, always a dedicated branch."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import git
 def ensure_clean_worktree(repo: git.Repo) -> None:
     if repo.is_dirty(untracked_files=True):
         raise RuntimeError(
-            "Le working tree git n'est pas propre : commit ou stash tes changements "
-            "avant de lancer le prototype."
+            "The git working tree isn't clean: commit or stash your changes "
+            "before running the prototype."
         )
 
 
@@ -34,11 +34,11 @@ def create_branch(repo: git.Repo, request: str) -> str:
 
 
 def commit_all(repo: git.Repo, summary: str) -> list[str]:
-    """Détecte tout changement fait par le provider (CLI ou API) et le commit.
+    """Detects any change made by the provider (CLI or API) and commits it.
 
-    Le provider a déjà écrit sur disque à ce stade (contrat providers.base.Provider) :
-    on n'a pas besoin de connaître la liste des fichiers à l'avance, `git add -A`
-    ramasse tout ce qui a changé, peu importe le provider utilisé.
+    The provider has already written to disk by this point (providers.base.Provider
+    contract): we don't need to know the file list in advance, `git add -A`
+    picks up whatever changed, regardless of which provider was used.
     """
     repo.git.add(A=True)
     changed = [d.a_path or d.b_path for d in repo.index.diff("HEAD")]

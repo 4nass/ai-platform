@@ -1,7 +1,7 @@
-"""Context Engineering Layer (v1) : indexation vectorielle + git diff + mémoire projet.
+"""Context Engineering Layer (v1): vector indexing + git diff + project memory.
 
-`use_graph` (config/context.yaml) n'est pas implémenté dans ce prototype : pas de
-code graph networkx. On log un avertissement plutôt que de faire semblant.
+`use_graph` (config/context.yaml) is not implemented in this prototype: no
+networkx code graph. We log a warning rather than pretending it's there.
 """
 
 from __future__ import annotations
@@ -42,23 +42,23 @@ class SelectedContext:
     def render(self) -> str:
         parts: list[str] = []
         if self.memory_docs:
-            parts.append("## Mémoire projet")
+            parts.append("## Project memory")
             for name, content in self.memory_docs.items():
                 parts.append(f"### {name}\n{content}")
         if self.git_diff:
-            parts.append(f"## Git diff en cours\n```diff\n{self.git_diff}\n```")
+            parts.append(f"## Current git diff\n```diff\n{self.git_diff}\n```")
         if self.chunks:
-            parts.append("## Extraits de code pertinents")
+            parts.append("## Relevant code excerpts")
             for chunk in self.chunks:
                 parts.append(
                     f"### {chunk['path']} ({chunk['kind']} {chunk['name']}, "
-                    f"lignes {chunk['start_line']}-{chunk['end_line']})\n```\n{chunk['text']}\n```"
+                    f"lines {chunk['start_line']}-{chunk['end_line']})\n```\n{chunk['text']}\n```"
                 )
         return "\n\n".join(parts)
 
     def context_paths(self) -> list[str]:
-        """Chemins uniques triés des chunks trouvés — pour les providers CLI
-        qui lisent les fichiers eux-mêmes (pas besoin du contenu complet)."""
+        """Unique, sorted paths of the chunks found — for CLI providers that
+        read the files themselves (no need for the full content)."""
         return sorted({chunk["path"] for chunk in self.chunks})
 
 
@@ -74,7 +74,7 @@ class ContextManager:
         self.config = load_config(repo_root)
         self._store: VectorStore | None = None
         if self.config.use_graph:
-            logger.warning("use_graph=true dans config/context.yaml mais le code graph n'est pas implémenté en v1 : ignoré.")
+            logger.warning("use_graph=true in config/context.yaml but the code graph is not implemented in v1: ignored.")
 
     def index_repo(self) -> int:
         if not self.config.use_vector_db:
