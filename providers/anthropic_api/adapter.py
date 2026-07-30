@@ -15,6 +15,7 @@ import anthropic
 import yaml
 from pydantic import BaseModel
 
+from core.errors import ConfigError
 from providers.base import AgentTask, ProviderResult, load_role_prompt
 
 MODELS_CONFIG_PATH = Path("config/models.yaml")
@@ -46,11 +47,21 @@ def _write_files(repo_root: Path, files: list[FileChange]) -> list[str]:
     return written
 
 
+def _model_id(models_config: dict) -> str:
+    model_id = (models_config.get("models") or {}).get("claude", {}).get("model")
+    if not model_id:
+        raise ConfigError(
+            f"{MODELS_CONFIG_PATH} is missing models.claude.model — cannot resolve which "
+            "Anthropic model to call."
+        )
+    return model_id
+
+
 def run(task: AgentTask) -> ProviderResult:
     models_config = _load_yaml(task.repo_root, MODELS_CONFIG_PATH)
     token_budget = _load_yaml(task.repo_root, TOKEN_BUDGET_CONFIG_PATH)
 
-    model_id = models_config["models"]["claude"]["model"]
+    model_id = _model_id(models_config)
     max_tokens = token_budget.get(task.agent, 10000)
     system_prompt = load_role_prompt(task.repo_root, task.agent)
 
@@ -66,5 +77,10 @@ def run(task: AgentTask) -> ProviderResult:
         output_format=CodeChangePlan,
     )
     plan = response.parsed_output
+    if plan is None:
+        return ProviderResult(
+            success=False,
+            summary="The Anthropic API returned a response that didn't match the expected structured output.",
+        )
     _write_files(task.repo_root, plan.files)
     return ProviderResult(success=True, summary=plan.summary, raw=plan.model_dump())

@@ -46,6 +46,8 @@ class VectorStore:
             self._client.upsert(collection_name=COLLECTION_NAME, points=points)
 
     def search(self, query_vector: list[float], limit: int) -> list[dict[str, Any]]:
+        if not self._client.collection_exists(COLLECTION_NAME):
+            return []
         hits = self._client.query_points(
             collection_name=COLLECTION_NAME, query=query_vector, limit=limit
         ).points

@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from core.context.manager import SelectedContext
+from core.errors import ConfigError
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
 from providers.base import AgentTask, ProviderResult
@@ -18,7 +19,6 @@ from providers.codex_cli import adapter as codex_cli
 from providers.openai_api import adapter as openai_api
 
 AGENTS_CONFIG_PATH = Path("config/agents.yaml")
-DEFAULT_PROVIDER = "claude_code"
 
 PROVIDERS = {
     "claude_code": claude_code,
@@ -30,7 +30,22 @@ PROVIDERS = {
 
 def resolve_provider(repo_root: Path, agent: str) -> str:
     config = yaml.safe_load((repo_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
-    return (config.get(agent) or {}).get("provider", DEFAULT_PROVIDER)
+
+    if agent not in config:
+        known = ", ".join(sorted(config)) or "(none configured)"
+        raise ConfigError(f"Unknown agent role '{agent}'. Configured roles: {known}")
+
+    provider_name = (config[agent] or {}).get("provider")
+    if not provider_name:
+        raise ConfigError(f"Agent role '{agent}' has no 'provider' set in {AGENTS_CONFIG_PATH}")
+
+    if provider_name not in PROVIDERS:
+        known = ", ".join(sorted(PROVIDERS))
+        raise ConfigError(
+            f"Unknown provider '{provider_name}' for agent '{agent}'. Available providers: {known}"
+        )
+
+    return provider_name
 
 
 def run_task(

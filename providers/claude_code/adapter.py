@@ -44,7 +44,39 @@ def _build_prompt(task: AgentTask) -> str:
     return f"{task.description}\n\nLikely relevant context files (read them yourself if needed):\n{listing}"
 
 
+def _check_auth() -> str | None:
+    """Cheap preflight so an unauthenticated session fails in ~100ms instead
+    of after building the full task prompt/command."""
+    try:
+        proc = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return (
+            "`claude` binary not found in PATH. Install the Claude Code CLI "
+            "and run `claude auth login` before retrying."
+        )
+    except subprocess.TimeoutExpired:
+        return "claude CLI: `claude auth status` timed out."
+
+    try:
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    if not data.get("loggedIn"):
+        return "Not logged in to Claude Code. Run `claude auth login` before retrying."
+    return None
+
+
 def run(task: AgentTask) -> ProviderResult:
+    auth_error = _check_auth()
+    if auth_error:
+        return ProviderResult(success=False, summary=auth_error)
+
     system_prompt = load_role_prompt(task.repo_root, task.agent)
 
     cmd = [
