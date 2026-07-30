@@ -7,7 +7,7 @@ providers:
 models:
   claude:
     provider: anthropic
-    model: claude-sonnet
+    model: claude-sonnet-5
   codex:
     provider: openai
     model: codex

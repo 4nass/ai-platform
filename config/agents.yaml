@@ -1,20 +1,20 @@
 architect:
-  model: claude
+  provider: claude_code
 
 backend:
-  model: codex
+  provider: claude_code
 
 frontend:
-  model: claude
+  provider: claude_code
 
 reviewer:
-  model: claude
+  provider: claude_code
 
 security:
-  model: claude
+  provider: claude_code
 
 tests:
-  model: codex
+  provider: claude_code
 
 documentation:
-  model: claude
+  provider: claude_code

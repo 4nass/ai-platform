@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+.claude
+
+# Local vector index (generated)
+vector/*
+!vector/.gitkeep
