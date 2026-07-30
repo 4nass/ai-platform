@@ -55,3 +55,11 @@ def commit_all(repo: git.Repo, summary: str) -> list[str]:
 def diff_since(repo: git.Repo, base_sha: str) -> str:
     """Diff of this run's own commit(s), not the (now-empty) working tree."""
     return repo.git.diff(base_sha, "HEAD")
+
+
+def format_changed_files(files: list[str]) -> str:
+    """Formats a list of changed file paths into a readable one-line summary."""
+    if not files:
+        return "no files changed"
+    count = f"{len(files)} file" if len(files) == 1 else f"{len(files)} files"
+    return f"{count} changed: {', '.join(files)}"

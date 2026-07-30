@@ -67,7 +67,7 @@ def run(repo_root: Path, request: str, agent: str) -> RunReport:
         )
 
     changed = git_ops.commit_all(repo, result.summary or request)
-    console.print(f"[bold]Changes:[/bold] {len(changed)} files")
+    console.print(f"[bold]Changes:[/bold] {git_ops.format_changed_files(changed)}")
 
     test_result = test_runner.run_tests(repo_root)
     console.print(f"[bold]Tests:[/bold] {'PASS' if test_result.passed else 'FAIL'}")
