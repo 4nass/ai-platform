@@ -25,3 +25,10 @@ def run_tests(repo_root: Path) -> TestResult:
     except subprocess.TimeoutExpired as exc:
         return TestResult(passed=False, output=f"Timeout après {exc.timeout}s")
     return TestResult(passed=proc.returncode == 0, output=proc.stdout + proc.stderr)
+
+
+def format_test_summary(result: TestResult) -> str:
+    """Formate un `TestResult` en une ligne de résumé lisible (PASS/FAIL + sortie)."""
+    status = "PASS" if result.passed else "FAIL"
+    output = result.output.strip()
+    return f"[{status}] {output}" if output else f"[{status}]"
