@@ -148,6 +148,69 @@ def test_run_writes_files_and_returns_summary(monkeypatch: pytest.MonkeyPatch, t
     assert (tmp_path / "helper.py").exists()
 
 
+def test_parse_usage_maps_sdk_fields() -> None:
+    class FakeUsage:
+        input_tokens = 1200
+        output_tokens = 340
+        cache_read_input_tokens = 900
+        cache_creation_input_tokens = 50
+
+    class FakeResponse:
+        usage = FakeUsage()
+
+    usage = adapter._parse_usage(FakeResponse(), "claude-sonnet-5")
+
+    assert usage.model == "claude-sonnet-5"
+    assert usage.input_tokens == 1200
+    assert usage.output_tokens == 340
+    assert usage.cache_read_tokens == 900
+    assert usage.cache_creation_tokens == 50
+    # The Messages API returns no price; inventing one here would mean a
+    # hardcoded rate table going stale unnoticed.
+    assert usage.cost_usd is None
+
+
+def test_parse_usage_degrades_to_zeros_when_usage_absent() -> None:
+    usage = adapter._parse_usage(object(), "claude-sonnet-5")
+
+    assert usage.input_tokens == 0
+    assert usage.model == "claude-sonnet-5"
+
+
+def test_run_attaches_usage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _write_configs(tmp_path, "models:\n  claude:\n    model: claude-sonnet-5\n")
+
+    plan = adapter.CodeChangePlan(
+        summary="added a helper",
+        files=[adapter.FileChange(path="helper.py", action="create", content="x = 1\n")],
+    )
+
+    class FakeUsage:
+        input_tokens = 500
+        output_tokens = 20
+        cache_read_input_tokens = 0
+        cache_creation_input_tokens = 0
+
+    class FakeResponse:
+        parsed_output = plan
+        usage = FakeUsage()
+
+    class FakeMessages:
+        def parse(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    monkeypatch.setattr(adapter.anthropic, "Anthropic", lambda: FakeClient())
+
+    result = adapter.run(AgentTask(agent="backend", description="x", repo_root=tmp_path))
+
+    assert result.usage is not None
+    assert result.usage.input_tokens == 500
+    assert result.usage.model == "claude-sonnet-5"
+
+
 def test_run_returns_failure_when_parsed_output_is_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _write_configs(tmp_path, "models:\n  claude:\n    model: claude-sonnet-5\n")
 

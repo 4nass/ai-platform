@@ -8,7 +8,9 @@ own isolated worktree), and how to build its prompt from upstream artifacts.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -66,7 +68,21 @@ def run_task(
     description: str,
     context_paths: list[str] | None = None,
     context_render: str = "",
+    *,
+    recorder=None,
+    stage_id: str | None = None,
 ) -> ProviderResult:
+    """Runs one task through its configured provider, recording what it cost.
+
+    Every provider call in the system funnels through here — DAG stages, the
+    decomposer, and the reviewer — so instrumenting this one function means a
+    future call site is measured automatically instead of being silently free.
+
+    `recorder` is passed in rather than built from `repo_root`: for DAG
+    stages `repo_root` is the task's throwaway worktree, while the telemetry
+    belongs to the main repo. Keyword-only and optional, so callers that
+    don't care about telemetry (and every existing test) are unaffected.
+    """
     provider_name = resolve_provider(repo_root, agent)
     provider = PROVIDERS[provider_name]
 
@@ -77,7 +93,24 @@ def run_task(
         context_paths=context_paths or [],
         context_render=context_render,
     )
-    return provider.run(agent_task)
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    started = time.monotonic()
+    result = provider.run(agent_task)
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    if recorder is not None:
+        recorder.record_call(
+            agent=agent,
+            provider=provider_name,
+            result=result,
+            stage_id=stage_id,
+            context_files=len(context_paths or []),
+            context_chars=len(context_render),
+            duration_ms=duration_ms,
+            started_at=started_at,
+        )
+    return result
 
 
 def build_stage_description(request: str, upstream: list[StageResult]) -> str:

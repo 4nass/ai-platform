@@ -16,7 +16,7 @@ import yaml
 from pydantic import BaseModel
 
 from core.errors import ConfigError
-from providers.base import AgentTask, ProviderResult, load_role_prompt
+from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt
 
 MODELS_CONFIG_PATH = Path("config/models.yaml")
 TOKEN_BUDGET_CONFIG_PATH = Path("config/token_budget.yaml")
@@ -67,6 +67,28 @@ def _write_files(repo_root: Path, files: list[FileChange]) -> list[str]:
     return written
 
 
+def _parse_usage(response: object, model_id: str) -> TokenUsage:
+    """Maps the SDK's `Usage` into the shared shape.
+
+    No cost: the Messages API doesn't return one, and deriving it here would
+    mean hardcoding a price table that goes stale without anyone noticing.
+    Leave it None and price at query time, where the rates live in one place.
+    """
+    usage = getattr(response, "usage", None)
+
+    def field(name: str) -> int:
+        value = getattr(usage, name, 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    return TokenUsage(
+        model=model_id,
+        input_tokens=field("input_tokens"),
+        output_tokens=field("output_tokens"),
+        cache_read_tokens=field("cache_read_input_tokens"),
+        cache_creation_tokens=field("cache_creation_input_tokens"),
+    )
+
+
 def _model_id(models_config: dict) -> str:
     model_id = (models_config.get("models") or {}).get("claude", {}).get("model")
     if not model_id:
@@ -96,14 +118,19 @@ def run(task: AgentTask) -> ProviderResult:
         messages=[{"role": "user", "content": user_prompt}],
         output_format=CodeChangePlan,
     )
+    # Tokens were spent the moment the call returned — attach usage to the
+    # failure paths too, not just the happy one.
+    usage = _parse_usage(response, model_id)
+
     plan = response.parsed_output
     if plan is None:
         return ProviderResult(
             success=False,
             summary="The Anthropic API returned a response that didn't match the expected structured output.",
+            usage=usage,
         )
     try:
         _write_files(task.repo_root, plan.files)
     except ValueError as exc:
-        return ProviderResult(success=False, summary=str(exc), raw=plan.model_dump())
-    return ProviderResult(success=True, summary=plan.summary, raw=plan.model_dump())
+        return ProviderResult(success=False, summary=str(exc), raw=plan.model_dump(), usage=usage)
+    return ProviderResult(success=True, summary=plan.summary, raw=plan.model_dump(), usage=usage)

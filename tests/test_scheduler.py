@@ -68,6 +68,67 @@ def test_run_task_dispatches_to_the_resolved_provider(monkeypatch: pytest.Monkey
     assert captured["task"].context_paths == ["a.py"]
 
 
+class _SpyRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def record_call(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+def test_run_task_records_the_call_with_context_sizes(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(
+        repo_root,
+        "backend",
+        "do the thing",
+        context_paths=["a.py", "b.py"],
+        context_render="some context",
+        recorder=recorder,
+        stage_id="backend",
+    )
+
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["agent"] == "backend"
+    assert call["provider"] == "claude_code"
+    assert call["stage_id"] == "backend"
+    assert call["context_files"] == 2
+    assert call["context_chars"] == len("some context")
+    assert call["duration_ms"] >= 0
+    assert call["started_at"]
+
+
+def test_run_task_without_a_recorder_is_a_no_op(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+
+    result = scheduler.run_task(repo_root, "backend", "do the thing")
+
+    assert result.success is True
+
+
+def test_run_task_records_failed_calls_too(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    """A failed provider call still cost tokens; skipping it would understate
+    the run."""
+
+    def failing_run(task: AgentTask) -> ProviderResult:
+        return ProviderResult(success=False, summary="nope")
+
+    monkeypatch.setitem(
+        scheduler.PROVIDERS, "claude_code", type("FakeProvider", (), {"run": staticmethod(failing_run)})
+    )
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["result"].success is False
+
+
 def test_build_stage_description_with_no_upstream_returns_the_request() -> None:
     assert scheduler.build_stage_description("add oauth2", []) == "add oauth2"
 

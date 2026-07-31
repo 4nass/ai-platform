@@ -22,6 +22,7 @@ from rich.console import Console
 from core.context.manager import ContextManager, SelectedContext
 from core.orchestrator import contracts, decomposer, git_ops, planner, review, scheduler, test_runner
 from core.orchestrator.scheduler import StageResult
+from core.telemetry import store as telemetry
 from providers.base import ProviderResult, display_name
 
 console = Console()
@@ -46,6 +47,28 @@ class RunReport:
     review_passed: bool | None
     review_summary: str
     summary: str
+    totals: dict = field(default_factory=dict)
+    """Rolled-up cost/tokens for the run (see core.telemetry.store.run_totals).
+    Empty on a dry run, which records nothing."""
+
+
+def format_totals(totals: dict) -> str:
+    """One-line cost summary.
+
+    Reports how many calls were actually priced when that differs from the
+    call count: a provider that returns no cost (anthropic_api) would
+    otherwise make a run look cheaper than it was.
+    """
+    if not totals:
+        return "not recorded"
+    calls = totals.get("calls", 0)
+    priced = totals.get("priced_calls", 0)
+    priced_note = f" ({priced}/{calls} priced)" if priced != calls else ""
+    return (
+        f"${totals.get('cost_usd', 0):.4f}{priced_note} · "
+        f"{totals.get('input_tokens', 0):,} in / {totals.get('output_tokens', 0):,} out · "
+        f"{calls} calls"
+    )
 
 
 def _run_stage_in_worktree(
@@ -55,6 +78,7 @@ def _run_stage_in_worktree(
     request: str,
     context: SelectedContext,
     completed_snapshot: list[StageResult],
+    recorder: telemetry.RunRecorder | None = None,
 ) -> tuple[StageResult, Path | None, str | None]:
     """Runs entirely inside a worker thread — touches nothing shared: its
     own worktree, its own git.Repo instance. Never merges or removes the
@@ -78,7 +102,15 @@ def _run_stage_in_worktree(
     console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
 
     description = scheduler.build_stage_description(request, completed_snapshot)
-    result = scheduler.run_task(worktree_path, task.agent, description, context.context_paths(), context.render())
+    result = scheduler.run_task(
+        worktree_path,
+        task.agent,
+        description,
+        context.context_paths(),
+        context.render(),
+        recorder=recorder,
+        stage_id=task.id,
+    )
 
     worktree_repo = git.Repo(worktree_path)
     changed = git_ops.commit_all(worktree_repo, f"{task.id}: {result.summary or request}")
@@ -101,7 +133,7 @@ def _run_stage_in_worktree(
     return StageResult(task=task, status=status, result=result, files_changed=changed), worktree_path, task_branch
 
 
-def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
+def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | None = None) -> RunReport:
     repo = git.Repo(repo_root)
     if not dry_run:
         git_ops.ensure_clean_worktree(repo)
@@ -117,6 +149,29 @@ def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
     context = context_manager.select_context(request)
     console.print(f"[bold]Context selected:[/bold] {len(context.context_paths())} files")
 
+    # Created before the decomposer call, which is itself a billable provider
+    # call — starting the recorder any later would understate every run. The
+    # config snapshot and engine commit are captured now because neither can
+    # be reconstructed from a past row: they're what makes runs comparable
+    # across engine versions and across config changes.
+    recorder = None
+    if not dry_run:
+        recorder = telemetry.RunRecorder(
+            repo_root,
+            request,
+            session_id=session_id,
+            engine_commit=git_ops.current_commit(repo),
+            metadata={
+                "use_graph": context_manager.config.use_graph,
+                "use_vector_db": context_manager.config.use_vector_db,
+                "use_git_diff": context_manager.config.use_git_diff,
+                "use_memory": context_manager.config.use_memory,
+                "max_files": context_manager.config.max_files,
+                "decompose": workflow.decompose,
+                "max_parallel": workflow.max_parallel,
+            },
+        )
+
     if workflow.decompose:
         known_ids = [t.id for t in workflow.tasks]
         decomposer_result = scheduler.run_task(
@@ -125,6 +180,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
             decomposer.build_description(request, known_ids),
             context.context_paths(),
             context.render(),
+            recorder=recorder,
         )
         chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
         if chosen is None:
@@ -189,7 +245,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
                 del remaining[task_id]
                 snapshot = list(completed)
                 future = executor.submit(
-                    _run_stage_in_worktree, repo_root, branch, task, request, context, snapshot
+                    _run_stage_in_worktree, repo_root, branch, task, request, context, snapshot, recorder
                 )
                 in_flight[future] = task
 
@@ -243,7 +299,9 @@ def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
         console.print(test_result.output)
 
     diff = git_ops.diff_since(repo, base_sha)
-    review_result = scheduler.run_task(repo_root, "reviewer", review.build_description(request, diff))
+    review_result = scheduler.run_task(
+        repo_root, "reviewer", review.build_description(request, diff), recorder=recorder
+    )
     review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
     review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
     console.print(f"[bold]Review:[/bold] {review_label}")
@@ -252,6 +310,13 @@ def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
 
     overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
     summary = "done" if overall_ok else "needs attention"
+
+    totals: dict = {}
+    if recorder is not None:
+        recorder.finish(branch=branch, summary=summary)
+        totals = telemetry.run_totals(repo_root, recorder.run_id)
+        console.print(f"[bold]Cost:[/bold] {format_totals(totals)}")
+
     console.print(f"[bold]Summary:[/bold] {summary}")
 
     return RunReport(
@@ -263,4 +328,5 @@ def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
         review_passed=review_passed,
         review_summary=review_result.summary,
         summary=summary,
+        totals=totals,
     )

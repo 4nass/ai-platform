@@ -1,0 +1,221 @@
+"""The engine's analytical memory: what every run and every provider call cost.
+
+This is deliberately not a log. The schema exists to answer questions about
+the engine's own behavior — which provider is cheapest for a kind of task,
+which model succeeds most often, what the graph actually saves, why a model
+was chosen, and which change to the engine improved things. Columns that only
+later steps will populate (`routing_reason`, `context_reason`) are here from
+the start because a decision can be recorded as it happens or not at all;
+it can never be reconstructed afterwards.
+
+SQLite via the stdlib — no server, no new dependency. Writes open a
+short-lived connection each time rather than sharing one: the DAG stages run
+in worker threads (see core.orchestrator.supervisor), and a sqlite3
+connection is not safe to share across them. WAL plus a busy timeout makes
+concurrent writers a non-issue at this volume.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+from providers.base import ProviderResult
+
+DB_PATH = Path("telemetry.sqlite")
+BUSY_TIMEOUT_SECONDS = 10.0
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY,
+  session_id    TEXT,
+  request       TEXT,
+  branch        TEXT,
+  summary       TEXT,
+  engine_commit TEXT,
+  started_at    TEXT,
+  finished_at   TEXT,
+  duration_ms   INTEGER,
+  metadata      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calls (
+  id INTEGER PRIMARY KEY,
+  run_id   INTEGER REFERENCES runs(id),
+  stage_id TEXT,
+  agent    TEXT,
+  provider TEXT,
+  model    TEXT,
+  success  INTEGER,
+  input_tokens          INTEGER,
+  output_tokens         INTEGER,
+  cache_read_tokens     INTEGER,
+  cache_creation_tokens INTEGER,
+  cost_usd  REAL,
+  started_at TEXT,
+  finished_at TEXT,
+  duration_ms INTEGER,
+  provider_duration_ms INTEGER,
+  context_files INTEGER,
+  context_chars INTEGER,
+  routing_reason TEXT,
+  context_reason TEXT,
+  metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_calls_run    ON calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_calls_agent  ON calls(agent, provider);
+CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
+"""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@contextmanager
+def connect(repo_root: Path):
+    """Opens the telemetry DB, creating it and its schema on first use."""
+    path = repo_root / DB_PATH
+    con = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
+    try:
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA journal_mode=WAL")
+        con.executescript(SCHEMA)
+        yield con
+        con.commit()
+    finally:
+        con.close()
+
+
+class RunRecorder:
+    """Records one run and every provider call it makes.
+
+    Always bind this to the MAIN repo root, never to a task worktree: DAG
+    stages run against a throwaway worktree that gets deleted when the stage
+    finishes, and the telemetry has to outlive it.
+    """
+
+    def __init__(
+        self,
+        repo_root: Path,
+        request: str,
+        *,
+        session_id: str | None = None,
+        engine_commit: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        self.repo_root = repo_root
+        self._started_at = _now()
+        with connect(repo_root) as con:
+            cursor = con.execute(
+                "INSERT INTO runs(session_id, request, engine_commit, started_at, metadata) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (session_id, request, engine_commit, self._started_at, json.dumps(metadata or {})),
+            )
+            self.run_id = cursor.lastrowid
+
+    def record_call(
+        self,
+        *,
+        agent: str,
+        provider: str,
+        result: ProviderResult,
+        stage_id: str | None = None,
+        context_files: int = 0,
+        context_chars: int = 0,
+        duration_ms: int | None = None,
+        started_at: str | None = None,
+        routing_reason: str = "",
+        context_reason: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        usage = result.usage
+        with connect(self.repo_root) as con:
+            con.execute(
+                "INSERT INTO calls("
+                " run_id, stage_id, agent, provider, model, success,"
+                " input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,"
+                " cost_usd, started_at, finished_at, duration_ms, provider_duration_ms,"
+                " context_files, context_chars, routing_reason, context_reason, metadata"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    self.run_id,
+                    stage_id,
+                    agent,
+                    provider,
+                    usage.model if usage else "",
+                    1 if result.success else 0,
+                    usage.input_tokens if usage else 0,
+                    usage.output_tokens if usage else 0,
+                    usage.cache_read_tokens if usage else 0,
+                    usage.cache_creation_tokens if usage else 0,
+                    usage.cost_usd if usage else None,
+                    started_at,
+                    _now(),
+                    duration_ms,
+                    usage.provider_duration_ms if usage else None,
+                    context_files,
+                    context_chars,
+                    routing_reason,
+                    context_reason,
+                    json.dumps(metadata or {}),
+                ),
+            )
+
+    def finish(self, *, branch: str = "", summary: str = "") -> None:
+        finished_at = _now()
+        started = datetime.fromisoformat(self._started_at)
+        duration_ms = int((datetime.fromisoformat(finished_at) - started).total_seconds() * 1000)
+        with connect(self.repo_root) as con:
+            con.execute(
+                "UPDATE runs SET branch = ?, summary = ?, finished_at = ?, duration_ms = ? WHERE id = ?",
+                (branch, summary, finished_at, duration_ms, self.run_id),
+            )
+
+
+def run_totals(repo_root: Path, run_id: int) -> dict:
+    """Aggregate cost/tokens for one run — what the CLI prints at the end.
+
+    `priced_calls` is reported alongside `calls` on purpose: a provider that
+    reports no cost (anthropic_api) must not make a run look cheaper than it
+    was, so the caller can tell "$0.42 across 8 calls" from "$0.42 across the
+    3 of 8 calls that reported a price".
+    """
+    with connect(repo_root) as con:
+        row = con.execute(
+            "SELECT COUNT(*) AS calls, COUNT(cost_usd) AS priced_calls,"
+            " COALESCE(SUM(cost_usd), 0) AS cost_usd,"
+            " COALESCE(SUM(input_tokens), 0) AS input_tokens,"
+            " COALESCE(SUM(output_tokens), 0) AS output_tokens,"
+            " COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,"
+            " COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens"
+            " FROM calls WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return dict(row)
+
+
+def recent_runs(repo_root: Path, *, limit: int = 20, session_id: str | None = None) -> list[dict]:
+    """Recent runs with their rolled-up call totals, newest first."""
+    query = (
+        "SELECT r.id, r.session_id, r.request, r.branch, r.summary, r.started_at,"
+        " r.duration_ms, r.engine_commit,"
+        " COUNT(c.id) AS calls, COUNT(c.cost_usd) AS priced_calls,"
+        " COALESCE(SUM(c.cost_usd), 0) AS cost_usd,"
+        " COALESCE(SUM(c.input_tokens), 0) AS input_tokens,"
+        " COALESCE(SUM(c.output_tokens), 0) AS output_tokens"
+        " FROM runs r LEFT JOIN calls c ON c.run_id = r.id"
+    )
+    params: list[object] = []
+    if session_id is not None:
+        query += " WHERE r.session_id = ?"
+        params.append(session_id)
+    query += " GROUP BY r.id ORDER BY r.id DESC LIMIT ?"
+    params.append(limit)
+
+    with connect(repo_root) as con:
+        return [dict(row) for row in con.execute(query, params)]

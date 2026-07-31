@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -218,3 +219,95 @@ def test_run_missing_binary_on_main_command(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert result.success is False
     assert "not found in PATH" in result.summary
+
+
+# --- usage parsing ---
+
+# Trimmed from a real `claude -p --output-format json` response captured
+# against the authenticated CLI, so the field names are the CLI's, not ours.
+REAL_PAYLOAD = """{
+  "is_error": false,
+  "result": "done",
+  "duration_ms": 3444,
+  "duration_api_ms": 2290,
+  "total_cost_usd": 0.0614727,
+  "usage": {
+    "input_tokens": 2,
+    "output_tokens": 4,
+    "cache_creation_input_tokens": 9255,
+    "cache_read_input_tokens": 19589
+  },
+  "modelUsage": {"claude-sonnet-5": {"costUSD": 0.0614727}}
+}"""
+
+
+def test_parse_usage_from_a_real_payload() -> None:
+    usage = adapter._parse_usage(json.loads(REAL_PAYLOAD))
+
+    assert usage is not None
+    assert usage.model == "claude-sonnet-5"
+    assert usage.input_tokens == 2
+    assert usage.output_tokens == 4
+    assert usage.cache_creation_tokens == 9255
+    assert usage.cache_read_tokens == 19589
+    assert usage.cost_usd == pytest.approx(0.0614727)
+    assert usage.provider_duration_ms == 3444
+
+
+def test_run_attaches_usage_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        adapter.subprocess,
+        "run",
+        _mock_run_sequence(
+            _completed(["claude", "auth"], 0, '{"loggedIn": true}'),
+            _completed(["claude", "-p"], 0, REAL_PAYLOAD),
+        ),
+    )
+
+    result = adapter.run(_task())
+
+    assert result.usage is not None
+    assert result.usage.cost_usd == pytest.approx(0.0614727)
+
+
+def test_run_attaches_usage_on_failure_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed call still burned tokens — dropping its usage would understate
+    what the run actually cost."""
+    payload = '{"is_error": true, "result": "refused", "usage": {"input_tokens": 40}, "total_cost_usd": 0.01}'
+    monkeypatch.setattr(
+        adapter.subprocess,
+        "run",
+        _mock_run_sequence(
+            _completed(["claude", "auth"], 0, '{"loggedIn": true}'),
+            _completed(["claude", "-p"], 0, payload),
+        ),
+    )
+
+    result = adapter.run(_task())
+
+    assert result.success is False
+    assert result.usage is not None
+    assert result.usage.input_tokens == 40
+    assert result.usage.cost_usd == pytest.approx(0.01)
+
+
+def test_parse_usage_degrades_to_zeros_on_unexpected_shape() -> None:
+    """The CLI's output shape is not a contract we control — a change in it
+    must not be the thing that breaks a run."""
+    usage = adapter._parse_usage({"usage": "not a dict", "total_cost_usd": "free", "modelUsage": []})
+
+    assert usage is not None
+    assert usage.input_tokens == 0
+    assert usage.cost_usd is None
+    assert usage.model == ""
+
+
+def test_parse_usage_returns_none_for_non_dict() -> None:
+    assert adapter._parse_usage(None) is None
+
+
+def test_parse_usage_records_every_model_when_a_call_spans_several() -> None:
+    usage = adapter._parse_usage({"modelUsage": {"claude-opus-5": {}, "claude-sonnet-5": {}}})
+
+    assert usage is not None
+    assert usage.model == "claude-opus-5, claude-sonnet-5"

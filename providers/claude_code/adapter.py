@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from providers.base import AgentTask, ProviderResult, load_role_prompt
+from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt
 
 TIMEOUT_SECONDS = 900
 DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash(uv run pytest*)"
@@ -43,6 +43,43 @@ def _build_prompt(task: AgentTask) -> str:
         return task.description
     listing = "\n".join(f"- {p}" for p in task.context_paths)
     return f"{task.description}\n\nLikely relevant context files (read them yourself if needed):\n{listing}"
+
+
+def _as_int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _parse_usage(data: dict | None) -> TokenUsage | None:
+    """Maps the CLI's JSON into the shared TokenUsage shape.
+
+    Every field is read defensively: the payload carries usage even on the
+    error path (verified against a real 401), but this must never be the
+    thing that breaks a run if the CLI's output shape changes.
+    """
+    if not isinstance(data, dict):
+        return None
+
+    usage = data.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+
+    # `modelUsage` is keyed by model name. More than one key means the call
+    # spanned models (e.g. a fallback); record them all rather than silently
+    # attributing the whole cost to whichever happened to come first.
+    model_usage = data.get("modelUsage")
+    models = sorted(model_usage) if isinstance(model_usage, dict) else []
+
+    cost = data.get("total_cost_usd")
+    duration = data.get("duration_ms")
+
+    return TokenUsage(
+        model=", ".join(models),
+        input_tokens=_as_int(usage.get("input_tokens")),
+        output_tokens=_as_int(usage.get("output_tokens")),
+        cache_read_tokens=_as_int(usage.get("cache_read_input_tokens")),
+        cache_creation_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+        cost_usd=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+        provider_duration_ms=duration if isinstance(duration, int) and not isinstance(duration, bool) else None,
+    )
 
 
 def _check_auth() -> str | None:
@@ -125,12 +162,15 @@ def run(task: AgentTask) -> ProviderResult:
         except json.JSONDecodeError:
             data = None
 
+    # A failed call still consumed tokens and still cost money — attach usage
+    # on the error paths too, or the accounting silently understates spend.
     if proc.returncode != 0:
         if data and data.get("result"):
             return ProviderResult(
                 success=False,
                 summary=f"claude CLI (code {proc.returncode}): {data['result']}",
                 raw=data,
+                usage=_parse_usage(data),
             )
         return ProviderResult(
             success=False,
@@ -146,6 +186,11 @@ def run(task: AgentTask) -> ProviderResult:
         )
 
     if data.get("is_error"):
-        return ProviderResult(success=False, summary=data.get("result", "Unknown error"), raw=data)
+        return ProviderResult(
+            success=False,
+            summary=data.get("result", "Unknown error"),
+            raw=data,
+            usage=_parse_usage(data),
+        )
 
-    return ProviderResult(success=True, summary=data.get("result", ""), raw=data)
+    return ProviderResult(success=True, summary=data.get("result", ""), raw=data, usage=_parse_usage(data))

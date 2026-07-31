@@ -28,10 +28,35 @@ class AgentTask:
 
 
 @dataclass
+class TokenUsage:
+    """What one provider call consumed, normalized across providers.
+
+    Each adapter maps its own wire format into this — the orchestrator and
+    core.telemetry never learn a provider's response shape. Every field
+    defaults, so a provider that reports nothing (or whose payload changed
+    shape) yields a usable record instead of breaking a run.
+    """
+
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cost_usd: float | None = None
+    """None means the provider reported no cost — distinct from 0.0, which
+    would claim the call was free. Pricing an unpriced call means hardcoding
+    a rate table that goes stale silently; that belongs at query time."""
+    provider_duration_ms: int | None = None
+    """The provider's own timing, when it reports one. The orchestrator
+    measures wall clock separately; the gap between the two is our overhead."""
+
+
+@dataclass
 class ProviderResult:
     success: bool
     summary: str
     raw: object = None
+    usage: TokenUsage | None = None
 
 
 class Provider(Protocol):

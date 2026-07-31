@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import git
 import pytest
 
 from core.orchestrator import scheduler, supervisor, test_runner
+from core.telemetry import store as telemetry
 from providers.base import AgentTask, ProviderResult
 
 AGENTS_YAML = """architect:
@@ -327,6 +329,74 @@ def _enable_decompose(repo_root: Path) -> None:
     repo = git.Repo(repo_root)
     repo.index.add(["config/workflow.yaml"])
     repo.index.commit("enable decomposition")
+
+
+def test_run_records_telemetry_for_every_provider_call(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2")
+
+    with telemetry.connect(fake_repo) as con:
+        run = con.execute("SELECT * FROM runs").fetchone()
+        agents = [r["agent"] for r in con.execute("SELECT agent FROM calls ORDER BY id")]
+
+    assert run["request"] == "add oauth2"
+    assert run["summary"] == "done"
+    assert run["engine_commit"]  # the engine version that produced these numbers
+    assert json.loads(run["metadata"])["use_graph"] is False  # config snapshot from the fixture
+
+    # 6 DAG stages + the reviewer. No decomposer: the fixture sets decompose: false.
+    assert agents.count("reviewer") == 1
+    assert len(agents) == 7
+    assert report.totals["calls"] == 7
+
+
+def test_run_records_the_decomposer_call_too(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
+    """The decomposer is a billable provider call — leaving it out would
+    understate every decomposed run."""
+    _enable_decompose(fake_repo)
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "decomposer":
+            return ProviderResult(success=True, summary="TASKS: architecture")
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, "add oauth2")
+
+    with telemetry.connect(fake_repo) as con:
+        agents = [r["agent"] for r in con.execute("SELECT agent FROM calls ORDER BY id")]
+
+    assert agents[0] == "decomposer"
+    assert agents == ["decomposer", "architect", "reviewer"]
+
+
+def test_dry_run_records_nothing(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+
+    assert report.totals == {}
+    assert not (fake_repo / "telemetry.sqlite").exists()
+
+
+def test_run_stores_the_session_id(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, "add oauth2", session_id="whatsapp-42")
+
+    with telemetry.connect(fake_repo) as con:
+        assert con.execute("SELECT session_id FROM runs").fetchone()[0] == "whatsapp-42"
 
 
 def test_run_prunes_the_plan_when_decomposer_selects_a_subset(

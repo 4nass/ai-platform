@@ -14,3 +14,8 @@ wheels/
 # Local vector index (generated)
 vector/*
 !vector/.gitkeep
+
+# Engine telemetry (local analytical memory)
+telemetry.sqlite
+telemetry.sqlite-wal
+telemetry.sqlite-shm
