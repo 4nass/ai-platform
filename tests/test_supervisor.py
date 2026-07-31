@@ -352,6 +352,45 @@ def test_run_prunes_the_plan_when_decomposer_selects_a_subset(
     assert report.summary == "done"
 
 
+def test_run_dry_run_invokes_only_the_decomposer_and_skips_the_rest(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _enable_decompose(fake_repo)
+    invoked_agents: list[str] = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        invoked_agents.append(task.agent)
+        if task.agent == "decomposer":
+            return ProviderResult(success=True, summary="Reasoning...\nTASKS: architecture, backend")
+        raise AssertionError(f"dry run should not invoke {task.agent}")
+
+    _patch_provider(monkeypatch, fake_run)
+
+    repo = git.Repo(fake_repo)
+    branch_before = repo.active_branch.name
+
+    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+
+    assert invoked_agents == ["decomposer"]  # no work agent, no reviewer
+    assert report.summary == "dry-run"
+    assert report.stages == []
+    assert report.files_changed == []
+    assert repo.active_branch.name == branch_before  # no hermes/<slug> branch created
+
+
+def test_run_dry_run_without_decomposition_invokes_no_agent_at_all(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    def fake_run(task: AgentTask) -> ProviderResult:
+        raise AssertionError(f"dry run should not invoke {task.agent}")
+
+    _patch_provider(monkeypatch, fake_run)
+
+    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+
+    assert report.summary == "dry-run"
+
+
 def test_run_falls_back_to_the_full_plan_when_decomposition_is_unparseable(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:
