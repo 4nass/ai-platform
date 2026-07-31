@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import git
 import pytest
 
+from core.context import manager as manager_module
 from core.context.manager import ContextManager, SelectedContext, load_config
 
 
@@ -52,6 +52,15 @@ def test_selected_context_render_empty_context_is_empty_string() -> None:
     assert SelectedContext().render() == ""
 
 
+def test_selected_context_render_includes_related_files() -> None:
+    context = SelectedContext(related_files=["core/orchestrator/scheduler.py"])
+
+    rendered = context.render()
+
+    assert "## Related via project graph" in rendered
+    assert "core/orchestrator/scheduler.py" in rendered
+
+
 def test_selected_context_paths_deduplicates_and_sorts() -> None:
     context = SelectedContext(
         chunks=[
@@ -64,14 +73,13 @@ def test_selected_context_paths_deduplicates_and_sorts() -> None:
     assert context.context_paths() == ["a.py", "b.py"]
 
 
-def test_context_manager_warns_but_does_not_fail_on_use_graph(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "context.yaml").write_text("use_graph: true\n", encoding="utf-8")
+def test_selected_context_paths_includes_related_files() -> None:
+    context = SelectedContext(
+        chunks=[{"path": "a.py", "kind": "file", "name": "a.py", "start_line": 1, "end_line": 1, "text": ""}],
+        related_files=["b.py"],
+    )
 
-    with caplog.at_level(logging.WARNING):
-        ContextManager(tmp_path)
-
-    assert "use_graph" in caplog.text
+    assert context.context_paths() == ["a.py", "b.py"]
 
 
 @pytest.fixture
@@ -105,3 +113,38 @@ def test_context_manager_index_and_select(fake_repo: Path) -> None:
 
     assert context.memory_docs == {"architecture.md": "We use a layered architecture."}
     assert any(c["path"] == "auth.py" for c in context.chunks)
+
+
+def test_select_context_expands_with_the_graph_when_enabled(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    (fake_repo / "config" / "context.yaml").write_text(
+        "use_git_diff: true\nuse_graph: true\nuse_vector_db: true\nuse_memory: true\nmax_files: 5\n",
+        encoding="utf-8",
+    )
+    repo = git.Repo(fake_repo)
+    repo.index.add(["config/context.yaml"])
+    repo.index.commit("enable graph")
+
+    monkeypatch.setattr(
+        manager_module.graph_builder,
+        "related_files",
+        lambda graph, seeds, limit: ["extra_related.py"],
+    )
+
+    manager = ContextManager(fake_repo)
+    manager.index_repo()
+    context = manager.select_context("where is authentication handled?")
+
+    assert context.related_files == ["extra_related.py"]
+    assert "extra_related.py" in context.context_paths()
+    assert "## Related via project graph" in context.render()
+
+
+def test_select_context_skips_graph_expansion_when_disabled(fake_repo: Path) -> None:
+    manager = ContextManager(fake_repo)  # fake_repo's config has use_graph: false
+    manager.index_repo()
+
+    context = manager.select_context("where is authentication handled?")
+
+    assert context.related_files == []

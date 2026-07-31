@@ -1,24 +1,25 @@
-"""Context Engineering Layer (v1): vector indexing + git diff + project memory.
+"""Context Engineering Layer (v1): vector indexing + git diff + project memory
++ project knowledge graph (AST imports, git co-changes, doc mentions).
 
-`use_graph` (config/context.yaml) is not implemented in this prototype: no
-networkx code graph. We log a warning rather than pretending it's there.
+Vector search finds chunks that *read* like the request; the graph then
+expands that seed set with what's structurally, historically, and
+documentarily connected to it (see core/graph/builder.py).
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import git
+import networkx as nx
 import yaml
 
 from core.context.chunking import chunk_repo
 from core.context.embeddings import embed_query, embed_texts
 from core.context.vector_store import VectorStore
+from core.graph import builder as graph_builder
 from core.memory.loader import load_memory_docs
-
-logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path("config/context.yaml")
 VECTOR_STORAGE_PATH = Path("vector/qdrant_db")
@@ -38,6 +39,10 @@ class SelectedContext:
     chunks: list[dict] = field(default_factory=list)
     git_diff: str = ""
     memory_docs: dict[str, str] = field(default_factory=dict)
+    related_files: list[str] = field(default_factory=list)
+    """Files/docs pulled in via the project graph (imports, co-changes, doc
+    mentions) around the vector-search hits — not semantically similar text,
+    structurally/historically/documentarily connected."""
 
     def render(self) -> str:
         parts: list[str] = []
@@ -54,12 +59,17 @@ class SelectedContext:
                     f"### {chunk['path']} ({chunk['kind']} {chunk['name']}, "
                     f"lines {chunk['start_line']}-{chunk['end_line']})\n```\n{chunk['text']}\n```"
                 )
+        if self.related_files:
+            parts.append("## Related via project graph")
+            parts.append("\n".join(f"- {path}" for path in self.related_files))
         return "\n\n".join(parts)
 
     def context_paths(self) -> list[str]:
-        """Unique, sorted paths of the chunks found — for CLI providers that
-        read the files themselves (no need for the full content)."""
-        return sorted({chunk["path"] for chunk in self.chunks})
+        """Unique, sorted paths of the chunks found plus any graph-related
+        files — for CLI providers that read the files themselves (no need
+        for the full content)."""
+        chunk_paths = {chunk["path"] for chunk in self.chunks}
+        return sorted(chunk_paths | set(self.related_files))
 
 
 def load_config(repo_root: Path) -> ContextConfig:
@@ -73,10 +83,12 @@ class ContextManager:
         self.repo_root = repo_root
         self.config = load_config(repo_root)
         self._store: VectorStore | None = None
-        if self.config.use_graph:
-            logger.warning("use_graph=true in config/context.yaml but the code graph is not implemented in v1: ignored.")
+        self._graph: nx.MultiDiGraph | None = None
 
     def index_repo(self) -> int:
+        if self.config.use_graph:
+            self._graph = graph_builder.load_or_build(self.repo_root)
+
         if not self.config.use_vector_db:
             return 0
         chunks = chunk_repo(self.repo_root)
@@ -100,6 +112,10 @@ class ContextManager:
 
         if self.config.use_memory:
             context.memory_docs = load_memory_docs(self.repo_root)
+
+        if self.config.use_graph and self._graph is not None:
+            seeds = context.context_paths()
+            context.related_files = graph_builder.related_files(self._graph, seeds, limit=self.config.max_files)
 
         return context
 
