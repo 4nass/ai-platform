@@ -1,0 +1,24 @@
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+
+  - id: backend
+    agent: backend
+    depends_on: [architecture]
+
+  - id: frontend
+    agent: frontend
+    depends_on: [architecture]
+
+  - id: tests
+    agent: tests
+    depends_on: [backend, frontend]
+
+  - id: security
+    agent: security
+    depends_on: [tests]
+
+  - id: documentation
+    agent: documentation
+    depends_on: [security]

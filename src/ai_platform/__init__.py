@@ -17,24 +17,23 @@ from rich.console import Console  # noqa: E402
 
 console = Console()
 
-app = typer.Typer(help="ai-platform — prototype 1: request -> RAG context -> agent -> verified modification.")
+app = typer.Typer(help="ai-platform — request -> RAG context -> task DAG -> verified modification.")
 
 
 @app.callback()
 def callback() -> None:
-    """ai-platform — prototype 1: request -> RAG context -> agent -> verified modification."""
+    """ai-platform — request -> RAG context -> task DAG -> verified modification."""
 
 
 @app.command()
 def run(
     request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
-    agent: str = typer.Option("backend", help="Agent role to use (see config/agents.yaml)."),
 ) -> None:
-    """Indexes the repo, selects relevant context, drives the provider, applies and verifies the result."""
+    """Indexes the repo, selects relevant context, and runs the workflow DAG (see config/workflow.yaml)."""
     from core.orchestrator import supervisor
 
     try:
-        report = supervisor.run(REPO_ROOT, request, agent)
+        report = supervisor.run(REPO_ROOT, request)
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)

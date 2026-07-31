@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from core.context.manager import SelectedContext
 from core.errors import ConfigError
 from core.orchestrator import scheduler
 from core.orchestrator.planner import Task
+from core.orchestrator.scheduler import StageResult
 from providers.base import AgentTask, ProviderResult
 
 AGENTS_YAML = """backend:
@@ -68,13 +68,46 @@ def test_run_task_dispatches_to_the_resolved_provider(monkeypatch: pytest.Monkey
     assert captured["task"].context_paths == ["a.py"]
 
 
-def test_execute_uses_the_first_task_and_the_given_context(
-    monkeypatch: pytest.MonkeyPatch, repo_root: Path
-) -> None:
-    captured: dict = {}
-    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+def test_build_stage_description_with_no_upstream_returns_the_request() -> None:
+    assert scheduler.build_stage_description("add oauth2", []) == "add oauth2"
 
-    context = SelectedContext()
-    result = scheduler.execute(repo_root, [Task(request="hello")], context, "backend")
 
-    assert result.summary == "hello"
+def test_build_stage_description_ignores_non_done_stages() -> None:
+    architecture = Task(id="architecture", agent="architect", depends_on=[])
+    upstream = [StageResult(task=architecture, status="skipped")]
+
+    assert scheduler.build_stage_description("add oauth2", upstream) == "add oauth2"
+
+
+def test_build_stage_description_includes_summary_and_files_of_done_stages() -> None:
+    architecture = Task(id="architecture", agent="architect", depends_on=[])
+    upstream = [
+        StageResult(
+            task=architecture,
+            status="done",
+            result=ProviderResult(success=True, summary="Wrote the ADR."),
+            files_changed=["memory/adr/ADR-001-oauth.md"],
+        )
+    ]
+
+    description = scheduler.build_stage_description("add oauth2", upstream)
+
+    assert "add oauth2" in description
+    assert "architecture (architect): Wrote the ADR." in description
+    assert "memory/adr/ADR-001-oauth.md" in description
+
+
+def test_build_stage_description_reports_no_files_changed_for_report_only_stages() -> None:
+    security = Task(id="security", agent="security", depends_on=[])
+    upstream = [
+        StageResult(
+            task=security,
+            status="done",
+            result=ProviderResult(success=True, summary="No issues found."),
+            files_changed=[],
+        )
+    ]
+
+    description = scheduler.build_stage_description("add oauth2", upstream)
+
+    assert "no files changed" in description

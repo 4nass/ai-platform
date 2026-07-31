@@ -1,15 +1,19 @@
-"""Scheduler (v1): synchronous execution of the single task via a provider.
+"""Scheduler: resolves each task's provider and dispatches its run.
 
-No parallelism yet — that's reserved for the full version.
+Still sequential — the DAG's `depends_on` only decides *ordering*
+(supervisor.py walks the plan and skips a task if a dependency didn't
+succeed). Real concurrent execution needs per-task git worktrees and is a
+later phase.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
-from core.context.manager import SelectedContext
 from core.errors import ConfigError
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
@@ -26,6 +30,14 @@ PROVIDERS = {
     "anthropic_api": anthropic_api,
     "openai_api": openai_api,
 }
+
+
+@dataclass
+class StageResult:
+    task: Task
+    status: Literal["done", "failed", "skipped"]
+    result: ProviderResult | None = None
+    files_changed: list[str] = field(default_factory=list)
 
 
 def resolve_provider(repo_root: Path, agent: str) -> str:
@@ -68,6 +80,18 @@ def run_task(
     return provider.run(agent_task)
 
 
-def execute(repo_root: Path, tasks: list[Task], context: SelectedContext, agent: str) -> ProviderResult:
-    task = tasks[0]
-    return run_task(repo_root, agent, task.request, context.context_paths(), context.render())
+def build_stage_description(request: str, upstream: list[StageResult]) -> str:
+    """The request plus a recap of what earlier stages in the workflow
+    already produced — the only way stages communicate (no direct agent-to-
+    agent calls). A stage with no files changed (e.g. security, which never
+    edits — see prompts/security.md) still contributes its summary text."""
+    completed = [stage for stage in upstream if stage.status == "done"]
+    if not completed:
+        return request
+
+    lines = [request, "", "Upstream artifacts from earlier stages in this workflow:"]
+    for stage in completed:
+        summary = stage.result.summary if stage.result else ""
+        files = ", ".join(stage.files_changed) if stage.files_changed else "no files changed"
+        lines.append(f"- {stage.task.id} ({stage.task.agent}): {summary}\n  files: {files}")
+    return "\n".join(lines)
