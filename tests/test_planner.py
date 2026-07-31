@@ -144,3 +144,48 @@ tasks:
     result = plan(repo_root)
 
     assert result == Plan(tasks=[Task(id="architecture", agent="architect", depends_on=[])])
+
+
+def test_plan_uses_default_max_parallel_when_absent(tmp_path: Path) -> None:
+    repo_root = _write_workflow(
+        tmp_path,
+        """
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+""",
+    )
+
+    assert plan(repo_root).max_parallel == 2
+
+
+def test_plan_reads_max_parallel_override(tmp_path: Path) -> None:
+    repo_root = _write_workflow(
+        tmp_path,
+        """
+max_parallel: 4
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+""",
+    )
+
+    assert plan(repo_root).max_parallel == 4
+
+
+def test_plan_rejects_non_positive_max_parallel(tmp_path: Path) -> None:
+    repo_root = _write_workflow(
+        tmp_path,
+        """
+max_parallel: 0
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+""",
+    )
+
+    with pytest.raises(ConfigError, match="max_parallel"):
+        plan(repo_root)

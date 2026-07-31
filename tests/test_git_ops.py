@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import git
@@ -10,10 +11,14 @@ import pytest
 from core.orchestrator.git_ops import (
     commit_all,
     create_branch,
+    create_worktree,
     current_commit,
     diff_since,
     ensure_clean_worktree,
     format_changed_files,
+    merge_worktree,
+    prune_worktrees,
+    remove_worktree,
 )
 
 
@@ -96,3 +101,73 @@ def test_format_changed_files_single() -> None:
 
 def test_format_changed_files_multiple() -> None:
     assert format_changed_files(["a.py", "b.py"]) == "2 files changed: a.py, b.py"
+
+
+def test_create_worktree_checks_out_a_new_branch_from_base(repo: git.Repo) -> None:
+    base_branch = create_branch(repo, "Add feature")
+
+    worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
+
+    assert task_branch == "hermes-task/add-feature-backend"
+    assert worktree_path.is_dir()
+    worktree_repo = git.Repo(worktree_path)
+    assert worktree_repo.active_branch.name == task_branch
+    assert worktree_repo.head.commit.hexsha == repo.head.commit.hexsha
+
+
+def test_create_worktree_sees_files_committed_on_the_base_branch(repo: git.Repo) -> None:
+    base_branch = create_branch(repo, "Add feature")
+    Path(repo.working_tree_dir, "architecture.md").write_text("plan\n", encoding="utf-8")
+    commit_all(repo, "architecture done")
+
+    worktree_path, _ = create_worktree(repo, base_branch, "backend")
+
+    assert (worktree_path / "architecture.md").is_file()
+
+
+def test_merge_worktree_merges_changes_back(repo: git.Repo) -> None:
+    base_branch = create_branch(repo, "Add feature")
+    worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
+    Path(worktree_path, "backend.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(git.Repo(worktree_path), "backend done")
+
+    merged = merge_worktree(repo, task_branch)
+
+    assert merged is True
+    assert Path(repo.working_tree_dir, "backend.py").is_file()
+
+
+def test_merge_worktree_returns_false_on_conflict_and_aborts_cleanly(repo: git.Repo) -> None:
+    base_branch = create_branch(repo, "Add feature")
+    worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
+
+    # main and the worktree branch each change the same file differently
+    Path(repo.working_tree_dir, "README.md").write_text("main change\n", encoding="utf-8")
+    commit_all(repo, "main changes readme")
+    Path(worktree_path, "README.md").write_text("worktree change\n", encoding="utf-8")
+    commit_all(git.Repo(worktree_path), "worktree changes readme")
+
+    merged = merge_worktree(repo, task_branch)
+
+    assert merged is False
+    assert not repo.is_dirty(untracked_files=True)  # `merge --abort` left it clean
+
+
+def test_remove_worktree_removes_the_directory(repo: git.Repo) -> None:
+    base_branch = create_branch(repo, "Add feature")
+    worktree_path, _ = create_worktree(repo, base_branch, "backend")
+
+    remove_worktree(repo, worktree_path)
+
+    assert not worktree_path.exists()
+
+
+def test_prune_worktrees_cleans_up_stale_registration(repo: git.Repo) -> None:
+    base_branch = create_branch(repo, "Add feature")
+    worktree_path, _ = create_worktree(repo, base_branch, "backend")
+    shutil.rmtree(worktree_path)  # simulate a crashed run that left the directory gone
+
+    prune_worktrees(repo)
+
+    listing = repo.git.worktree("list")
+    assert str(worktree_path) not in listing

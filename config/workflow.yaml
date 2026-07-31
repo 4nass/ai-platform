@@ -1,3 +1,5 @@
+max_parallel: 2
+
 tasks:
   - id: architecture
     agent: architect

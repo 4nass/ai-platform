@@ -1,20 +1,18 @@
-"""Supervisor: walks the task DAG and prints a staged report.
+"""Supervisor: runs the task DAG concurrently and prints a staged report.
 
-The branch must be created BEFORE any task's provider runs: a CLI provider
-(claude_code) edits files directly on disk while it runs, so branch
-isolation only makes sense if it happens before the first call.
-
-Each stage is committed right after it runs — success or failure — not just
-the successful ones: a failed stage can still have partially edited files on
-disk (the CLI can write before it errors out), and leaving those uncommitted
-would let them bleed into a sibling stage's commit (e.g. `backend` fails
-mid-edit, `frontend` — which only depends on `architecture`, not `backend` —
-still runs next and would otherwise sweep up backend's stray edits via
-`git add -A`).
+Each task runs in its own git worktree (core.orchestrator.git_ops), so
+independent tasks (e.g. backend/frontend, both only depending on
+architecture) can run at the same time without the claude_code provider's
+concurrent CLI processes colliding on the same working tree. Only the merge
+of a finished task's worktree branch back into the shared run branch
+(hermes/<slug>) is serialized on the main thread — that's cheap; the
+expensive part (the actual provider call) runs concurrently, up to
+`Plan.max_parallel` tasks at once.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,7 +22,7 @@ from rich.console import Console
 from core.context.manager import ContextManager, SelectedContext
 from core.orchestrator import contracts, git_ops, planner, review, scheduler, test_runner
 from core.orchestrator.scheduler import StageResult
-from providers.base import display_name
+from providers.base import ProviderResult, display_name
 
 console = Console()
 
@@ -33,7 +31,7 @@ console = Console()
 class StageReport:
     id: str
     agent: str
-    status: str  # "done" | "failed" | "skipped" | "violated"
+    status: str  # "done" | "failed" | "skipped" | "violated" | "conflict"
     summary: str
     files_changed: list[str] = field(default_factory=list)
 
@@ -50,23 +48,42 @@ class RunReport:
     summary: str
 
 
-def _run_stage(
-    repo: git.Repo,
+def _run_stage_in_worktree(
     repo_root: Path,
+    branch: str,
     task: planner.Task,
     request: str,
     context: SelectedContext,
-    completed: list[StageResult],
-) -> StageResult:
+    completed_snapshot: list[StageResult],
+) -> tuple[StageResult, Path | None, str | None]:
+    """Runs entirely inside a worker thread — touches nothing shared: its
+    own worktree, its own git.Repo instance. Never merges or removes the
+    worktree itself; that happens back on the main thread, serialized, once
+    this returns.
+
+    `completed_snapshot` is a copy of the stages finished so far, taken at
+    dispatch time — not a live reference. Two siblings dispatched together
+    correctly only see the same (smaller) upstream set, since neither knows
+    about the other's still-in-progress work; and it avoids a data race
+    with the main thread, which keeps appending to the real list while
+    other tasks are still in flight.
+    """
+    try:
+        worktree_path, task_branch = git_ops.create_worktree(git.Repo(repo_root), branch, task.id)
+    except git.GitCommandError as exc:
+        failure = ProviderResult(success=False, summary=f"worktree setup failed: {exc}")
+        return StageResult(task=task, status="failed", result=failure), None, None
+
     provider_name = scheduler.resolve_provider(repo_root, task.agent)
     console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
 
-    description = scheduler.build_stage_description(request, completed)
-    result = scheduler.run_task(repo_root, task.agent, description, context.context_paths(), context.render())
+    description = scheduler.build_stage_description(request, completed_snapshot)
+    result = scheduler.run_task(worktree_path, task.agent, description, context.context_paths(), context.render())
+
+    worktree_repo = git.Repo(worktree_path)
+    changed = git_ops.commit_all(worktree_repo, f"{task.id}: {result.summary or request}")
 
     status = "done" if result.success else "failed"
-    changed = git_ops.commit_all(repo, f"{task.id}: {result.summary or request}")
-
     bad_files: list[str] = []
     if result.success:
         bad_files = contracts.violations(task.agent, changed)
@@ -80,20 +97,19 @@ def _run_stage(
             f"[bold red]{task.id} violated its contract[/bold red]: touched "
             f"{', '.join(bad_files)} — outside its declared scope"
         )
-    else:
-        console.print(f"[bold]{task.id}[/bold]: {git_ops.format_changed_files(changed)}")
 
-    return StageResult(task=task, status=status, result=result, files_changed=changed)
+    return StageResult(task=task, status=status, result=result, files_changed=changed), worktree_path, task_branch
 
 
 def run(repo_root: Path, request: str) -> RunReport:
     repo = git.Repo(repo_root)
     git_ops.ensure_clean_worktree(repo)
+    git_ops.prune_worktrees(repo)
 
     console.rule("Hermes")
 
     workflow = planner.plan(repo_root)
-    console.print(f"[bold]Plan generated[/bold]: {len(workflow.tasks)} tasks")
+    console.print(f"[bold]Plan generated[/bold]: {len(workflow.tasks)} tasks (up to {workflow.max_parallel} in parallel)")
 
     context_manager = ContextManager(repo_root)
     context_manager.index_repo()
@@ -103,32 +119,84 @@ def run(repo_root: Path, request: str) -> RunReport:
     base_sha = git_ops.current_commit(repo)
     branch = git_ops.create_branch(repo, request)
 
+    remaining = {t.id: t for t in workflow.tasks}
     completed: list[StageResult] = []
     completed_ids: set[str] = set()
+    blocked_ids: set[str] = set()
     stage_reports: list[StageReport] = []
     all_files_changed: list[str] = []
 
-    for task in workflow.tasks:
-        missing_deps = [dep for dep in task.depends_on if dep not in completed_ids]
-        if missing_deps:
-            console.print(f"[bold yellow]{task.id}[/bold yellow]: skipped (upstream dependency didn't complete)")
-            stage_reports.append(StageReport(id=task.id, agent=task.agent, status="skipped", summary=""))
-            continue
+    with ThreadPoolExecutor(max_workers=workflow.max_parallel) as executor:
+        in_flight: dict[Future, planner.Task] = {}
 
-        stage_result = _run_stage(repo, repo_root, task, request, context, completed)
-        completed.append(stage_result)
-        stage_reports.append(
-            StageReport(
-                id=task.id,
-                agent=task.agent,
-                status=stage_result.status,
-                summary=stage_result.result.summary if stage_result.result else "",
-                files_changed=stage_result.files_changed,
-            )
-        )
-        if stage_result.status == "done":
-            completed_ids.add(task.id)
-            all_files_changed.extend(stage_result.files_changed)
+        def _dispatch_ready() -> None:
+            for task_id in list(remaining):
+                task = remaining[task_id]
+                pending_deps = [d for d in task.depends_on if d not in completed_ids and d not in blocked_ids]
+                if pending_deps:
+                    continue  # still waiting on something not yet resolved
+
+                blocked_deps = [d for d in task.depends_on if d in blocked_ids]
+                if blocked_deps:
+                    console.print(
+                        f"[bold yellow]{task.id}[/bold yellow]: skipped (upstream dependency didn't complete)"
+                    )
+                    stage_reports.append(StageReport(id=task.id, agent=task.agent, status="skipped", summary=""))
+                    blocked_ids.add(task.id)
+                    del remaining[task_id]
+                    continue
+
+                if len(in_flight) >= workflow.max_parallel:
+                    continue  # ready, but no free worker slot right now -- retried next pass
+
+                del remaining[task_id]
+                snapshot = list(completed)
+                future = executor.submit(
+                    _run_stage_in_worktree, repo_root, branch, task, request, context, snapshot
+                )
+                in_flight[future] = task
+
+        _dispatch_ready()
+        while in_flight:
+            done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+            for future in done:
+                task = in_flight.pop(future)
+                stage_result, worktree_path, task_branch = future.result()
+
+                if stage_result.status == "done":
+                    merged = git_ops.merge_worktree(repo, task_branch)
+                    if merged:
+                        git_ops.remove_worktree(repo, worktree_path)
+                        repo.git.branch("-D", task_branch)
+                        console.print(
+                            f"[bold]{task.id}[/bold]: {git_ops.format_changed_files(stage_result.files_changed)}"
+                        )
+                        completed.append(stage_result)
+                        completed_ids.add(task.id)
+                        all_files_changed.extend(stage_result.files_changed)
+                    else:
+                        stage_result.status = "conflict"
+                        blocked_ids.add(task.id)
+                        console.print(
+                            f"[bold red]{task.id}: merge conflict[/bold red] — resolve manually in "
+                            f"{worktree_path} (branch {task_branch})"
+                        )
+                else:
+                    blocked_ids.add(task.id)
+                    if worktree_path is not None:
+                        git_ops.remove_worktree(repo, worktree_path)
+
+                stage_reports.append(
+                    StageReport(
+                        id=task.id,
+                        agent=task.agent,
+                        status=stage_result.status,
+                        summary=stage_result.result.summary if stage_result.result else "",
+                        files_changed=stage_result.files_changed,
+                    )
+                )
+
+            _dispatch_ready()
 
     any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 

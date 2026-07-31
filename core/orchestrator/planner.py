@@ -17,6 +17,7 @@ import yaml
 from core.errors import ConfigError
 
 WORKFLOW_CONFIG_PATH = Path("config/workflow.yaml")
+DEFAULT_MAX_PARALLEL = 2
 
 
 @dataclass
@@ -29,6 +30,7 @@ class Task:
 @dataclass
 class Plan:
     tasks: list[Task]
+    max_parallel: int = DEFAULT_MAX_PARALLEL
 
 
 def _parse_tasks(data: dict) -> list[Task]:
@@ -74,12 +76,25 @@ def _topological_order(tasks: list[Task]) -> list[Task]:
     return ordered
 
 
-def load_workflow(repo_root: Path) -> list[Task]:
+def _read_workflow_data(repo_root: Path) -> dict:
     path = repo_root / WORKFLOW_CONFIG_PATH
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _parse_max_parallel(data: dict) -> int:
+    value = data.get("max_parallel", DEFAULT_MAX_PARALLEL)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ConfigError(f"'max_parallel' must be a positive integer, got: {value!r}")
+    return value
+
+
+def load_workflow(repo_root: Path) -> list[Task]:
+    data = _read_workflow_data(repo_root)
     tasks = _parse_tasks(data)
     return _topological_order(tasks)
 
 
 def plan(repo_root: Path) -> Plan:
-    return Plan(tasks=load_workflow(repo_root))
+    data = _read_workflow_data(repo_root)
+    tasks = _topological_order(_parse_tasks(data))
+    return Plan(tasks=tasks, max_parallel=_parse_max_parallel(data))

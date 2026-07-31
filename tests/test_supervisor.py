@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import git
@@ -26,7 +27,8 @@ reviewer:
   provider: claude_code
 """
 
-WORKFLOW_YAML = """tasks:
+WORKFLOW_YAML = """max_parallel: 2
+tasks:
   - id: architecture
     agent: architect
     depends_on: []
@@ -109,22 +111,55 @@ def _multi_stage_run(verdict: str = "VERDICT: PASS", fail_agents: frozenset[str]
     return fake_run
 
 
-def test_run_executes_all_stages_in_dependency_order(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
+def test_run_executes_all_stages_respecting_dependency_order(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="6 passed")
 
     report = supervisor.run(fake_repo, "add oauth2")
 
-    assert [s.id for s in report.stages] == [
-        "architecture",
-        "backend",
-        "frontend",
-        "tests",
-        "security",
-        "documentation",
-    ]
+    ids = [s.id for s in report.stages]
+    assert ids[0] == "architecture"
+    # backend/frontend run concurrently (both only depend on architecture) --
+    # which finishes first isn't deterministic, only that both land before tests
+    assert set(ids[1:3]) == {"backend", "frontend"}
+    assert ids[3:] == ["tests", "security", "documentation"]
     assert all(s.status == "done" for s in report.stages)
     assert report.summary == "done"
+
+
+def test_run_executes_independent_stages_concurrently(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
+    """Proof of real concurrency has to isolate the two stages' own sleep
+    windows, not total run() wall-clock time -- the latter is dominated by
+    unrelated, highly variable cost (the embeddings model load inside
+    ContextManager.index_repo(), seconds on a cold start vs. near-zero once
+    warm from an earlier test), which would make a total-time assertion
+    flaky regardless of whether the stages actually overlap."""
+    sleep_seconds = 0.3
+    intervals: dict[str, tuple[float, float]] = {}
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent in ("backend", "frontend"):
+            started = time.monotonic()
+            time.sleep(sleep_seconds)
+            intervals[task.agent] = (started, time.monotonic())
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2")
+
+    assert report.summary == "done"
+    backend_start, backend_end = intervals["backend"]
+    frontend_start, frontend_end = intervals["frontend"]
+    # real concurrency: each stage's sleep window starts before the other's ends
+    assert backend_start < frontend_end
+    assert frontend_start < backend_end
 
 
 def test_run_skips_downstream_tasks_when_a_dependency_fails(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
@@ -150,15 +185,19 @@ def test_run_commits_each_stage_separately(monkeypatch: pytest.MonkeyPatch, fake
     supervisor.run(fake_repo, "add oauth2")
 
     repo = git.Repo(fake_repo)
-    messages = [c.message for c in repo.iter_commits(max_count=10)]
+    messages = [c.message for c in repo.iter_commits(max_count=20)]
     assert any("architecture:" in m for m in messages)
     assert any("backend:" in m for m in messages)
     assert any("documentation:" in m for m in messages)
 
 
-def test_run_commits_partial_edits_from_a_failed_stage_so_they_dont_leak_into_the_next_commit(
+def test_run_isolates_a_failed_stages_partial_edits_to_its_own_worktree(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:
+    """Each stage runs in its own git worktree (core.orchestrator.git_ops) --
+    a failed stage's partial edits are committed there and never merged, so
+    they can't leak into a concurrently-running sibling's result."""
+
     def fake_run(task: AgentTask) -> ProviderResult:
         if task.agent == "reviewer":
             return ProviderResult(success=True, summary="VERDICT: PASS")
@@ -176,6 +215,37 @@ def test_run_commits_partial_edits_from_a_failed_stage_so_they_dont_leak_into_th
     by_id = {s.id: s for s in report.stages}
     assert "backend_partial.py" in by_id["backend"].files_changed
     assert "backend_partial.py" not in by_id["frontend"].files_changed
+    # never merged into the run branch -- backend's failure shouldn't taint it
+    assert "backend_partial.py" not in report.files_changed
+
+
+def test_run_marks_conflicting_sibling_as_conflict_and_keeps_its_worktree(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "backend":
+            Path(task.repo_root, "shared.py").write_text("backend version\n", encoding="utf-8")
+            return ProviderResult(success=True, summary="backend done")
+        if task.agent == "frontend":
+            Path(task.repo_root, "shared.py").write_text("frontend version\n", encoding="utf-8")
+            return ProviderResult(success=True, summary="frontend done")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    # both add the same file with different content -- whichever merges
+    # first wins cleanly, the other conflicts. Which one wins the race isn't
+    # deterministic, only that exactly one of each outcome happens.
+    assert {by_id["backend"].status, by_id["frontend"].status} == {"done", "conflict"}
+    assert by_id["tests"].status == "skipped"  # depends on both backend and frontend
+    assert report.summary == "needs attention"
 
 
 def test_run_needs_attention_when_tests_fail(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:

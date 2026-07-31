@@ -1,9 +1,9 @@
 """Scheduler: resolves each task's provider and dispatches its run.
 
-Still sequential — the DAG's `depends_on` only decides *ordering*
-(supervisor.py walks the plan and skips a task if a dependency didn't
-succeed). Real concurrent execution needs per-task git worktrees and is a
-later phase.
+Concurrency itself lives in supervisor.py (per-task git worktrees, a
+ThreadPoolExecutor-driven ready queue) — this module only knows how to run
+one task in whatever `repo_root` it's given (the shared repo, or a task's
+own isolated worktree), and how to build its prompt from upstream artifacts.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ PROVIDERS = {
 @dataclass
 class StageResult:
     task: Task
-    status: Literal["done", "failed", "skipped", "violated"]
+    status: Literal["done", "failed", "skipped", "violated", "conflict"]
     result: ProviderResult | None = None
     files_changed: list[str] = field(default_factory=list)
 

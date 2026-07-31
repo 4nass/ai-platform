@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import tempfile
+from pathlib import Path
 
 import git
 
@@ -44,11 +46,17 @@ def commit_all(repo: git.Repo, summary: str) -> list[str]:
     The provider has already written to disk by this point (providers.base.Provider
     contract): we don't need to know the file list in advance, `git add -A`
     picks up whatever changed, regardless of which provider was used.
+
+    Commits via `repo.git.commit(...)` (shells out to the real `git` binary),
+    not GitPython's `repo.index.commit(...)`: the latter resolves
+    COMMIT_EDITMSG to a path shared across every worktree of a repo, not
+    worktree-local, so concurrent commits from different worktrees (Phase 3)
+    race on that one file. The real `git` binary handles this correctly.
     """
     repo.git.add(A=True)
     changed = [d.a_path or d.b_path for d in repo.index.diff("HEAD")]
     if changed:
-        repo.index.commit(f"hermes: {summary}")
+        repo.git.commit("-m", f"hermes: {summary}")
     return changed
 
 
@@ -63,3 +71,47 @@ def format_changed_files(files: list[str]) -> str:
         return "no files changed"
     count = f"{len(files)} file" if len(files) == 1 else f"{len(files)} files"
     return f"{count} changed: {', '.join(files)}"
+
+
+def prune_worktrees(repo: git.Repo) -> None:
+    """Cleans git's own worktree bookkeeping (e.g. after a crashed previous
+    run left a directory that no longer exists). Called once at the start of
+    a run, before anything else touches worktrees."""
+    repo.git.worktree("prune")
+
+
+def create_worktree(repo: git.Repo, base_branch: str, task_id: str) -> tuple[Path, str]:
+    """Isolated checkout for one task, branched from the current tip of
+    base_branch — so it sees everything merged from earlier stages so far.
+
+    The branch lives in a separate `hermes-task/` namespace, not nested
+    under `hermes/<slug>`: git refs can't have one branch be both a leaf and
+    a directory prefix of another (hermes/<slug>/<task_id> would collide
+    with hermes/<slug> itself).
+    """
+    task_branch = base_branch.replace("hermes/", "hermes-task/", 1) + f"-{task_id}"
+    worktree_path = Path(tempfile.mkdtemp(prefix=f"hermes-{task_id}-"))
+    worktree_path.rmdir()  # `git worktree add` needs to create this path itself
+    repo.git.worktree("add", str(worktree_path), "-b", task_branch, base_branch)
+    return worktree_path, task_branch
+
+
+def merge_worktree(repo: git.Repo, task_branch: str) -> bool:
+    """--no-ff merge of task_branch into the currently checked-out branch.
+
+    Returns False (after a clean `git merge --abort`) on conflict — never
+    attempts automatic resolution.
+    """
+    try:
+        repo.git.merge(task_branch, "--no-ff", "-m", f"hermes: merge {task_branch}")
+        return True
+    except git.GitCommandError:
+        repo.git.merge("--abort")
+        return False
+
+
+def remove_worktree(repo: git.Repo, worktree_path: Path) -> None:
+    """Removes the worktree's directory. The branch/commits it made stay
+    reachable even after the directory is gone, for later inspection, as
+    long as the caller doesn't also delete the branch."""
+    repo.git.worktree("remove", str(worktree_path), "--force")
