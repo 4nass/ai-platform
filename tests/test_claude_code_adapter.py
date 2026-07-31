@@ -12,8 +12,18 @@ from providers.base import AgentTask
 from providers.claude_code import adapter
 
 
-def _task(agent: str = "backend", context_paths: list[str] | None = None) -> AgentTask:
-    return AgentTask(agent=agent, description="do x", repo_root=Path("."), context_paths=context_paths or [])
+def _task(
+    agent: str = "backend",
+    context_paths: list[str] | None = None,
+    context_render: str = "",
+) -> AgentTask:
+    return AgentTask(
+        agent=agent,
+        description="do x",
+        repo_root=Path("."),
+        context_paths=context_paths or [],
+        context_render=context_render,
+    )
 
 
 def _completed(cmd, returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -53,16 +63,34 @@ def test_allowed_tools_architect_can_write_but_not_run_commands() -> None:
     assert "Bash" not in tools
 
 
-def test_build_prompt_without_context_paths() -> None:
+def test_build_prompt_without_context_is_just_the_description() -> None:
     assert adapter._build_prompt(_task()) == "do x"
 
 
-def test_build_prompt_lists_context_paths() -> None:
-    prompt = adapter._build_prompt(_task(context_paths=["a.py", "b.py"]))
+def test_build_prompt_injects_the_rendered_context() -> None:
+    prompt = adapter._build_prompt(_task(context_render="## Selected context\n  1. a.py — semantic match"))
 
-    assert "a.py" in prompt
-    assert "b.py" in prompt
     assert "do x" in prompt
+    assert "## Selected context" in prompt
+    assert "1. a.py — semantic match" in prompt
+
+
+def test_build_prompt_sends_the_context_it_was_given_not_a_path_listing() -> None:
+    """The regression this whole step exists for: the adapter used to rebuild
+    its own flat listing from context_paths and drop context_render entirely,
+    so everything the context layer computed never reached the model."""
+    prompt = adapter._build_prompt(
+        _task(context_paths=["a.py", "b.py"], context_render="RENDERED CONTEXT")
+    )
+
+    assert "RENDERED CONTEXT" in prompt
+    assert "- b.py" not in prompt
+
+
+def test_build_prompt_ignores_paths_when_there_is_nothing_rendered() -> None:
+    """context_paths is the machine-readable list for telemetry, not prompt
+    material — an empty rendering means nothing to inject."""
+    assert adapter._build_prompt(_task(context_paths=["a.py"])) == "do x"
 
 
 # --- _check_auth ---

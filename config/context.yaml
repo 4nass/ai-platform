@@ -3,3 +3,10 @@ use_graph: true
 use_vector_db: true
 use_memory: true
 max_files: 20
+
+# How much of the selected context goes into the prompt of a provider that
+# can read the repo itself (claude_code, codex_cli):
+#   pointers - a ranked map of paths; it fetches what it wants
+#   full     - the excerpt text inline
+# Providers with no disk access (anthropic_api) always get the full content.
+injection_mode: pointers

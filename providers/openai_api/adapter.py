@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from providers.base import AgentTask, ProviderResult
 
+READS_FILES = False  # an API, like anthropic_api — prompt in, plan out
+
 
 def run(task: AgentTask) -> ProviderResult:
     raise NotImplementedError(

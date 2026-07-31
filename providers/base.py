@@ -21,10 +21,14 @@ class AgentTask:
     description: str
     repo_root: Path
     context_paths: list[str] = field(default_factory=list)
+    """The selected paths, most relevant first — the machine-readable form of
+    the selection (counted in telemetry). The prose the model actually reads
+    is `context_render`."""
     context_render: str = ""
-    """Full context (file content, git diff, memory) for API providers with
-    no disk access. CLI providers use `context_paths` instead (just the
-    paths — they read the files themselves)."""
+    """The selected context, already rendered for *this* provider's shape by
+    core.context.manager.SelectedContext.render_for — a ranked map for a
+    provider that reads files itself, the full excerpt text for one that
+    can't. Adapters inject it as given; they don't decide what goes in it."""
 
 
 @dataclass
@@ -60,7 +64,24 @@ class ProviderResult:
 
 
 class Provider(Protocol):
+    READS_FILES: bool
+    """Whether this provider can read the repo itself.
+
+    Declared by the adapter, which is the only place that knows — same
+    separation as usage parsing. It decides how much context is worth putting
+    in the prompt: pointing a provider at files it can open beats sending it
+    excerpts, but a provider with no disk access sees only its prompt, so for
+    it the content is the context.
+    """
+
     def run(self, task: AgentTask) -> ProviderResult: ...
+
+
+def reads_files(provider: object) -> bool:
+    """Conservative default: a provider that doesn't declare itself is assumed
+    to have no disk access, so it gets the full content rather than a map of
+    paths it may not be able to open."""
+    return bool(getattr(provider, "READS_FILES", False))
 
 
 def load_role_prompt(repo_root: Path, agent: str) -> str:

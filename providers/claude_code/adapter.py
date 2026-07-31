@@ -20,6 +20,7 @@ import subprocess
 from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt
 
 TIMEOUT_SECONDS = 900
+READS_FILES = True  # the CLI opens files itself via its Read/Grep/Glob tools
 DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash(uv run pytest*)"
 # The reviewer/security roles must never edit files (see prompts/reviewer.md,
 # prompts/security.md: their output is a report, not a modification) —
@@ -39,10 +40,17 @@ def _allowed_tools(agent: str) -> str:
 
 
 def _build_prompt(task: AgentTask) -> str:
-    if not task.context_paths:
+    """The request plus the selected context, as rendered for this provider.
+
+    This used to re-derive its own listing from `context_paths` and drop
+    `context_render` on the floor, which meant the entire selection pipeline
+    — chunking, embeddings, vector search, the dependency graph, PageRank —
+    reached the model as a flat alphabetical list of filenames. Whatever the
+    context layer decided to send is injected here verbatim.
+    """
+    if not task.context_render:
         return task.description
-    listing = "\n".join(f"- {p}" for p in task.context_paths)
-    return f"{task.description}\n\nLikely relevant context files (read them yourself if needed):\n{listing}"
+    return f"{task.description}\n\n{task.context_render}"
 
 
 def _as_int(value: object) -> int:

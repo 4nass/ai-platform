@@ -377,7 +377,9 @@ def test_run_records_telemetry_for_every_provider_call(
     assert run["request"] == "add oauth2"
     assert run["summary"] == "done"
     assert run["engine_commit"]  # the engine version that produced these numbers
-    assert json.loads(run["metadata"])["use_graph"] is False  # config snapshot from the fixture
+    metadata = json.loads(run["metadata"])
+    assert metadata["use_graph"] is False  # config snapshot from the fixture
+    assert metadata["injection_mode"] == "pointers"  # what makes the A/B queryable later
 
     # 6 DAG stages + the reviewer. No decomposer: the fixture sets decompose: false.
     assert agents.count("reviewer") == 1

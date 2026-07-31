@@ -20,6 +20,7 @@ from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prom
 
 MODELS_CONFIG_PATH = Path("config/models.yaml")
 TOKEN_BUDGET_CONFIG_PATH = Path("config/token_budget.yaml")
+READS_FILES = False  # no disk access on the way in: it only sees its prompt
 
 
 class FileChange(BaseModel):

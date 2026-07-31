@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from core.context.manager import FULL, POINTERS, SelectedContext
 from core.errors import ConfigError
 from core.orchestrator import scheduler
 from core.orchestrator.planner import Task
@@ -49,23 +50,75 @@ def test_resolve_provider_unknown_provider_name_raises(tmp_path: Path) -> None:
         scheduler.resolve_provider(tmp_path, "backend")
 
 
-def _fake_provider(captured: dict):
+def _fake_provider(captured: dict, reads_files: bool = True):
     def fake_run(task: AgentTask) -> ProviderResult:
         captured["task"] = task
         return ProviderResult(success=True, summary=task.description)
 
-    return type("FakeProvider", (), {"run": staticmethod(fake_run)})
+    return type("FakeProvider", (), {"run": staticmethod(fake_run), "READS_FILES": reads_files})
+
+
+def _context(injection_mode: str = POINTERS) -> SelectedContext:
+    return SelectedContext(
+        chunks=[
+            {
+                "path": "a.py",
+                "kind": "function",
+                "name": "foo",
+                "start_line": 1,
+                "end_line": 2,
+                "text": "EXCERPT BODY",
+            }
+        ],
+        related_files=["b.py"],
+        injection_mode=injection_mode,
+    )
 
 
 def test_run_task_dispatches_to_the_resolved_provider(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
     captured: dict = {}
     monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
 
-    result = scheduler.run_task(repo_root, "backend", "do the thing", context_paths=["a.py"])
+    result = scheduler.run_task(repo_root, "backend", "do the thing", _context())
 
     assert result.success is True
     assert captured["task"].description == "do the thing"
-    assert captured["task"].context_paths == ["a.py"]
+    assert captured["task"].context_paths == ["a.py", "b.py"]
+
+
+def test_run_task_renders_pointers_for_a_provider_that_reads_files(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured, reads_files=True))
+
+    scheduler.run_task(repo_root, "backend", "do the thing", _context(POINTERS))
+
+    assert "EXCERPT BODY" not in captured["task"].context_render
+    assert "a.py" in captured["task"].context_render
+
+
+def test_run_task_renders_full_content_for_a_provider_without_disk_access(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    """The provider's shape wins over the config: pointers to files it can't
+    open would leave it with no context at all."""
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured, reads_files=False))
+
+    scheduler.run_task(repo_root, "backend", "do the thing", _context(POINTERS))
+
+    assert "EXCERPT BODY" in captured["task"].context_render
+
+
+def test_run_task_without_context_sends_nothing(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+
+    scheduler.run_task(repo_root, "backend", "review this")
+
+    assert captured["task"].context_render == ""
+    assert captured["task"].context_paths == []
 
 
 class _SpyRecorder:
@@ -81,15 +134,7 @@ def test_run_task_records_the_call_with_context_sizes(monkeypatch: pytest.Monkey
     monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
     recorder = _SpyRecorder()
 
-    scheduler.run_task(
-        repo_root,
-        "backend",
-        "do the thing",
-        context_paths=["a.py", "b.py"],
-        context_render="some context",
-        recorder=recorder,
-        stage_id="backend",
-    )
+    scheduler.run_task(repo_root, "backend", "do the thing", _context(), recorder=recorder, stage_id="backend")
 
     assert len(recorder.calls) == 1
     call = recorder.calls[0]
@@ -97,9 +142,41 @@ def test_run_task_records_the_call_with_context_sizes(monkeypatch: pytest.Monkey
     assert call["provider"] == "claude_code"
     assert call["stage_id"] == "backend"
     assert call["context_files"] == 2
-    assert call["context_chars"] == len("some context")
     assert call["duration_ms"] >= 0
     assert call["started_at"]
+
+
+def test_run_task_records_the_size_actually_sent(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    """context_chars has to be what the provider received, not the length of
+    a rendering it never saw — otherwise the A/B between injection modes
+    compares two numbers that mean the same thing."""
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "do the thing", _context(POINTERS), recorder=recorder)
+
+    assert recorder.calls[0]["context_chars"] == len(captured["task"].context_render)
+
+
+def test_run_task_records_which_rendering_the_call_received(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    """Per call, not per run: providers of different shapes in one run get
+    different renderings, so the run-level config snapshot can't tell you
+    what any given call was sent."""
+    recorder = _SpyRecorder()
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}, reads_files=True))
+    scheduler.run_task(repo_root, "backend", "x", _context(POINTERS), recorder=recorder)
+
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}, reads_files=False))
+    scheduler.run_task(repo_root, "backend", "x", _context(POINTERS), recorder=recorder)
+
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}, reads_files=True))
+    scheduler.run_task(repo_root, "backend", "x", _context(FULL), recorder=recorder)
+    scheduler.run_task(repo_root, "backend", "x", None, recorder=recorder)
+
+    assert [c["metadata"]["injection"] for c in recorder.calls] == ["pointers", "full", "full", "none"]
 
 
 def test_run_task_without_a_recorder_is_a_no_op(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:

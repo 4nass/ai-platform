@@ -16,10 +16,11 @@ from typing import Literal
 
 import yaml
 
+from core.context.manager import FULL, POINTERS, SelectedContext
 from core.errors import ConfigError
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
-from providers.base import AgentTask, ProviderResult
+from providers.base import AgentTask, ProviderResult, reads_files
 from providers.claude_code import adapter as claude_code
 from providers.codex_cli import adapter as codex_cli
 from providers.openai_api import adapter as openai_api
@@ -66,8 +67,7 @@ def run_task(
     repo_root: Path,
     agent: str,
     description: str,
-    context_paths: list[str] | None = None,
-    context_render: str = "",
+    context: SelectedContext | None = None,
     *,
     recorder=None,
     stage_id: str | None = None,
@@ -78,6 +78,12 @@ def run_task(
     decomposer, and the reviewer — so instrumenting this one function means a
     future call site is measured automatically instead of being silently free.
 
+    The context arrives unrendered on purpose. Which rendering a provider gets
+    depends on whether it can read the repo itself, and that isn't known until
+    `resolve_provider` has run — so rendering happens here rather than at the
+    call site, and the char count recorded is what was really sent instead of
+    the length of a string the provider may have ignored.
+
     `recorder` is passed in rather than built from `repo_root`: for DAG
     stages `repo_root` is the task's throwaway worktree, while the telemetry
     belongs to the main repo. Keyword-only and optional, so callers that
@@ -86,11 +92,15 @@ def run_task(
     provider_name = resolve_provider(repo_root, agent)
     provider = PROVIDERS[provider_name]
 
+    provider_reads_files = reads_files(provider)
+    context_render = context.render_for(reads_files=provider_reads_files) if context else ""
+    context_paths = context.context_paths() if context else []
+
     agent_task = AgentTask(
         agent=agent,
         description=description,
         repo_root=repo_root,
-        context_paths=context_paths or [],
+        context_paths=context_paths,
         context_render=context_render,
     )
 
@@ -105,12 +115,22 @@ def run_task(
             provider=provider_name,
             result=result,
             stage_id=stage_id,
-            context_files=len(context_paths or []),
+            context_files=len(context_paths),
             context_chars=len(context_render),
             duration_ms=duration_ms,
             started_at=started_at,
+            # Per call, not per run: two providers in the same run can get
+            # different renderings, so the run-level config snapshot alone
+            # can't tell you what a given call was actually sent.
+            metadata={"injection": _injection_label(context, provider_reads_files)},
         )
     return result
+
+
+def _injection_label(context: SelectedContext | None, provider_reads_files: bool) -> str:
+    if context is None:
+        return "none"
+    return POINTERS if (provider_reads_files and context.injection_mode == POINTERS) else FULL
 
 
 def build_stage_description(request: str, upstream: list[StageResult]) -> str:

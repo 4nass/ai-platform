@@ -117,8 +117,7 @@ def _run_stage_in_worktree(
         worktree_path,
         task.agent,
         description,
-        context.context_paths(),
-        context.render(),
+        context,
         recorder=recorder,
         stage_id=task.id,
     )
@@ -158,7 +157,10 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
     context_manager = ContextManager(repo_root)
     context_manager.index_repo()
     context = context_manager.select_context(request)
-    console.print(f"[bold]Context selected:[/bold] {len(context.context_paths())} files")
+    console.print(
+        f"[bold]Context selected:[/bold] {len(context.context_paths())} files "
+        f"(injected as {context_manager.config.injection_mode})"
+    )
 
     # Created before the decomposer call, which is itself a billable provider
     # call — starting the recorder any later would understate every run. The
@@ -178,6 +180,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
                 "use_git_diff": context_manager.config.use_git_diff,
                 "use_memory": context_manager.config.use_memory,
                 "max_files": context_manager.config.max_files,
+                "injection_mode": context_manager.config.injection_mode,
                 "decompose": workflow.decompose,
                 "max_parallel": workflow.max_parallel,
             },
@@ -189,8 +192,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
             repo_root,
             "decomposer",
             decomposer.build_description(request, known_ids),
-            context.context_paths(),
-            context.render(),
+            context,
             recorder=recorder,
         )
         chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None

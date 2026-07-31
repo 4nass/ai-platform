@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from providers.base import AgentTask, ProviderResult
 
+READS_FILES = True  # a coding CLI, like claude_code — it opens files itself
+
 
 def run(task: AgentTask) -> ProviderResult:
     raise NotImplementedError(
