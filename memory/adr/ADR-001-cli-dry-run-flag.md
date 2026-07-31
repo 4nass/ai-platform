@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — not yet implemented (see Roadmap in README.md).
+Accepted — implemented in `core/orchestrator/supervisor.py`'s `run()` (see Roadmap in README.md).
 
 ## Context
 

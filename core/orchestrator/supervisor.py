@@ -103,8 +103,9 @@ def _run_stage_in_worktree(
 
 def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
     repo = git.Repo(repo_root)
-    git_ops.ensure_clean_worktree(repo)
-    git_ops.prune_worktrees(repo)
+    if not dry_run:
+        git_ops.ensure_clean_worktree(repo)
+        git_ops.prune_worktrees(repo)
 
     console.rule("Hermes")
 
