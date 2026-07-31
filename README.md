@@ -24,6 +24,8 @@ The main problem with current assistants is context management. Sending an entir
 
 The platform introduces a **Context Engineering Layer** that supplies only the information actually needed. Instead of sending 5000 files / 500,000 lines, the system selects e.g. `AuthController.java`, `JwtService.java`, `SecurityConfig.java`, `architecture.md` — only what the task requires.
 
+The detailed documentation lives in [`docs/`](docs/README.md): architecture, model-routing policy, configuration, operations, and testing.
+
 ---
 
 ## Current Implementation (Prototype 1)
@@ -65,7 +67,7 @@ What actually runs today, as opposed to the target vision described further belo
 4. Once the DAG finishes, the supervisor runs the target's test suite (`core/orchestrator/test_runner.py`, per `.ai-platform.yml` — see below) and sends the run's full diff to the `reviewer` role; its `VERDICT: PASS`/`FAIL` (`core/orchestrator/review.py`) gates the run's overall outcome alongside the tests.
 5. If tests failed or the review verdict was FAIL — and every DAG stage otherwise completed — the `corrector` role gets the failure output and one bounded shot at fixing it (`config/workflow.yaml: max_correction_attempts`, default 1): fix, commit, re-run tests, re-run review, repeat until it passes or the attempts run out. A stage that itself failed, was skipped, or hit a merge conflict isn't something a corrector pass can retroactively complete, so those runs go straight to `needs attention` as before.
 
-**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, `corrector`, plus the internal `decomposer` role. Each role declares an ordered list of providers that may serve it; `decomposer`, `reviewer`, `tests` and `corrector` prefer `codex_cli`, the rest `claude_code`. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction.
+**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, `corrector`, plus the internal `decomposer` role. Every role declares ordered Claude Code and Codex CLI profiles, including an explicit model and effort. The decomposer assigns the run one bounded complexity class (`routine`, `complex`, or `critical`); that class selects the role's profile list, while quota and recent-failure gates choose the first healthy profile within it. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction. See the [routing policy](docs/model-routing-policy.md) for the full matrix and rationale.
 
 **Run it:**
 
@@ -105,12 +107,12 @@ at all — it just reads back what past runs already recorded:
 
 ```bash
 uv run ai-platform context "<request>"   # which files were selected, and why
-uv run ai-platform route reviewer        # which provider would run, and why
+uv run ai-platform route reviewer --complexity critical  # profile, model, effort, and why
 uv run ai-platform quota                 # pressure on each subscription
 uv run ai-platform history               # what recent runs cost -- tokens, price, duration, outcome
 ```
 
-`route` walks the role's preference order and shows each candidate's quota
+`route` walks the role and complexity class's profile order and shows each candidate's model, effort, quota
 share, success rate and sample size, marking the one that would run. Your
 declared order governs — it is overridden only on grounds the engine can
 measure (`config/routing.yaml`), never on a marginal quality judgement, and a
@@ -121,10 +123,11 @@ and says so.
 the engine drives subscription CLIs). `anthropic_api` is implemented (Messages
 API, Pydantic-structured output) but has never been exercised: it needs an API
 key, which is separate per-token billing rather than a subscription. Also
-absent: MCP integration, model-level routing (codex reports no model at all, so
-there is nothing to measure), and any persisted `memory/*.md` content — the
+absent: MCP integration and any persisted `memory/*.md` content — the
 files exist but are empty, and `core/memory/loader.py` globs only `memory/*.md`,
-so `memory/adr/` is not loaded as memory either. The decomposer still only
+so `memory/adr/` is not loaded as memory either. Model and effort routing is
+configured and recorded, but complexity is currently one run-wide class rather
+than a separate classification for each stage. The decomposer still only
 *prunes* the fixed DAG in `config/workflow.yaml`; it never composes a plan
 tailored to the request. Correction attempts (see above) are recorded as
 ordinary `calls` rows — `stage_id` `correction-1`, `correction-2`, ... — so

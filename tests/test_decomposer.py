@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.orchestrator.decomposer import build_description, parse_tasks
+from core.orchestrator.decomposer import build_description, parse_complexity, parse_tasks
 
 KNOWN_IDS = ["architecture", "backend", "frontend", "tests", "security", "documentation"]
 
@@ -10,6 +10,8 @@ KNOWN_IDS = ["architecture", "backend", "frontend", "tests", "security", "docume
 def test_build_description_lists_known_ids() -> None:
     description = build_description("add oauth2", KNOWN_IDS)
 
+    assert "COMPLEXITY:" in description
+    assert "routine, complex, or critical" in description
     assert "add oauth2" in description
     for task_id in KNOWN_IDS:
         assert task_id in description
@@ -57,3 +59,23 @@ def test_parse_tasks_ignores_an_inline_example_and_takes_the_real_answer() -> No
 
 def test_parse_tasks_accepts_markdown_emphasis() -> None:
     assert parse_tasks("**TASKS:** backend, tests", KNOWN_IDS) == ["backend", "tests"]
+
+
+def test_parse_complexity_accepts_each_bounded_value() -> None:
+    for value in ("routine", "complex", "critical"):
+        assert parse_complexity(f"COMPLEXITY: {value}") == value
+
+
+def test_parse_complexity_takes_the_last_anchored_value() -> None:
+    text = "The format is COMPLEXITY: routine.\nCOMPLEXITY: critical"
+
+    assert parse_complexity(text) == "critical"
+
+
+def test_parse_complexity_rejects_missing_or_unknown_values() -> None:
+    assert parse_complexity("TASKS: backend") is None
+    assert parse_complexity("COMPLEXITY: extreme") is None
+
+
+def test_parse_complexity_accepts_markdown_emphasis() -> None:
+    assert parse_complexity("**COMPLEXITY:** complex") == "complex"

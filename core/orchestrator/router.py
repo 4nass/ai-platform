@@ -34,7 +34,15 @@ NO_HISTORY = "no_history"
 OVER_QUOTA = "over_quota"
 FAILING_ROLE = "failing_role"
 ALL_GATED = "all_gated"
-CODEX_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+DEFAULT_COMPLEXITY = "complex"
+COMPLEXITIES = {"routine", "complex", "critical"}
+PROVIDER_EFFORTS = {
+    "codex_cli": {"minimal", "low", "medium", "high", "xhigh"},
+    # Claude Code accepts these through --effort. Ultracode is a session
+    # orchestration setting (with xhigh model effort), represented here
+    # because it is selected through the same CLI flag.
+    "claude_code": {"low", "medium", "high", "xhigh", "max", "ultracode"},
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,7 @@ class Decision:
     candidates: list[Candidate]
     model: str | None = None
     reasoning_effort: str | None = None
+    complexity: str = DEFAULT_COMPLEXITY
 
 
 def load_thresholds(engine_root: Path) -> Thresholds:
@@ -95,13 +104,52 @@ class ExecutionProfile:
         return f"{self.provider} ({details})" if details else self.provider
 
 
-def eligible_profiles(engine_root: Path, agent: str) -> list[ExecutionProfile]:
-    """The declared preference order for a role.
+def _validate_complexity(complexity: str) -> None:
+    if complexity not in COMPLEXITIES:
+        allowed = ", ".join(sorted(COMPLEXITIES))
+        raise ConfigError(f"Unsupported task complexity {complexity!r}. Available: {allowed}")
 
-    Accepts either `providers: [a, b]` or the older `provider: a`, which reads
-    as a one-element list — the migration is mechanical and old configs keep
-    working.
+
+def _declared_profiles(entry: dict, agent: str, complexity: str):
+    """Returns the role's list for this complexity, with a base fallback."""
+    overrides = entry.get("profiles_by_complexity", {})
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict):
+        raise ConfigError(
+            f"Agent role '{agent}' has invalid profiles_by_complexity: expected a mapping"
+        )
+    unknown = sorted(set(overrides) - COMPLEXITIES)
+    if unknown:
+        raise ConfigError(
+            f"Agent role '{agent}' declares unknown complexity profile(s): {', '.join(unknown)}"
+        )
+    if complexity in overrides:
+        return overrides[complexity]
+    return entry.get("profiles") or entry.get("providers")
+
+
+def _effort(item: dict, agent: str) -> str | None:
+    if "effort" in item and "reasoning_effort" in item:
+        raise ConfigError(
+            f"Execution profile for agent '{agent}' declares both 'effort' and "
+            "legacy 'reasoning_effort'; keep only 'effort'"
+        )
+    value = item.get("effort", item.get("reasoning_effort"))
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise ConfigError(f"Invalid effort for agent '{agent}': {value!r}")
+    return value
+
+
+def eligible_profiles(
+    engine_root: Path, agent: str, complexity: str = DEFAULT_COMPLEXITY
+) -> list[ExecutionProfile]:
+    """The declared preference order for a role and task complexity.
+
+    `profiles_by_complexity` may override the base `profiles` list. Bare
+    `providers: [a, b]` and legacy `provider: a` entries remain supported.
     """
+    _validate_complexity(complexity)
     config = yaml.safe_load((engine_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
 
     if agent not in config:
@@ -109,11 +157,13 @@ def eligible_profiles(engine_root: Path, agent: str) -> list[ExecutionProfile]:
         raise ConfigError(f"Unknown agent role '{agent}'. Configured roles: {known}")
 
     entry = config[agent] or {}
-    declared = entry.get("profiles") or entry.get("providers")
+    if not isinstance(entry, dict):
+        raise ConfigError(f"Agent role '{agent}' must be a mapping, got: {entry!r}")
+    declared = _declared_profiles(entry, agent, complexity)
     if not declared and entry.get("provider"):
         declared = [{
             key: entry[key]
-            for key in ("provider", "model", "reasoning_effort")
+            for key in ("provider", "model", "effort", "reasoning_effort")
             if key in entry
         }]
     if not declared:
@@ -121,22 +171,30 @@ def eligible_profiles(engine_root: Path, agent: str) -> list[ExecutionProfile]:
             f"Agent role '{agent}' declares no providers in {AGENTS_CONFIG_PATH}. "
             "Set `profiles: [{provider: name, ...}]` or `providers: [name, ...]`."
         )
+    if not isinstance(declared, list):
+        raise ConfigError(f"Agent role '{agent}' profiles must be a list, got: {declared!r}")
+
     profiles = []
     for item in declared:
         if isinstance(item, str):
             profiles.append(ExecutionProfile(item))
         elif isinstance(item, dict) and item.get("provider"):
-            profile = ExecutionProfile(
-                str(item["provider"]), item.get("model"), item.get("reasoning_effort")
-            )
-            if (
-                profile.provider == "codex_cli"
-                and profile.reasoning_effort is not None
-                and profile.reasoning_effort not in CODEX_REASONING_EFFORTS
+            effort = _effort(item, agent)
+            profile = ExecutionProfile(str(item["provider"]), item.get("model"), effort)
+            if profile.model is not None and (
+                not isinstance(profile.model, str) or not profile.model.strip()
             ):
+                raise ConfigError(f"Invalid model for agent '{agent}': {profile.model!r}")
+            allowed_efforts = PROVIDER_EFFORTS.get(profile.provider)
+            if (
+                profile.reasoning_effort is not None
+                and allowed_efforts is not None
+                and profile.reasoning_effort not in allowed_efforts
+            ):
+                allowed = ", ".join(sorted(allowed_efforts))
                 raise ConfigError(
-                    f"Unsupported Codex reasoning_effort {profile.reasoning_effort!r} "
-                    f"for agent '{agent}'"
+                    f"Unsupported {profile.provider} effort {profile.reasoning_effort!r} "
+                    f"for agent '{agent}'. Available: {allowed}"
                 )
             profiles.append(profile)
         else:
@@ -144,9 +202,11 @@ def eligible_profiles(engine_root: Path, agent: str) -> list[ExecutionProfile]:
     return profiles
 
 
-def eligible_providers(repo_root: Path, agent: str) -> list[str]:
+def eligible_providers(
+    repo_root: Path, agent: str, complexity: str = DEFAULT_COMPLEXITY
+) -> list[str]:
     """Compatibility view of :func:`eligible_profiles`."""
-    return [profile.provider for profile in eligible_profiles(repo_root, agent)]
+    return [profile.provider for profile in eligible_profiles(repo_root, agent, complexity)]
 
 
 def route(
@@ -155,6 +215,7 @@ def route(
     known_providers: set[str],
     *,
     thresholds: Thresholds | None = None,
+    complexity: str = DEFAULT_COMPLEXITY,
 ) -> Decision:
     """Picks a provider for this role and explains the choice.
 
@@ -169,7 +230,7 @@ def route(
     loudly beats failing.
     """
     thresholds = thresholds or load_thresholds(engine_root)
-    declared = eligible_profiles(engine_root, agent)
+    declared = eligible_profiles(engine_root, agent, complexity)
 
     unknown = [p.provider for p in declared if p.provider not in known_providers]
     if unknown:
@@ -256,7 +317,7 @@ def route(
         picked = next(c for c in candidates if c.chosen)
         return Decision(
             chosen.provider, picked.rule, picked.reason, candidates,
-            chosen.model, chosen.reasoning_effort,
+            chosen.model, chosen.reasoning_effort, complexity,
         )
 
     # Everything was gated. Run the declared first choice regardless, and say
@@ -287,5 +348,5 @@ def route(
     ]
     return Decision(
         fallback.provider, ALL_GATED, reason, candidates,
-        fallback.model, fallback.reasoning_effort,
+        fallback.model, fallback.reasoning_effort, complexity,
     )

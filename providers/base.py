@@ -39,6 +39,7 @@ class AgentTask:
     can't. Adapters inject it as given; they don't decide what goes in it."""
     model: str | None = None
     reasoning_effort: str | None = None
+    complexity: str = "complex"
 
     def __post_init__(self) -> None:
         if self.engine_root is None:

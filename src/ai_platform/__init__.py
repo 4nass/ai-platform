@@ -192,6 +192,11 @@ def history(
 @app.command()
 def route(
     role: str = typer.Argument(None, help="Role to explain. Omit to show every configured role."),
+    complexity: str = typer.Option(
+        "complex",
+        "--complexity",
+        help="Task class used to select role profiles: routine, complex, or critical.",
+    ),
 ) -> None:
     """Shows which provider would serve a role, and why — without running it.
 
@@ -213,12 +218,12 @@ def route(
 
     for name in roles:
         try:
-            decision = scheduler.route_agent(ENGINE_ROOT, name)
+            decision = scheduler.route_agent(ENGINE_ROOT, name, complexity)
         except Exception as exc:
             console.print(f"[bold red]{name}:[/bold red] {exc}")
             continue
 
-        table = Table(title=f"{name} → {decision.provider}")
+        table = Table(title=f"{name} ({decision.complexity}) → {decision.provider}")
         for column in ("rank", "provider", "quota", "success", "calls", "decision"):
             table.add_column(column)
 

@@ -172,6 +172,29 @@ def test_run_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.summary == "done"
 
 
+
+
+def test_run_pins_profile_model_and_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        if cmd[0:2] == ["claude", "auth"]:
+            return _completed(cmd, 0, '{"loggedIn": true}')
+        return _completed(cmd, 0, '{"result": "done", "is_error": false}')
+
+    monkeypatch.setattr(adapter.subprocess, "run", fake_run)
+    task = _task()
+    task.model = "claude-opus-5"
+    task.reasoning_effort = "ultracode"
+
+    result = adapter.run(task)
+
+    assert result.success is True
+    cmd = captured[1]
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-5"
+    assert cmd[cmd.index("--effort") + 1] == "ultracode"
+
 def test_run_loads_the_system_prompt_from_engine_root_not_repo_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

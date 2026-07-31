@@ -144,6 +144,10 @@ def run(task: AgentTask) -> ProviderResult:
         "--output-format",
         "json",
     ]
+    if task.model:
+        cmd += ["--model", task.model]
+    if task.reasoning_effort:
+        cmd += ["--effort", task.reasoning_effort]
     if system_prompt:
         cmd += ["--append-system-prompt", system_prompt]
 

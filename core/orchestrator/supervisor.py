@@ -119,6 +119,7 @@ def _run_stage_in_worktree(
     request: str,
     context: SelectedContext,
     completed_snapshot: list[StageResult],
+    complexity: str = router.DEFAULT_COMPLEXITY,
     recorder: telemetry.RunRecorder | None = None,
 ) -> tuple[StageResult, Path | None, str | None]:
     """Runs entirely inside a worker thread — touches nothing shared: its
@@ -139,7 +140,7 @@ def _run_stage_in_worktree(
         failure = ProviderResult(success=False, summary=f"worktree setup failed: {exc}")
         return StageResult(task=task, status="failed", result=failure), None, None
 
-    provider_name = scheduler.resolve_provider(engine_root, task.agent)
+    provider_name = scheduler.resolve_provider(engine_root, task.agent, complexity)
     console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
 
     description = scheduler.build_stage_description(request, completed_snapshot)
@@ -151,6 +152,7 @@ def _run_stage_in_worktree(
         recorder=recorder,
         stage_id=task.id,
         engine_root=engine_root,
+        complexity=complexity,
     )
 
     worktree_repo = git.Repo(worktree_path)
@@ -258,6 +260,7 @@ def run(
             },
         )
 
+    complexity = router.DEFAULT_COMPLEXITY
     if workflow.decompose:
         known_ids = [t.id for t in workflow.tasks]
         decomposer_result = scheduler.run_task(
@@ -267,8 +270,14 @@ def run(
             context,
             recorder=recorder,
             engine_root=engine_root,
+            complexity="routine",
         )
         chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
+        classified = (
+            decomposer.parse_complexity(decomposer_result.summary)
+            if decomposer_result.success else None
+        )
+        complexity = classified or router.DEFAULT_COMPLEXITY
         if chosen is None:
             console.print("[bold yellow]Decomposition unavailable[/bold yellow] — running the full workflow")
         else:
@@ -278,6 +287,7 @@ def run(
             dropped_note = f" ({', '.join(dropped)} not needed)" if dropped else ""
             console.print(f"[bold]Decomposed to:[/bold] {selected}{dropped_note}")
 
+    console.print(f"[bold]Task complexity:[/bold] {complexity}")
     if dry_run:
         console.print("[bold]Dry run[/bold] — no agent will be invoked")
         console.print("[bold]Planned workflow:[/bold]")
@@ -339,6 +349,7 @@ def run(
                     request,
                     context,
                     snapshot,
+                    complexity,
                     recorder,
                 )
                 in_flight[future] = task
@@ -401,7 +412,7 @@ def run(
 
     diff = git_ops.diff_since(repo, base_sha)
     review_result = scheduler.run_task(
-        target_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root
+        target_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
     )
     review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
     review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
@@ -442,6 +453,7 @@ def run(
                 recorder=recorder,
                 stage_id=f"correction-{attempt}",
                 engine_root=engine_root,
+                complexity=complexity,
             )
             corrected_files = git_ops.commit_all(
                 repo, f"correction {attempt}: {correction_result.summary or request}"
@@ -461,6 +473,7 @@ def run(
                 review.build_description(request, diff),
                 recorder=recorder,
                 engine_root=engine_root,
+                complexity=complexity,
             )
             review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
             review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]

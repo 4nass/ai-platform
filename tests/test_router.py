@@ -39,8 +39,10 @@ def _calls(repo_root: Path, agent: str, provider: str, *, successes: int, failur
             )
 
 
-def _route(repo_root: Path, agent: str = "reviewer") -> router.Decision:
-    return router.route(repo_root, agent, KNOWN, thresholds=THRESHOLDS)
+def _route(
+    repo_root: Path, agent: str = "reviewer", complexity: str = router.DEFAULT_COMPLEXITY
+) -> router.Decision:
+    return router.route(repo_root, agent, KNOWN, thresholds=THRESHOLDS, complexity=complexity)
 
 
 PREFERENCE = "reviewer:\n  providers: [codex_cli, claude_code]\n"
@@ -132,9 +134,125 @@ def test_failure_gate_is_scoped_to_the_exact_profile(tmp_path: Path) -> None:
 def test_invalid_codex_effort_is_a_config_error(tmp_path: Path) -> None:
     _config(tmp_path, "reviewer:\n  profiles: [{provider: codex_cli, reasoning_effort: extreme}]\n")
 
-    with pytest.raises(ConfigError, match="Unsupported Codex reasoning_effort"):
+    with pytest.raises(ConfigError, match="Unsupported codex_cli effort"):
         _route(tmp_path)
 
+
+
+def test_canonical_effort_key_is_exposed_as_the_execution_effort(tmp_path: Path) -> None:
+    _config(
+        tmp_path,
+        "reviewer:\n  profiles: [{provider: claude_code, model: claude-opus-5, effort: ultracode}]\n",
+    )
+
+    decision = _route(tmp_path)
+
+    assert (decision.model, decision.reasoning_effort) == ("claude-opus-5", "ultracode")
+
+
+def test_complexity_override_replaces_the_base_profile_list(tmp_path: Path) -> None:
+    _config(
+        tmp_path,
+        """reviewer:
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: low}
+    critical:
+      - {provider: claude_code, model: claude-opus-5, effort: ultracode}
+""",
+    )
+
+    routine = _route(tmp_path, complexity="routine")
+    critical = _route(tmp_path, complexity="critical")
+    default = _route(tmp_path)
+
+    assert (routine.model, routine.reasoning_effort) == ("gpt-5.6-terra", "low")
+    assert (critical.provider, critical.model, critical.reasoning_effort) == (
+        "claude_code", "claude-opus-5", "ultracode"
+    )
+    assert (default.model, default.reasoning_effort) == ("gpt-5.6-sol", "high")
+    assert critical.complexity == "critical"
+
+
+def test_unknown_complexity_is_a_config_error(tmp_path: Path) -> None:
+    _config(tmp_path, PREFERENCE)
+
+    with pytest.raises(ConfigError, match="Unsupported task complexity"):
+        _route(tmp_path, complexity="legendary")
+
+
+def test_unknown_complexity_override_key_is_a_config_error(tmp_path: Path) -> None:
+    _config(
+        tmp_path,
+        """reviewer:
+  profiles: [{provider: codex_cli}]
+  profiles_by_complexity:
+    extreme: [{provider: claude_code}]
+""",
+    )
+
+    with pytest.raises(ConfigError, match="unknown complexity profile"):
+        _route(tmp_path)
+
+
+
+def test_complexity_overrides_must_be_a_mapping_even_when_empty(tmp_path: Path) -> None:
+    _config(
+        tmp_path,
+        """reviewer:
+  profiles: [{provider: codex_cli}]
+  profiles_by_complexity: []
+""",
+    )
+
+    with pytest.raises(ConfigError, match="expected a mapping"):
+        _route(tmp_path)
+
+def test_profile_cannot_declare_both_effort_spellings(tmp_path: Path) -> None:
+    _config(
+        tmp_path,
+        """reviewer:
+  profiles:
+    - {provider: codex_cli, effort: high, reasoning_effort: high}
+""",
+    )
+
+    with pytest.raises(ConfigError, match="declares both"):
+        _route(tmp_path)
+
+
+def test_invalid_claude_effort_is_a_config_error(tmp_path: Path) -> None:
+    _config(tmp_path, "reviewer:\n  profiles: [{provider: claude_code, effort: extreme}]\n")
+
+    with pytest.raises(ConfigError, match="Unsupported claude_code effort"):
+        _route(tmp_path)
+
+
+
+
+def test_dogfood_policy_has_claude_and_codex_profiles_for_every_role_and_tier() -> None:
+    engine_root = Path(__file__).parents[1]
+    roles = {
+        "decomposer",
+        "architect",
+        "backend",
+        "frontend",
+        "reviewer",
+        "security",
+        "tests",
+        "documentation",
+        "corrector",
+    }
+
+    for role in roles:
+        for complexity in router.COMPLEXITIES:
+            profiles = router.eligible_profiles(engine_root, role, complexity)
+
+            assert {profile.provider for profile in profiles} == {"claude_code", "codex_cli"}
+            assert all(profile.model for profile in profiles)
+            assert all(profile.reasoning_effort for profile in profiles)
 
 # --- gate 1: quota pressure ---
 
