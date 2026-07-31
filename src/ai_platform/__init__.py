@@ -28,15 +28,23 @@ def callback() -> None:
 @app.command()
 def run(
     request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the planned workflow and the decomposer's selected tasks without invoking any agent.",
+    ),
 ) -> None:
     """Indexes the repo, selects relevant context, and runs the workflow DAG (see config/workflow.yaml)."""
     from core.orchestrator import supervisor
 
     try:
-        report = supervisor.run(REPO_ROOT, request)
+        report = supervisor.run(REPO_ROOT, request, dry_run=dry_run)
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)
+
+    if dry_run:
+        return
 
     if report.summary != "done":
         raise typer.Exit(1)

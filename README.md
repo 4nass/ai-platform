@@ -290,6 +290,9 @@ This is the full target, not just what prototype 1 needs — deliberately: no Re
 - [x] Scheduler (synchronous, no parallelism)
 - [x] Supervisor (branch, run, commit, test, report)
 - [ ] Workflow Engine (multi-step plans)
+- [x] `run --dry-run` flag: print the planned workflow and the decomposer's
+      selected tasks without invoking any workflow-task agent (see
+      `memory/adr/ADR-001-cli-dry-run-flag.md`)
 
 ### Phase 5 - Automation
 - [ ] MCP
