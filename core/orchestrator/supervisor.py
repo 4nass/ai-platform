@@ -101,7 +101,7 @@ def _run_stage_in_worktree(
     return StageResult(task=task, status=status, result=result, files_changed=changed), worktree_path, task_branch
 
 
-def run(repo_root: Path, request: str) -> RunReport:
+def run(repo_root: Path, request: str, dry_run: bool = False) -> RunReport:
     repo = git.Repo(repo_root)
     git_ops.ensure_clean_worktree(repo)
     git_ops.prune_worktrees(repo)
@@ -134,6 +134,23 @@ def run(repo_root: Path, request: str) -> RunReport:
             selected = ", ".join(t.id for t in workflow.tasks)
             dropped_note = f" ({', '.join(dropped)} not needed)" if dropped else ""
             console.print(f"[bold]Decomposed to:[/bold] {selected}{dropped_note}")
+
+    if dry_run:
+        console.print("[bold]Dry run[/bold] — no agent will be invoked")
+        console.print("[bold]Planned workflow:[/bold]")
+        for task in workflow.tasks:
+            deps = ", ".join(task.depends_on) if task.depends_on else "none"
+            console.print(f"  - {task.id} ({task.agent}) depends_on: {deps}")
+        return RunReport(
+            branch="",
+            stages=[],
+            files_changed=[],
+            tests_passed=False,
+            tests_output="",
+            review_passed=None,
+            review_summary="",
+            summary="dry-run",
+        )
 
     base_sha = git_ops.current_commit(repo)
     branch = git_ops.create_branch(repo, request)

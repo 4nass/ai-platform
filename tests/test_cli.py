@@ -26,7 +26,9 @@ def _report(summary: str) -> RunReport:
 
 
 def test_cli_exits_zero_when_summary_is_done(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("core.orchestrator.supervisor.run", lambda repo_root, request: _report("done"))
+    monkeypatch.setattr(
+        "core.orchestrator.supervisor.run", lambda repo_root, request, dry_run=False: _report("done")
+    )
 
     result = runner.invoke(ai_platform.app, ["run", "add a thing"])
 
@@ -34,15 +36,32 @@ def test_cli_exits_zero_when_summary_is_done(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_cli_exits_nonzero_when_summary_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("core.orchestrator.supervisor.run", lambda repo_root, request: _report("needs attention"))
+    monkeypatch.setattr(
+        "core.orchestrator.supervisor.run", lambda repo_root, request, dry_run=False: _report("needs attention")
+    )
 
     result = runner.invoke(ai_platform.app, ["run", "add a thing"])
 
     assert result.exit_code == 1
 
 
+def test_cli_dry_run_passes_flag_through_and_ignores_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_run(repo_root, request, dry_run=False):
+        captured["dry_run"] = dry_run
+        return _report("needs attention")
+
+    monkeypatch.setattr("core.orchestrator.supervisor.run", fake_run)
+
+    result = runner.invoke(ai_platform.app, ["run", "add a thing", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert captured["dry_run"] is True
+
+
 def test_cli_exits_nonzero_and_prints_clean_error_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    def raise_error(repo_root, request):
+    def raise_error(repo_root, request, dry_run=False):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("core.orchestrator.supervisor.run", raise_error)
