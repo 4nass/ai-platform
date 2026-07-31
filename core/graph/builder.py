@@ -5,6 +5,7 @@ doc-to-code mentions. Cached to disk, keyed on the current git HEAD commit.
 from __future__ import annotations
 
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 
 import git
@@ -159,12 +160,39 @@ def _context_view(graph: nx.MultiDiGraph) -> nx.Graph:
     return view
 
 
-def related_files(graph: nx.MultiDiGraph, seed_files: list[str], limit: int) -> list[str]:
+@dataclass(frozen=True)
+class RelatedFile:
+    path: str
+    score: float
+    """Personalized PageRank mass — how much relevance reached this file from
+    the seeds. The ranking signal."""
+    lift: float
+    """score divided by the file's background PageRank: how much more relevant
+    it is to *this* request than it is generically. The gate signal."""
+
+
+def related_files(
+    graph: nx.MultiDiGraph, seed_weights: dict[str, float], limit: int
+) -> list[RelatedFile]:
     """Ranks files/docs by relevance to the seeds via personalized PageRank
     over an undirected projection of the graph (see _context_view). Lets
     relevance propagate through multiple hops — decaying with distance via
-    `PAGERANK_ALPHA` — rather than only considering direct neighbors."""
-    seeds = [s for s in dict.fromkeys(seed_files) if s in graph]
+    `PAGERANK_ALPHA` — rather than only considering direct neighbors.
+
+    Seeds are weighted by how well each matched the request, not treated as
+    equals: a file the search matched at 0.69 should push more relevance into
+    the graph than one it matched at 0.33.
+
+    Two numbers come back per file because raw PageRank mass answers the wrong
+    question on its own. Measured on this repo, the same four highest-degree
+    files topped the expansion for nearly every request — including a
+    deliberately nonsensical one — because mass follows node degree. `lift`
+    divides that out: 1.0 means "no more relevant here than anywhere else",
+    which means the same thing for every request, whereas a raw score does
+    not. Rank by mass, gate by lift — lift alone would promote barely-connected
+    files, whose tiny background makes any attention look like a spike.
+    """
+    seeds = {path: max(weight, 0.0) for path, weight in seed_weights.items() if path in graph}
     if not seeds:
         return []
 
@@ -177,8 +205,22 @@ def related_files(graph: nx.MultiDiGraph, seed_files: list[str], limit: int) -> 
     if not candidates:
         return []
 
-    personalization = {node: (1.0 if node in seeds else 0.0) for node in view.nodes}
+    # nx.pagerank divides by the personalization total, so an all-zero vector
+    # (every seed matched at or below 0) would raise. Fall back to treating
+    # the seeds as equals, which is what it did before weighting.
+    if sum(seeds.values()) <= 0:
+        seeds = dict.fromkeys(seeds, 1.0)
+
+    personalization = {node: seeds.get(node, 0.0) for node in view.nodes}
     scores = nx.pagerank(view, alpha=PAGERANK_ALPHA, personalization=personalization, weight="weight")
+    background = nx.pagerank(view, alpha=PAGERANK_ALPHA, weight="weight")
 
     ranked = sorted(candidates, key=lambda node: scores[node], reverse=True)
-    return ranked[:limit]
+    return [
+        RelatedFile(
+            path=node,
+            score=scores[node],
+            lift=scores[node] / background[node] if background[node] > 0 else 0.0,
+        )
+        for node in ranked[:limit]
+    ]

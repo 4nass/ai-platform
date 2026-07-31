@@ -9,7 +9,10 @@ import pytest
 
 from core.context import manager as manager_module
 from core.context.manager import FULL, POINTERS, ContextManager, SelectedContext, load_config
+from core.context import selection
+from core.context.selection import Decision
 from core.errors import ConfigError
+from core.graph.builder import RelatedFile
 
 
 def test_load_config_overrides_and_defaults(tmp_path: Path) -> None:
@@ -149,7 +152,7 @@ def test_render_for_a_provider_without_disk_access_always_sends_content() -> Non
         injection_mode=POINTERS,
     )
 
-    assert "BODY" in context.render_for(reads_files=False)
+    assert "BODY" in context.render_for(reads_files=False).text
 
 
 def test_render_for_a_provider_that_reads_files_honors_the_injection_mode() -> None:
@@ -157,8 +160,8 @@ def test_render_for_a_provider_that_reads_files_honors_the_injection_mode() -> N
         {"path": "a.py", "kind": "function", "name": "foo", "start_line": 1, "end_line": 2, "text": "BODY"}
     ]
 
-    pointers = SelectedContext(chunks=chunks, injection_mode=POINTERS).render_for(reads_files=True)
-    full = SelectedContext(chunks=chunks, injection_mode=FULL).render_for(reads_files=True)
+    pointers = SelectedContext(chunks=chunks, injection_mode=POINTERS).render_for(reads_files=True).text
+    full = SelectedContext(chunks=chunks, injection_mode=FULL).render_for(reads_files=True).text
 
     assert "BODY" not in pointers
     assert "BODY" in full
@@ -274,8 +277,12 @@ def test_context_manager_index_and_select(fake_repo: Path) -> None:
 def test_select_context_expands_with_the_graph_when_enabled(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:
+    # min_similarity 0 keeps this test about graph integration rather than
+    # about what the embedding model happens to score today; the gates
+    # themselves are covered in tests/test_selection.py.
     (fake_repo / "config" / "context.yaml").write_text(
-        "use_git_diff: true\nuse_graph: true\nuse_vector_db: true\nuse_memory: true\nmax_files: 5\n",
+        "use_git_diff: true\nuse_graph: true\nuse_vector_db: true\nuse_memory: true\n"
+        "max_files: 5\nmin_similarity: 0.0\nmin_similarity_ratio: 0.0\n",
         encoding="utf-8",
     )
     repo = git.Repo(fake_repo)
@@ -285,7 +292,7 @@ def test_select_context_expands_with_the_graph_when_enabled(
     monkeypatch.setattr(
         manager_module.graph_builder,
         "related_files",
-        lambda graph, seeds, limit: ["extra_related.py"],
+        lambda graph, seed_weights, limit: [RelatedFile(path="extra_related.py", score=0.1, lift=3.0)],
     )
 
     manager = ContextManager(fake_repo)
@@ -304,3 +311,133 @@ def test_select_context_skips_graph_expansion_when_disabled(fake_repo: Path) -> 
     context = manager.select_context("where is authentication handled?")
 
     assert context.related_files == []
+
+
+# --- scores and reasons travel with the entries ---
+
+
+def test_entries_carry_the_score_and_reason_that_selected_them() -> None:
+    context = SelectedContext(
+        chunks=[_chunk("a.py")],
+        related_files=["g.py"],
+        decisions=[
+            Decision("a.py", "vector", 0.65, None, True, selection.KEPT, "matched the request at 0.650"),
+            Decision("g.py", "graph", 0.03, 1.8, True, selection.KEPT, "connected to the matched files"),
+        ],
+    )
+
+    vector_entry, graph_entry = context.entries()
+
+    assert (vector_entry.score, vector_entry.lift) == (0.65, None)
+    assert "matched the request" in vector_entry.reason
+    assert (graph_entry.score, graph_entry.lift) == (0.03, 1.8)
+
+
+# --- the character budget ---
+
+
+def _big_chunk(path: str) -> dict:
+    return _chunk(path, text="x" * 500)
+
+
+def test_the_char_budget_trims_the_lowest_ranked_entries_first() -> None:
+    context = SelectedContext(
+        chunks=[_big_chunk("a.py"), _big_chunk("b.py"), _big_chunk("c.py")],
+        injection_mode=FULL,
+        max_context_chars=1200,
+    )
+
+    rendered = context.render_for(reads_files=True)
+
+    assert rendered.files == 2
+    assert rendered.dropped == 1
+    assert "c.py" not in rendered.text
+
+
+def test_the_same_budget_binds_differently_per_injection_mode() -> None:
+    """Why the budget needs both units: an entry costs a line in pointers mode
+    and its whole excerpt in full mode."""
+    chunks = [_big_chunk(f"f{i}.py") for i in range(6)]
+
+    pointers = SelectedContext(chunks=chunks, injection_mode=POINTERS, max_context_chars=1200)
+    full = SelectedContext(chunks=chunks, injection_mode=FULL, max_context_chars=1200)
+
+    assert pointers.render_for(reads_files=True).files == 6
+    assert full.render_for(reads_files=True).files < 6
+
+
+def test_the_budget_excludes_the_git_diff_and_memory() -> None:
+    """Regression: counting fixed overhead in meant a large uncommitted diff
+    consumed the whole budget and cut every selected file — the opposite of
+    selecting well. The diff is inlined because no role can run git itself."""
+    context = SelectedContext(
+        chunks=[_chunk("a.py")],
+        git_diff="d" * 30000,
+        injection_mode=POINTERS,
+        max_context_chars=1000,
+    )
+
+    rendered = context.render_for(reads_files=True)
+
+    assert rendered.files == 1
+    assert rendered.dropped == 0
+    assert "a.py" in rendered.text
+
+
+def test_render_reports_nothing_dropped_when_everything_fits() -> None:
+    context = SelectedContext(chunks=[_chunk("a.py")], max_context_chars=20000)
+
+    rendered = context.render_for(reads_files=True)
+
+    assert (rendered.files, rendered.dropped) == (1, 0)
+
+
+# --- selection wiring ---
+
+
+def test_select_context_keeps_nothing_when_nothing_clears_the_floor(fake_repo: Path) -> None:
+    """The acceptance case, end to end: an unanswerable request fills no
+    context rather than shipping the least-bad noise."""
+    (fake_repo / "config" / "context.yaml").write_text(
+        "use_git_diff: false\nuse_graph: false\nuse_vector_db: true\nuse_memory: false\n"
+        "max_files: 5\nmin_similarity: 0.99\n",
+        encoding="utf-8",
+    )
+    manager = ContextManager(fake_repo)
+    manager.index_repo()
+
+    context = manager.select_context("where is authentication handled?")
+
+    assert context.context_paths() == []
+    assert context.chunks == []
+    assert context.decisions  # every rejected candidate still left a record
+    assert all(not d.kept for d in context.decisions)
+
+
+def test_select_context_skips_the_graph_when_the_search_found_nothing(fake_repo: Path) -> None:
+    """Seeding the graph on noise produces related noise — the difference
+    between a nonsense request selecting nothing and it selecting twenty
+    files."""
+    (fake_repo / "config" / "context.yaml").write_text(
+        "use_git_diff: false\nuse_graph: true\nuse_vector_db: true\nuse_memory: false\n"
+        "max_files: 5\nmin_similarity: 0.99\n",
+        encoding="utf-8",
+    )
+    repo = git.Repo(fake_repo)
+    repo.index.add(["config/context.yaml"])
+    repo.index.commit("tighten the floor")
+
+    calls: list[dict] = []
+    manager = ContextManager(fake_repo)
+    manager.index_repo()
+
+    original = manager_module.graph_builder.related_files
+    manager_module.graph_builder.related_files = lambda graph, seed_weights, limit: (
+        calls.append(seed_weights) or []
+    )
+    try:
+        manager.select_context("where is authentication handled?")
+    finally:
+        manager_module.graph_builder.related_files = original
+
+    assert calls == []

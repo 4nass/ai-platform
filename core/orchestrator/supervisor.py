@@ -157,10 +157,21 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
     context_manager = ContextManager(repo_root)
     context_manager.index_repo()
     context = context_manager.select_context(request)
-    console.print(
-        f"[bold]Context selected:[/bold] {len(context.context_paths())} files "
-        f"(injected as {context_manager.config.injection_mode})"
-    )
+    kept_files = len(context.context_paths())
+    if kept_files:
+        console.print(
+            f"[bold]Context selected:[/bold] {kept_files} of {len(context.decisions)} candidates "
+            f"(injected as {context_manager.config.injection_mode})"
+        )
+    else:
+        # Not an error: asking for a feature the repo has no trace of is the
+        # normal case for new work. Saying so is the point — silently shipping
+        # twenty irrelevant files is what this replaced.
+        console.print(
+            f"[bold yellow]No context selected[/bold yellow] — none of "
+            f"{len(context.decisions)} candidates cleared the relevance floor. "
+            "The agent will explore on its own; run `ai-platform context` to see why."
+        )
 
     # Created before the decomposer call, which is itself a billable provider
     # call — starting the recorder any later would understate every run. The
@@ -181,6 +192,12 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
                 "use_memory": context_manager.config.use_memory,
                 "max_files": context_manager.config.max_files,
                 "injection_mode": context_manager.config.injection_mode,
+                # The floors a run was judged against: comparing two runs'
+                # file counts means nothing without them.
+                "min_similarity": context_manager.config.min_similarity,
+                "min_similarity_ratio": context_manager.config.min_similarity_ratio,
+                "min_lift": context_manager.config.min_lift,
+                "max_context_chars": context_manager.config.max_context_chars,
                 "decompose": workflow.decompose,
                 "max_parallel": workflow.max_parallel,
             },

@@ -2,7 +2,6 @@ use_git_diff: true
 use_graph: true
 use_vector_db: true
 use_memory: true
-max_files: 20
 
 # How much of the selected context goes into the prompt of a provider that
 # can read the repo itself (claude_code, codex_cli):
@@ -10,3 +9,15 @@ max_files: 20
 #   full     - the excerpt text inline
 # Providers with no disk access (anthropic_api) always get the full content.
 injection_mode: pointers
+
+# Relevance floors. Calibrated against four requests on this repo (69 graph
+# nodes); starting points, not constants - every run records them so they can
+# be revisited against real usage. See core/context/selection.py.
+min_similarity: 0.20        # absolute cosine floor: a nonsense request peaked at 0.182
+min_similarity_ratio: 0.5   # and at least half the best match of this request
+min_lift: 1.2               # graph: 1.0x means "no more relevant here than anywhere else"
+
+# Budget. max_files caps the selection; max_context_chars caps the rendering,
+# and binds differently per injection_mode.
+max_files: 20
+max_context_chars: 20000

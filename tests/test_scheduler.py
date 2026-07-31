@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
+from core.context.selection import Decision
 from core.errors import ConfigError
 from core.orchestrator import scheduler
 from core.orchestrator.planner import Task
@@ -249,3 +252,59 @@ def test_build_stage_description_reports_no_files_changed_for_report_only_stages
     description = scheduler.build_stage_description("add oauth2", upstream)
 
     assert "no files changed" in description
+
+
+def test_run_task_records_the_decision_log(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    """context_reason is stored per call so a `calls` row answers "why these
+    files?" on its own, without a join back to the run."""
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
+    recorder = _SpyRecorder()
+    context = _context()
+    context.decisions = [
+        Decision("a.py", "vector", 0.65, None, True, selection.KEPT, "matched the request at 0.650"),
+        Decision("noise.py", "vector", 0.05, None, False, selection.BELOW_MIN_SIMILARITY, "too low"),
+    ]
+
+    scheduler.run_task(repo_root, "backend", "x", context, recorder=recorder)
+
+    reason = json.loads(recorder.calls[0]["context_reason"])
+    assert [k["path"] for k in reason["kept"]] == ["a.py"]
+    assert reason["dropped"] == {selection.BELOW_MIN_SIMILARITY: 1}
+
+
+def test_run_task_records_budget_drops_separately_from_relevance_drops(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    """Two different facts with two different fixes: raise the budget, or
+    lower the floor."""
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
+    recorder = _SpyRecorder()
+    context = SelectedContext(
+        chunks=[
+            {"path": f"f{i}.py", "kind": "function", "name": "foo",
+             "start_line": 1, "end_line": 2, "text": "x" * 500}
+            for i in range(4)
+        ],
+        injection_mode=FULL,
+        max_context_chars=1200,
+        decisions=[
+            Decision(f"f{i}.py", "vector", 0.6, None, True, selection.KEPT, "matched") for i in range(4)
+        ],
+    )
+
+    scheduler.run_task(repo_root, "backend", "x", context, recorder=recorder)
+
+    reason = json.loads(recorder.calls[0]["context_reason"])
+    assert reason["dropped"]["max_context_chars"] > 0
+    assert recorder.calls[0]["context_files"] < 4
+
+
+def test_run_task_without_context_records_no_reason(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert recorder.calls[0]["context_reason"] == ""

@@ -10,6 +10,10 @@ import pytest
 from core.graph import builder
 
 
+def _paths(related: list[builder.RelatedFile]) -> list[str]:
+    return [r.path for r in related]
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> git.Repo:
     r = git.Repo.init(tmp_path)
@@ -140,7 +144,7 @@ def test_related_files_ranks_imports_above_co_changes(repo: git.Repo, tmp_path: 
     _commit(repo, tmp_path, {"seed.py": "from pkg import util\nz = 2\n", "other.py": "y = 2\n"}, "co-change")
 
     graph = builder.build_graph(tmp_path)
-    related = builder.related_files(graph, ["seed.py"], limit=10)
+    related = _paths(builder.related_files(graph, {"seed.py": 1.0}, limit=10))
 
     assert "pkg/util.py" in related
     assert "other.py" in related
@@ -156,7 +160,7 @@ def test_related_files_discovers_two_hop_dependency(repo: git.Repo, tmp_path: Pa
     )
 
     graph = builder.build_graph(tmp_path)
-    related = builder.related_files(graph, ["seed.py"], limit=10)
+    related = _paths(builder.related_files(graph, {"seed.py": 1.0}, limit=10))
 
     assert "b.py" in related
 
@@ -170,7 +174,7 @@ def test_related_files_ranks_closer_hops_higher(repo: git.Repo, tmp_path: Path) 
     )
 
     graph = builder.build_graph(tmp_path)
-    related = builder.related_files(graph, ["seed.py"], limit=10)
+    related = _paths(builder.related_files(graph, {"seed.py": 1.0}, limit=10))
 
     assert related.index("a.py") < related.index("b.py")
 
@@ -181,7 +185,7 @@ def test_related_files_leaves_source_graph_unmodified(repo: git.Repo, tmp_path: 
     graph = builder.build_graph(tmp_path)
     edges_before = list(graph.edges(data=True))
 
-    builder.related_files(graph, ["seed.py"], limit=10)
+    builder.related_files(graph, {"seed.py": 1.0}, limit=10)
 
     assert graph.is_directed()
     assert list(graph.edges(data=True)) == edges_before
@@ -191,7 +195,7 @@ def test_related_files_returns_empty_for_isolated_seed(repo: git.Repo, tmp_path:
     _commit(repo, tmp_path, {"seed.py": "x = 1\n", "unrelated.py": "y = 1\n"}, "first")
 
     graph = builder.build_graph(tmp_path)
-    related = builder.related_files(graph, ["seed.py"], limit=10)
+    related = builder.related_files(graph, {"seed.py": 1.0}, limit=10)
 
     assert related == []
 
@@ -222,7 +226,7 @@ def test_related_files_excludes_seeds_and_respects_limit(repo: git.Repo, tmp_pat
     )
 
     graph = builder.build_graph(tmp_path)
-    related = builder.related_files(graph, ["seed.py"], limit=2)
+    related = _paths(builder.related_files(graph, {"seed.py": 1.0}, limit=2))
 
     assert "seed.py" not in related
     assert len(related) == 2
@@ -237,6 +241,80 @@ def test_related_files_includes_referencing_docs(repo: git.Repo, tmp_path: Path)
     )
 
     graph = builder.build_graph(tmp_path)
-    related = builder.related_files(graph, ["seed.py"], limit=10)
+    related = _paths(builder.related_files(graph, {"seed.py": 1.0}, limit=10))
 
     assert "memory/architecture.md" in related
+
+
+def test_lift_discounts_a_hub_everything_points_at(repo: git.Repo, tmp_path: Path) -> None:
+    """The regression this metric exists for: on the real repo the same four
+    highest-degree files topped the expansion for nearly every request,
+    including a nonsense one, because pagerank mass follows node degree."""
+    _commit(
+        repo,
+        tmp_path,
+        {
+            "seed.py": "import target\n",
+            "target.py": "import hub\n",
+            "hub.py": "x = 1\n",
+            "a.py": "import hub\n",
+            "b.py": "import hub\n",
+            "c.py": "import hub\n",
+            "d.py": "import hub\n",
+        },
+        "one hub, many dependants",
+    )
+
+    graph = builder.build_graph(tmp_path)
+    related = {r.path: r for r in builder.related_files(graph, {"seed.py": 1.0}, limit=10)}
+
+    assert related["target.py"].lift > related["hub.py"].lift
+
+
+def test_seed_weights_shift_relevance_toward_the_stronger_match(
+    repo: git.Repo, tmp_path: Path
+) -> None:
+    """A file the search matched at 0.69 should push more relevance into the
+    graph than one it matched at 0.33 — seeds are evidence, not equals."""
+    _commit(
+        repo,
+        tmp_path,
+        {
+            "left.py": "import left_dep\n",
+            "left_dep.py": "x = 1\n",
+            "right.py": "import right_dep\n",
+            "right_dep.py": "y = 1\n",
+        },
+        "two independent branches",
+    )
+    graph = builder.build_graph(tmp_path)
+
+    def score_of(weights: dict[str, float], path: str) -> float:
+        related = {r.path: r for r in builder.related_files(graph, weights, limit=10)}
+        return related[path].score
+
+    left_favoured = {"left.py": 0.9, "right.py": 0.1}
+    right_favoured = {"left.py": 0.1, "right.py": 0.9}
+
+    assert score_of(left_favoured, "left_dep.py") > score_of(left_favoured, "right_dep.py")
+    assert score_of(right_favoured, "right_dep.py") > score_of(right_favoured, "left_dep.py")
+
+
+def test_all_zero_seed_weights_fall_back_to_equal_seeds(repo: git.Repo, tmp_path: Path) -> None:
+    """nx.pagerank divides by the personalization total, so an all-zero vector
+    would raise rather than degrade."""
+    _commit(repo, tmp_path, {"seed.py": "import a\n", "a.py": "x = 1\n"}, "first")
+
+    graph = builder.build_graph(tmp_path)
+    related = builder.related_files(graph, {"seed.py": 0.0}, limit=10)
+
+    assert [r.path for r in related] == ["a.py"]
+
+
+def test_related_files_ignores_seeds_absent_from_the_graph(repo: git.Repo, tmp_path: Path) -> None:
+    _commit(repo, tmp_path, {"seed.py": "import a\n", "a.py": "x = 1\n"}, "first")
+
+    graph = builder.build_graph(tmp_path)
+    related = builder.related_files(graph, {"seed.py": 1.0, "deleted.py": 1.0}, limit=10)
+
+    assert [r.path for r in related] == ["a.py"]

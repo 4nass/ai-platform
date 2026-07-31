@@ -21,8 +21,10 @@ import git
 import networkx as nx
 import yaml
 
+from core.context import selection
 from core.context.chunking import chunk_repo
 from core.context.embeddings import embed_query, embed_texts
+from core.context.selection import Decision
 from core.context.vector_store import VectorStore
 from core.errors import ConfigError
 from core.graph import builder as graph_builder
@@ -56,6 +58,24 @@ class ContextConfig:
     knob and the choice is recorded per run (see supervisor.run) rather than
     settled by argument."""
 
+    min_similarity: float = 0.20
+    min_similarity_ratio: float = 0.5
+    min_lift: float = 1.2
+    """Relevance floors — see core.context.selection.Thresholds for what each
+    one is calibrated against."""
+
+    max_context_chars: int = 20000
+    """Ceiling on the rendered context, applied per call because the cost of
+    an entry depends on the rendering (see SelectedContext.render_for)."""
+
+    def thresholds(self) -> selection.Thresholds:
+        return selection.Thresholds(
+            min_similarity=self.min_similarity,
+            min_similarity_ratio=self.min_similarity_ratio,
+            min_lift=self.min_lift,
+            max_files=self.max_files,
+        )
+
 
 @dataclass
 class ContextEntry:
@@ -74,6 +94,23 @@ class ContextEntry:
     excerpts: list[dict] = field(default_factory=list)
     """The chunks that matched, for a vector hit. Empty for a graph entry:
     the graph relates whole files, it doesn't point at a region."""
+    score: float = 0.0
+    lift: float | None = None
+    reason: str = ""
+    """Why this file cleared its gate, in words — the answer to "why this
+    file?" carried alongside the file itself rather than reconstructed."""
+
+
+@dataclass(frozen=True)
+class Rendered:
+    """What one provider actually receives, and what the budget cost it."""
+
+    text: str
+    files: int
+    dropped: int
+    """Entries that cleared every relevance floor but didn't fit the character
+    budget. Distinct from a file that failed a gate, and recorded separately —
+    the fix for one is a bigger budget, for the other a lower floor."""
 
 
 @dataclass
@@ -86,6 +123,11 @@ class SelectedContext:
     mentions) around the vector-search hits — not semantically similar text,
     structurally/historically/documentarily connected."""
     injection_mode: str = POINTERS
+    decisions: list[Decision] = field(default_factory=list)
+    """Every candidate considered, kept or dropped, with the rule that decided
+    and why. `chunks` and `related_files` hold only the survivors; this holds
+    the reasoning that produced them."""
+    max_context_chars: int = 20000
 
     def entries(self) -> list[ContextEntry]:
         """The selection as a single ranked list, best match first.
@@ -95,19 +137,29 @@ class SelectedContext:
         in PageRank order. A file found by both keeps its (higher) vector
         rank; it isn't listed twice.
         """
+        scored = {d.path: d for d in self.decisions if d.kept}
         by_path: dict[str, ContextEntry] = {}
+
+        def add(path: str, source: str) -> ContextEntry:
+            decision = scored.get(path)
+            entry = ContextEntry(
+                path=path,
+                source=source,
+                rank=len(by_path) + 1,
+                score=decision.score if decision else 0.0,
+                lift=decision.lift if decision else None,
+                reason=decision.reason if decision else "",
+            )
+            by_path[path] = entry
+            return entry
+
         for chunk in self.chunks:
-            entry = by_path.get(chunk["path"])
-            if entry is None:
-                by_path[chunk["path"]] = ContextEntry(
-                    path=chunk["path"], source=VECTOR, rank=len(by_path) + 1, excerpts=[chunk]
-                )
-            else:
-                entry.excerpts.append(chunk)
+            entry = by_path.get(chunk["path"]) or add(chunk["path"], VECTOR)
+            entry.excerpts.append(chunk)
 
         for path in self.related_files:
             if path not in by_path:
-                by_path[path] = ContextEntry(path=path, source=GRAPH, rank=len(by_path) + 1)
+                add(path, GRAPH)
 
         return list(by_path.values())
 
@@ -115,18 +167,40 @@ class SelectedContext:
         """The selected paths, most relevant first."""
         return [entry.path for entry in self.entries()]
 
-    def render_for(self, *, reads_files: bool) -> str:
-        """The rendering this provider can actually use.
+    def render_for(self, *, reads_files: bool) -> Rendered:
+        """The rendering this provider can actually use, trimmed to budget.
 
         A provider with no disk access gets the content or it gets nothing —
         `injection_mode` doesn't apply to it.
-        """
-        if not reads_files:
-            return self.render()
-        return self.render_pointers() if self.injection_mode == POINTERS else self.render()
 
-    def render(self) -> str:
+        The budget is applied here rather than at selection time because what
+        an entry costs depends on the rendering, and the rendering depends on
+        the provider: the same selection legitimately trims differently for
+        two providers in one run.
+
+        It caps the *selected-file portion* and is measured against that
+        portion alone. Project memory and the git diff are fixed overhead,
+        outside the budget: a provider cannot obtain uncommitted state itself
+        (no role's allowed-tools list has a general Bash). Counting them in
+        was the first implementation, and measuring it killed it — a 26k diff
+        in the working tree consumed the whole budget and cut every one of the
+        nine selected files, which is the opposite of selecting well.
+        """
+        render = self.render_pointers if (reads_files and self.injection_mode == POINTERS) else self.render
+        entries = self.entries()
+        overhead = len(render([]))
+
+        fitted: list[ContextEntry] = []
+        for entry in entries:
+            if len(render(fitted + [entry])) - overhead > self.max_context_chars:
+                break
+            fitted.append(entry)
+
+        return Rendered(text=render(fitted), files=len(fitted), dropped=len(entries) - len(fitted))
+
+    def render(self, entries: list[ContextEntry] | None = None) -> str:
         """Everything, inline — for a provider that can't read the repo."""
+        entries = self.entries() if entries is None else entries
         parts: list[str] = []
         if self.memory_docs:
             parts.append("## Project memory")
@@ -134,19 +208,24 @@ class SelectedContext:
                 parts.append(f"### {name}\n{content}")
         if self.git_diff:
             parts.append(f"## Current git diff\n```diff\n{self.git_diff}\n```")
-        if self.chunks:
+
+        excerpted = [e for e in entries if e.excerpts]
+        if excerpted:
             parts.append("## Relevant code excerpts")
-            for chunk in self.chunks:
-                parts.append(
-                    f"### {chunk['path']} ({chunk['kind']} {chunk['name']}, "
-                    f"lines {chunk['start_line']}-{chunk['end_line']})\n```\n{chunk['text']}\n```"
-                )
-        if self.related_files:
+            for entry in excerpted:
+                for chunk in entry.excerpts:
+                    parts.append(
+                        f"### {chunk['path']} ({chunk['kind']} {chunk['name']}, "
+                        f"lines {chunk['start_line']}-{chunk['end_line']})\n```\n{chunk['text']}\n```"
+                    )
+
+        related = [e.path for e in entries if not e.excerpts]
+        if related:
             parts.append("## Related via project graph")
-            parts.append("\n".join(f"- {path}" for path in self.related_files))
+            parts.append("\n".join(f"- {path}" for path in related))
         return "\n\n".join(parts)
 
-    def render_pointers(self) -> str:
+    def render_pointers(self, entries: list[ContextEntry] | None = None) -> str:
         """A ranked map — for a provider that reads files itself.
 
         Sending excerpt text to such a provider duplicates what it can fetch
@@ -159,7 +238,7 @@ class SelectedContext:
         providers.claude_code.adapter.ROLE_ALLOWED_TOOLS), so uncommitted
         state is genuinely unreachable unless we put it in the prompt.
         """
-        entries = self.entries()
+        entries = self.entries() if entries is None else entries
         parts: list[str] = []
 
         if self.memory_docs:
@@ -192,6 +271,21 @@ class SelectedContext:
             parts.append("\n".join(lines))
 
         return "\n\n".join(parts)
+
+
+def _best_score_per_file(chunks: list[dict]) -> list[tuple[str, float]]:
+    """Collapses chunk hits to one score per file, keeping search order.
+
+    A file is as relevant as its strongest matching chunk: a 600-line module
+    with one paragraph that answers the request is a hit, and averaging its
+    chunks would bury that.
+    """
+    best: dict[str, float] = {}
+    for chunk in chunks:
+        path = chunk["path"]
+        score = float(chunk.get("score", 0.0))
+        best[path] = max(best.get(path, score), score)
+    return list(best.items())
 
 
 def load_config(repo_root: Path) -> ContextConfig:
@@ -227,23 +321,46 @@ class ContextManager:
         return len(chunks)
 
     def select_context(self, request: str) -> SelectedContext:
-        context = SelectedContext(injection_mode=self.config.injection_mode)
+        """Retrieves candidates, then decides which of them are worth sending.
 
+        The order matters: the search is gated *before* the graph runs, so the
+        graph is seeded by files that matched rather than by whatever came
+        back. Both retrievers used to be treated as deciders, which is why a
+        request with nothing to find still filled the context.
+        """
+        thresholds = self.config.thresholds()
+        context = SelectedContext(
+            injection_mode=self.config.injection_mode,
+            max_context_chars=self.config.max_context_chars,
+        )
+
+        raw_chunks: list[dict] = []
         if self.config.use_vector_db:
             if self._store is None:
                 self._store = VectorStore(self.repo_root / VECTOR_STORAGE_PATH)
             query_vector = embed_query(request)
-            context.chunks = self._store.search(query_vector, limit=self.config.max_files)
+            raw_chunks = self._store.search(query_vector, limit=self.config.max_files)
+
+        vector_decisions = selection.gate_vector(_best_score_per_file(raw_chunks), thresholds)
+        seed_weights = {d.path: d.score for d in vector_decisions if d.kept}
+
+        graph_decisions: list[Decision] = []
+        if self.config.use_graph and self._graph is not None and seed_weights:
+            related = graph_builder.related_files(
+                self._graph, seed_weights, limit=self.config.max_files
+            )
+            graph_decisions = selection.gate_graph(related, thresholds)
+
+        context.decisions = selection.merge(vector_decisions, graph_decisions, thresholds.max_files)
+        kept_paths = {d.path for d in context.decisions if d.kept}
+        context.chunks = [c for c in raw_chunks if c["path"] in kept_paths]
+        context.related_files = [d.path for d in context.decisions if d.kept and d.source == GRAPH]
 
         if self.config.use_git_diff:
             context.git_diff = self._current_git_diff()
 
         if self.config.use_memory:
             context.memory_docs = load_memory_docs(self.repo_root)
-
-        if self.config.use_graph and self._graph is not None:
-            seeds = context.context_paths()
-            context.related_files = graph_builder.related_files(self._graph, seeds, limit=self.config.max_files)
 
         return context
 

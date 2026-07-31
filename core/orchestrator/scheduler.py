@@ -8,6 +8,7 @@ own isolated worktree), and how to build its prompt from upstream artifacts.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from typing import Literal
 
 import yaml
 
+from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
 from core.errors import ConfigError
 from core.orchestrator.planner import Task
@@ -93,7 +95,7 @@ def run_task(
     provider = PROVIDERS[provider_name]
 
     provider_reads_files = reads_files(provider)
-    context_render = context.render_for(reads_files=provider_reads_files) if context else ""
+    rendered = context.render_for(reads_files=provider_reads_files) if context else None
     context_paths = context.context_paths() if context else []
 
     agent_task = AgentTask(
@@ -101,7 +103,7 @@ def run_task(
         description=description,
         repo_root=repo_root,
         context_paths=context_paths,
-        context_render=context_render,
+        context_render=rendered.text if rendered else "",
     )
 
     started_at = datetime.now(timezone.utc).isoformat()
@@ -115,16 +117,36 @@ def run_task(
             provider=provider_name,
             result=result,
             stage_id=stage_id,
-            context_files=len(context_paths),
-            context_chars=len(context_render),
+            # What this call actually received — not what was selected. The
+            # character budget is applied per provider shape, so the two can
+            # legitimately differ inside one run.
+            context_files=rendered.files if rendered else 0,
+            context_chars=len(rendered.text) if rendered else 0,
             duration_ms=duration_ms,
             started_at=started_at,
+            context_reason=_context_reason(context, rendered),
             # Per call, not per run: two providers in the same run can get
             # different renderings, so the run-level config snapshot alone
             # can't tell you what a given call was actually sent.
             metadata={"injection": _injection_label(context, provider_reads_files)},
         )
     return result
+
+
+def _context_reason(context: SelectedContext | None, rendered) -> str:
+    """The decision log for this call, as JSON.
+
+    Stored per call rather than per run so a `calls` row answers "why these
+    files?" on its own, without a join. Kept to the survivors plus dropped
+    counts by rule — the full per-candidate detail is one `ai-platform
+    context` away and doesn't need to live in every row.
+    """
+    if context is None:
+        return ""
+    reason = selection.summarize(context.decisions)
+    if rendered is not None and rendered.dropped:
+        reason["dropped"] = {**reason["dropped"], "max_context_chars": rendered.dropped}
+    return json.dumps(reason)
 
 
 def _injection_label(context: SelectedContext | None, provider_reads_files: bool) -> str:

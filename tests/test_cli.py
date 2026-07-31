@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 import ai_platform
+from core.context.selection import Decision
 from core.orchestrator.supervisor import RunReport
 
 runner = CliRunner()
@@ -71,3 +72,62 @@ def test_cli_exits_nonzero_and_prints_clean_error_on_exception(monkeypatch: pyte
     assert result.exit_code == 1
     assert "boom" in result.stdout
     assert "Traceback" not in result.stdout
+
+
+class _FakeContextManager:
+    """Stands in for the real one so the CLI test needs no index or graph."""
+
+    def __init__(self, repo_root) -> None:
+        self.repo_root = repo_root
+
+    def index_repo(self) -> int:
+        return 0
+
+    def select_context(self, request: str):
+        from core.context import selection
+        from core.context.manager import SelectedContext
+
+        return SelectedContext(
+            chunks=[
+                {"path": "kept.py", "kind": "function", "name": "foo",
+                 "start_line": 1, "end_line": 2, "text": "body"}
+            ],
+            decisions=[
+                Decision("kept.py", "vector", 0.65, None, True, selection.KEPT,
+                         "matched the request at 0.650"),
+                Decision("noise.py", "vector", 0.05, None, False,
+                         selection.BELOW_MIN_SIMILARITY, "similarity 0.050 is below the 0.20 floor"),
+            ],
+        )
+
+
+def test_context_command_shows_kept_and_dropped_with_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("core.context.manager.ContextManager", _FakeContextManager)
+
+    result = runner.invoke(ai_platform.app, ["context", "add oauth2"])
+
+    assert result.exit_code == 0
+    assert "kept.py" in result.stdout
+    assert "noise.py" in result.stdout
+    assert "floor" in result.stdout
+
+
+def test_context_command_can_hide_the_rejected_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("core.context.manager.ContextManager", _FakeContextManager)
+
+    result = runner.invoke(ai_platform.app, ["context", "add oauth2", "--no-dropped"])
+
+    assert result.exit_code == 0
+    assert "kept.py" in result.stdout
+    assert "noise.py" not in result.stdout
+
+
+def test_context_command_reports_the_cost_of_each_injection_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.context.manager.ContextManager", _FakeContextManager)
+
+    result = runner.invoke(ai_platform.app, ["context", "add oauth2"])
+
+    assert "pointers:" in result.stdout
+    assert "full:" in result.stdout
