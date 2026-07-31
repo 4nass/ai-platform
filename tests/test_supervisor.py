@@ -386,8 +386,64 @@ def test_run_dry_run_without_decomposition_invokes_no_agent_at_all(
 
     _patch_provider(monkeypatch, fake_run)
 
+    repo = git.Repo(fake_repo)
+    branch_before = repo.active_branch.name
+
     report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
 
+    assert report.summary == "dry-run"
+    assert report.stages == []
+    assert report.files_changed == []
+    assert repo.active_branch.name == branch_before  # no hermes/<slug> branch created
+
+
+def test_run_dry_run_prints_the_full_planned_workflow(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole point of --dry-run is what it prints (see
+    core.orchestrator.supervisor.run's dry_run branch) -- the other dry-run
+    tests only check the returned RunReport and which agents got invoked, so
+    this one is the one actually asserting on that printed plan."""
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        raise AssertionError(f"dry run should not invoke {task.agent}")
+
+    _patch_provider(monkeypatch, fake_run)
+
+    supervisor.run(fake_repo, "add oauth2", dry_run=True)
+
+    out = capsys.readouterr().out
+    assert "Dry run" in out
+    assert "Planned workflow:" in out
+    assert "architecture (architect) depends_on: none" in out
+    assert "backend (backend) depends_on: architecture" in out
+    assert "documentation (documentation) depends_on: security" in out
+
+
+def test_run_dry_run_prints_the_decomposers_pruned_selection(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _enable_decompose(fake_repo)
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "decomposer":
+            return ProviderResult(success=True, summary="Reasoning...\nTASKS: architecture, backend")
+        raise AssertionError(f"dry run should not invoke {task.agent}")
+
+    _patch_provider(monkeypatch, fake_run)
+
+    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+
+    out = capsys.readouterr().out
+    assert "Decomposed to:" in out
+    assert "architecture, backend" in out
+    assert "frontend" in out and "not needed" in out  # dropped tasks are called out too
+    assert "Planned workflow:" in out
+    assert "architecture (architect)" in out
+    assert "backend (backend)" in out
+    # the printed plan reflects the pruned selection, not the full workflow
+    assert "frontend (frontend)" not in out
+    assert "tests (tests)" not in out
     assert report.summary == "dry-run"
 
 
