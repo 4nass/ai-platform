@@ -171,3 +171,31 @@ def test_prune_worktrees_cleans_up_stale_registration(repo: git.Repo) -> None:
 
     listing = repo.git.worktree("list")
     assert str(worktree_path) not in listing
+
+
+def test_create_worktree_does_not_reuse_a_leftover_task_branch(repo: git.Repo) -> None:
+    """A stage that failed in an earlier run leaves its branch behind on
+    purpose, so its partial work stays inspectable (see remove_worktree).
+    Deriving the next run's branch name without checking would then die here —
+    before reaching the provider, with nothing recorded to explain why.
+    Observed in a real run."""
+    branch = create_branch(repo, "add a thing")
+    first_path, first_branch = create_worktree(repo, branch, "documentation")
+    remove_worktree(repo, first_path)  # worktree gone, branch deliberately kept
+
+    second_path, second_branch = create_worktree(repo, branch, "documentation")
+
+    assert second_branch != first_branch
+    assert first_branch in {h.name for h in repo.heads}  # earlier work still reachable
+    remove_worktree(repo, second_path)
+
+
+def test_task_branch_names_stay_readable_when_uniquified(repo: git.Repo) -> None:
+    branch = create_branch(repo, "add a thing")
+    path_one, _ = create_worktree(repo, branch, "tests")
+    remove_worktree(repo, path_one)
+
+    path_two, second = create_worktree(repo, branch, "tests")
+
+    assert second.startswith("hermes-task/add-a-thing-tests")
+    remove_worktree(repo, path_two)

@@ -337,6 +337,13 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
                     blocked_ids.add(task.id)
                     if worktree_path is not None:
                         git_ops.remove_worktree(repo, worktree_path)
+                        # The branch outlives the worktree on purpose (see
+                        # git_ops.remove_worktree) — but a branch nobody is
+                        # told about is a leak, not a safety net.
+                        if stage_result.files_changed:
+                            console.print(
+                                f"  partial work from {task.id} kept on branch {task_branch}"
+                            )
 
                 stage_reports.append(
                     StageReport(

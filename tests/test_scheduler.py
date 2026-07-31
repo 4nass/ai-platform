@@ -339,3 +339,46 @@ def test_routing_reads_history_from_the_main_repo_not_the_task_worktree(
 
     assert not (worktree / "telemetry.sqlite").exists()
     assert (repo_root / "telemetry.sqlite").exists()
+
+
+def test_a_failed_call_records_why_it_failed(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    """Recording that something failed without recording why is the difference
+    between measuring a failure rate and being able to act on one — a real run
+    failed and the table could say nothing about the cause."""
+
+    def failing_run(task: AgentTask) -> ProviderResult:
+        return ProviderResult(success=False, summary="claude CLI failed (code 1): boom")
+
+    monkeypatch.setitem(
+        scheduler.PROVIDERS, "claude_code", type("FakeProvider", (), {"run": staticmethod(failing_run)})
+    )
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert recorder.calls[0]["metadata"]["error"] == "claude CLI failed (code 1): boom"
+
+
+def test_a_successful_call_records_no_error(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert "error" not in recorder.calls[0]["metadata"]
+
+
+def test_a_runaway_error_message_is_truncated(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
+    """A provider dumping megabytes of stderr must not bloat the row."""
+
+    def failing_run(task: AgentTask) -> ProviderResult:
+        return ProviderResult(success=False, summary="x" * 100_000)
+
+    monkeypatch.setitem(
+        scheduler.PROVIDERS, "claude_code", type("FakeProvider", (), {"run": staticmethod(failing_run)})
+    )
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert len(recorder.calls[0]["metadata"]["error"]) == scheduler.MAX_ERROR_CHARS

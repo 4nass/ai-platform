@@ -123,7 +123,7 @@ def run_task(
             # Per call, not per run: two providers in the same run can get
             # different renderings, so the run-level config snapshot alone
             # can't tell you what a given call was actually sent.
-            metadata={"injection": _injection_label(context, provider_reads_files)},
+            metadata=_call_metadata(context, provider_reads_files, result),
         )
     return result
 
@@ -142,6 +142,29 @@ def _context_reason(context: SelectedContext | None, rendered) -> str:
     if rendered is not None and rendered.dropped:
         reason["dropped"] = {**reason["dropped"], "max_context_chars": rendered.dropped}
     return json.dumps(reason)
+
+
+MAX_ERROR_CHARS = 2000
+
+
+def _call_metadata(
+    context: SelectedContext | None, provider_reads_files: bool, result: ProviderResult
+) -> dict:
+    """What this call needs recorded beyond its numbers.
+
+    Extends via the metadata JSON rather than a new column per evolution —
+    SQLite's json_extract keeps it queryable, so extensibility costs nothing
+    analytically.
+
+    A failure carries its provider message. Without it the table records that
+    something failed and nothing about why, which is the difference between
+    measuring a failure rate and being able to act on one. Truncated so a
+    runaway stderr can't bloat the row.
+    """
+    metadata: dict = {"injection": _injection_label(context, provider_reads_files)}
+    if not result.success and result.summary:
+        metadata["error"] = result.summary[:MAX_ERROR_CHARS]
+    return metadata
 
 
 def _injection_label(context: SelectedContext | None, provider_reads_files: bool) -> str:

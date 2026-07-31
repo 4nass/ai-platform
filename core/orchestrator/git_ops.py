@@ -27,14 +27,19 @@ def _slugify(text: str) -> str:
     return slug[:40] or "task"
 
 
-def create_branch(repo: git.Repo, request: str) -> str:
-    base_name = f"hermes/{_slugify(request)}"
-    branch_name = base_name
-    suffix = 2
+def _unused_branch_name(repo: git.Repo, base_name: str) -> str:
+    """`base_name`, or the first `-N` variant not already taken."""
     existing = {head.name for head in repo.heads}
-    while branch_name in existing:
-        branch_name = f"{base_name}-{suffix}"
+    if base_name not in existing:
+        return base_name
+    suffix = 2
+    while f"{base_name}-{suffix}" in existing:
         suffix += 1
+    return f"{base_name}-{suffix}"
+
+
+def create_branch(repo: git.Repo, request: str) -> str:
+    branch_name = _unused_branch_name(repo, f"hermes/{_slugify(request)}")
     new_branch = repo.create_head(branch_name)
     new_branch.checkout()
     return branch_name
@@ -88,8 +93,16 @@ def create_worktree(repo: git.Repo, base_branch: str, task_id: str) -> tuple[Pat
     under `hermes/<slug>`: git refs can't have one branch be both a leaf and
     a directory prefix of another (hermes/<slug>/<task_id> would collide
     with hermes/<slug> itself).
+
+    The name is uniquified for the same reason `create_branch` does it.
+    Without that, a stage that failed in an earlier run left its branch
+    behind — deliberately, so its partial work stays inspectable (see
+    remove_worktree) — and the next run of the same request died here, before
+    reaching its provider, with nothing recorded to explain why.
     """
-    task_branch = base_branch.replace("hermes/", "hermes-task/", 1) + f"-{task_id}"
+    task_branch = _unused_branch_name(
+        repo, base_branch.replace("hermes/", "hermes-task/", 1) + f"-{task_id}"
+    )
     worktree_path = Path(tempfile.mkdtemp(prefix=f"hermes-{task_id}-"))
     worktree_path.rmdir()  # `git worktree add` needs to create this path itself
     repo.git.worktree("add", str(worktree_path), "-b", task_branch, base_branch)
