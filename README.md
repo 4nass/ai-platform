@@ -47,11 +47,10 @@ What actually runs today, as opposed to the target vision described further belo
                                              |
                         +--------------------+--------------------+
                         v                    v                    v
-                  claude_code           anthropic_api          codex_cli /
-                  (active,             (Anthropic API,          openai_api
-                   subprocess          Pydantic-structured      (stubs, not
-                   `claude -p ...`)    output, writes            implemented)
-                                       files itself)
+                  claude_code           codex_cli            anthropic_api /
+                  (active,              (active,               openai_api
+                   subprocess           subprocess              (stubs, not
+                   `claude -p ...`)     `codex exec --json`)     implemented)
 ```
 
 **Key design choice: Hermes doesn't talk to a model directly.** It drives the `claude` CLI (Claude Code) as a subprocess, authenticated via the already-active subscription session (`claude auth login`) — no separate API billing. A provider abstraction (`providers/base.py`) makes the backend swappable: whichever provider runs, the contract is that the repo is already modified on disk by the time it returns, so the orchestrator stays agnostic to how the change was made.
@@ -61,7 +60,7 @@ What actually runs today, as opposed to the target vision described further belo
 2. `core/orchestrator/scheduler.py` resolves which provider to use for the requested role from `config/agents.yaml`, and builds the task.
 3. `core/orchestrator/supervisor.py` creates an isolated `hermes/<slug>` git branch *before* running the provider (a CLI provider edits files live), runs it, commits whatever changed, then runs the test suite and reports PASS/FAIL.
 
-**Available roles** (`prompts/*.md` + `config/agents.yaml`, all routed to `claude_code` today): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`. `reviewer` and `security` are restricted to read-only tools (`Read,Grep,Glob`) — their output is a report, not a code change, enforced at the tool level, not just by prompt instruction.
+**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, plus the internal `decomposer` role. Routing is per role — `decomposer` and `reviewer` go to `codex_cli`, the rest to `claude_code`. `reviewer` and `security` are restricted to read-only tools — their output is a report, not a code change, enforced at the tool level, not just by prompt instruction.
 
 **Run it:**
 
@@ -69,7 +68,22 @@ What actually runs today, as opposed to the target vision described further belo
 uv run ai-platform run "Add a simple utility function" --agent backend
 ```
 
-**Not implemented yet:** `codex_cli` and `openai_api` providers (stubs only — no verified CLI/API syntax), the code graph (`use_graph` in `config/context.yaml` is acknowledged but ignored), MCP integration, multi-step task planning (the planner currently produces a single task), and any persisted `memory/*.md` content (the files exist but are empty).
+**Check subscription pressure:**
+
+```bash
+uv run ai-platform quota
+```
+
+Neither CLI reports a remaining balance: `codex exec --json` emits only
+thread/turn/item events, and `claude -p --output-format json` reports a price
+per call but no balance either. So `quota` doesn't discover the limit — it
+compares tokens actually recorded in telemetry against the plan limits the
+subscriber declares in `config/quota.yaml`, per provider, over a rolling
+window (5h by default, or the widest declared budget; override with
+`--window`). A provider with recorded usage but no declared budget still
+shows its consumption, just without a percentage.
+
+**Not implemented yet:** `anthropic_api` and `openai_api` providers (stubs only — no verified CLI/API syntax), the code graph (`use_graph` in `config/context.yaml` is acknowledged but ignored), MCP integration, multi-step task planning (the planner currently produces a single task), and any persisted `memory/*.md` content (the files exist but are empty).
 
 ---
 
