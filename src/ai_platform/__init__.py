@@ -130,26 +130,76 @@ def history(
         return
 
     table = Table(title="Recent runs")
-    for column in ("id", "started", "request", "summary", "calls", "in", "cached", "out", "cost", "duration"):
+    for column in ("id", "started", "request", "summary", "calls", "in", "cached", "out", "duration", "cost"):
         table.add_column(column)
 
     for row in rows:
-        # Flag partial pricing rather than letting an unpriced provider make a
-        # run look cheaper than it was.
-        priced = row["priced_calls"]
-        calls = f"{row['calls']}" if priced == row["calls"] else f"{row['calls']} ({priced} priced)"
         duration = f"{row['duration_ms'] / 1000:.1f}s" if row["duration_ms"] else "-"
+        # Cost trails the token columns and is blank when no provider reported
+        # one — a subscription prices nothing per call, and "$0.0000" would
+        # read as free rather than as unknown.
+        priced = row["priced_calls"]
+        if priced == 0:
+            cost = "-"
+        elif priced == row["calls"]:
+            cost = f"${row['cost_usd']:.4f}"
+        else:
+            cost = f"${row['cost_usd']:.4f} ({priced}/{row['calls']})"
         table.add_row(
             str(row["id"]),
             (row["started_at"] or "")[:19].replace("T", " "),
             (row["request"] or "")[:48],
             row["summary"] or "-",
-            calls,
+            str(row["calls"]),
             f"{row['input_tokens']:,}",
             f"{row['cache_read_tokens']:,}",
             f"{row['output_tokens']:,}",
-            f"${row['cost_usd']:.4f}",
             duration,
+            cost,
+        )
+
+    console.print(table)
+
+
+@app.command()
+def quota(
+    window: float = typer.Option(
+        None, "--window", help="Rolling window in hours (defaults to the widest declared budget)."
+    ),
+) -> None:
+    """Shows how much of each subscription's budget recent runs have consumed.
+
+    Neither CLI reports a remaining balance, so this measures what was
+    actually recorded against the limits declared in config/quota.yaml.
+    """
+    from rich.table import Table
+
+    from core.telemetry import quota as quota_store
+
+    rows = quota_store.pressure(REPO_ROOT, window_hours=window)
+    if not rows:
+        console.print("No provider usage recorded yet, and no budgets declared.")
+        return
+
+    table = Table(title=f"Provider pressure ({rows[0]['window_hours']:g}h window)")
+    for column in ("provider", "calls", "in", "out", "total", "budget", "used", "success", "avg"):
+        table.add_column(column)
+
+    for row in rows:
+        budget = f"{row['budget_tokens']:,}" if row["budget_tokens"] else "-"
+        used = f"{row['used_ratio'] * 100:.1f}%" if row["used_ratio"] is not None else "-"
+        success = f"{row['success_rate']:.0%}" if row["success_rate"] is not None else "-"
+        avg = f"{row['avg_duration_ms'] / 1000:.1f}s" if row["avg_duration_ms"] else "-"
+        table.add_row(
+            row["provider"],
+            str(row["calls"]),
+            f"{row['input_tokens']:,}",
+            f"{row['output_tokens']:,}",
+            f"{row['total_tokens']:,}",
+            budget,
+            used,
+            success,
+            avg,
         )
 
     console.print(table)

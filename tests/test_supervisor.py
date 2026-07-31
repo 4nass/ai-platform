@@ -354,12 +354,34 @@ def test_format_totals_counts_cached_input_not_just_the_uncached_remainder() -> 
     assert "28 in" not in line
 
 
-def test_format_totals_flags_unpriced_calls() -> None:
+def test_format_totals_scopes_a_partially_priced_run() -> None:
+    """A subscription provider reports no price, so a dollar figure that
+    covers only some calls must say which — otherwise it reads as the whole
+    run's cost."""
     line = supervisor.format_totals(
         {"calls": 8, "priced_calls": 3, "cost_usd": 0.42, "input_tokens": 100, "output_tokens": 10}
     )
 
-    assert "(3/8 priced)" in line
+    assert "$0.4200 for 3/8" in line
+
+
+def test_format_totals_leads_with_tokens_not_dollars() -> None:
+    """Both providers are flat-rate subscriptions: tokens consume quota, a
+    per-call price measures nothing the subscriber can act on."""
+    line = supervisor.format_totals(
+        {"calls": 3, "priced_calls": 3, "cost_usd": 0.42, "input_tokens": 100, "output_tokens": 10}
+    )
+
+    assert line.index("100 in") < line.index("$0.4200")
+
+
+def test_format_totals_omits_cost_entirely_when_no_provider_reported_one() -> None:
+    """`$0.0000` would read as free rather than as unpriced."""
+    line = supervisor.format_totals(
+        {"calls": 2, "priced_calls": 0, "cost_usd": 0, "input_tokens": 100, "output_tokens": 10}
+    )
+
+    assert "$" not in line
 
 
 def test_run_records_telemetry_for_every_provider_call(

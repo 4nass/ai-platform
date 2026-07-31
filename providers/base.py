@@ -39,6 +39,26 @@ class TokenUsage:
     core.telemetry never learn a provider's response shape. Every field
     defaults, so a provider that reports nothing (or whose payload changed
     shape) yields a usable record instead of breaking a run.
+
+    THE CONVENTION, which every adapter must convert into:
+
+        input_tokens + cache_read_tokens + cache_creation_tokens
+            == the true prompt size
+
+    That is, `input_tokens` is the *uncached remainder* and the three fields
+    are disjoint. Writing this down is not pedantry — the two providers here
+    disagree, and the disagreement is invisible in the payload:
+
+    - Anthropic (claude_code) already splits them this way: `input_tokens`
+      excludes what came from cache.
+    - OpenAI (codex_cli) does not. Its `input_tokens` is the *total*, with
+      `cached_input_tokens` a subset of it. Measured on a real call:
+      input 13,994 / cached 11,008 — summing those gives 25,002 for a prompt
+      that was 13,994.
+
+    An adapter that passes its provider's shape through unchanged therefore
+    corrupts every aggregate downstream, silently and in a provider-specific
+    direction. Convert at the edge; nothing further in reports what it read.
     """
 
     model: str = ""

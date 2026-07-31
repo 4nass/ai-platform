@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -254,3 +255,68 @@ def test_metadata_defaults_to_empty_json_not_null(tmp_path: Path) -> None:
     telemetry.RunRecorder(tmp_path, "x")
     with telemetry.connect(tmp_path) as con:
         assert json.loads(con.execute("SELECT metadata FROM runs").fetchone()[0]) == {}
+
+
+# --- provider pressure: the quota substrate that replaces dollar reasoning ---
+
+
+def _call(con, provider: str, *, input_tokens: int = 0, cache_read: int = 0, output: int = 0,
+          success: int = 1, duration_ms: int = 1000, hours_ago: float = 0.0) -> None:
+    started = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    con.execute(
+        "INSERT INTO calls(run_id, agent, provider, success, input_tokens, cache_read_tokens,"
+        " cache_creation_tokens, output_tokens, started_at, duration_ms)"
+        " VALUES(1,'a',?,?,?,?,0,?,?,?)",
+        (provider, success, input_tokens, cache_read, output, started, duration_ms),
+    )
+
+
+def test_provider_pressure_totals_the_true_prompt_size_per_provider(tmp_path: Path) -> None:
+    """Sums all three input fields, matching the TokenUsage convention every
+    adapter normalizes into — otherwise providers aren't comparable."""
+    with telemetry.connect(tmp_path) as con:
+        _call(con, "claude_code", input_tokens=100, cache_read=900, output=50)
+        _call(con, "codex_cli", input_tokens=200, cache_read=0, output=10)
+
+    rows = {r["provider"]: r for r in telemetry.provider_pressure(tmp_path, window_hours=5)}
+
+    assert rows["claude_code"]["input_tokens"] == 1000
+    assert rows["claude_code"]["total_tokens"] == 1050
+    assert rows["codex_cli"]["total_tokens"] == 210
+
+
+def test_provider_pressure_ignores_calls_outside_the_window(tmp_path: Path) -> None:
+    """Quota is a rolling allowance — consumption from last week does not
+    press on this window."""
+    with telemetry.connect(tmp_path) as con:
+        _call(con, "codex_cli", input_tokens=100, hours_ago=0.5)
+        _call(con, "codex_cli", input_tokens=9999, hours_ago=48)
+
+    (row,) = telemetry.provider_pressure(tmp_path, window_hours=5)
+
+    assert row["total_tokens"] == 100
+    assert row["calls"] == 1
+
+
+def test_provider_pressure_reports_success_rate_and_sample_size(tmp_path: Path) -> None:
+    """The count travels with the rate: 0.5 over 2 calls and 0.5 over 200 are
+    not the same claim, and a router that can't tell them apart chases noise."""
+    with telemetry.connect(tmp_path) as con:
+        _call(con, "codex_cli", success=1, duration_ms=1000)
+        _call(con, "codex_cli", success=0, duration_ms=3000)
+
+    (row,) = telemetry.provider_pressure(tmp_path, window_hours=5)
+
+    assert row["success_rate"] == 0.5
+    assert row["calls"] == 2
+    assert row["avg_duration_ms"] == 2000
+
+
+def test_provider_pressure_can_filter_to_one_provider(tmp_path: Path) -> None:
+    with telemetry.connect(tmp_path) as con:
+        _call(con, "claude_code", input_tokens=100)
+        _call(con, "codex_cli", input_tokens=200)
+
+    rows = telemetry.provider_pressure(tmp_path, window_hours=5, provider="codex_cli")
+
+    assert [r["provider"] for r in rows] == ["codex_cli"]

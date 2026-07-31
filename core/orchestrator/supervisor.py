@@ -53,33 +53,42 @@ class RunReport:
 
 
 def format_totals(totals: dict) -> str:
-    """One-line cost summary.
+    """One-line usage summary — tokens first, price last and optional.
 
-    Two things this has to get right, both learned from a real run:
+    Both providers are flat-rate subscriptions, so a dollar figure is not
+    something the subscriber can act on; tokens are what consume quota. Cost
+    is still shown when a provider volunteered one (claude_code does, codex
+    doesn't), because measured data is worth keeping — but it no longer leads,
+    and no provider is required to supply it.
 
-    - `input_tokens` alone is only the *uncached remainder*. With prompt
-      caching almost everything arrives as cache reads/writes, so reporting
-      that field on its own showed "28 in" for a run that actually processed
-      600k tokens. Report the sum, and break out the cached share, since a
-      cache read costs roughly a tenth of a fresh input token.
-    - When some calls report no price, say so, or an unpriced provider makes
-      a run look cheaper than it was.
+    The token sum has to stay right in both directions, and each direction
+    cost a real bug:
+
+    - `input_tokens` alone is only the *uncached remainder*, so reporting it
+      on its own showed "28 in" for a run that processed 600k tokens. Report
+      the sum, and break out the cached share.
+    - That sum is only correct because every adapter normalizes into the
+      convention in providers.base.TokenUsage. Codex reports the cached
+      portion *inside* its input count; passing that through would have
+      inflated a 14k-token prompt to 27k here.
     """
     if not totals:
         return "not recorded"
     calls = totals.get("calls", 0)
-    priced = totals.get("priced_calls", 0)
-    priced_note = f" ({priced}/{calls} priced)" if priced != calls else ""
 
     cached = totals.get("cache_read_tokens", 0)
     total_in = totals.get("input_tokens", 0) + cached + totals.get("cache_creation_tokens", 0)
     cached_note = f" ({cached:,} cached)" if cached else ""
 
-    return (
-        f"${totals.get('cost_usd', 0):.4f}{priced_note} · "
-        f"{total_in:,} in{cached_note} / {totals.get('output_tokens', 0):,} out · "
-        f"{calls} calls"
+    line = (
+        f"{total_in:,} in{cached_note} / {totals.get('output_tokens', 0):,} out · {calls} calls"
     )
+
+    priced = totals.get("priced_calls", 0)
+    if priced:
+        scope = "" if priced == calls else f" for {priced}/{calls}"
+        line += f" · ${totals.get('cost_usd', 0):.4f}{scope}"
+    return line
 
 
 def _run_stage_in_worktree(
@@ -345,7 +354,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
     if recorder is not None:
         recorder.finish(branch=branch, summary=summary)
         totals = telemetry.run_totals(repo_root, recorder.run_id)
-        console.print(f"[bold]Cost:[/bold] {format_totals(totals)}")
+        console.print(f"[bold]Usage:[/bold] {format_totals(totals)}")
 
     console.print(f"[bold]Summary:[/bold] {summary}")
 

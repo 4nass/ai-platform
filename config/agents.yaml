@@ -1,5 +1,5 @@
 decomposer:
-  provider: claude_code
+  provider: codex_cli
 
 architect:
   provider: claude_code
@@ -11,7 +11,7 @@ frontend:
   provider: claude_code
 
 reviewer:
-  provider: claude_code
+  provider: codex_cli
 
 security:
   provider: claude_code

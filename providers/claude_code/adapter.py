@@ -60,6 +60,12 @@ def _as_int(value: object) -> int:
 def _parse_usage(data: dict | None) -> TokenUsage | None:
     """Maps the CLI's JSON into the shared TokenUsage shape.
 
+    Anthropic's fields already match the platform convention (see
+    providers.base.TokenUsage): `input_tokens` is the uncached remainder and
+    the cache fields are disjoint from it, so these map across one-for-one.
+    That is *not* true of every provider — codex_cli has to subtract — so the
+    pass-through here is a fact worth stating rather than an omission.
+
     Every field is read defensively: the payload carries usage even on the
     error path (verified against a real 401), but this must never be the
     thing that breaks a run if the CLI's output shape changes.

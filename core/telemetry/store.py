@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from providers.base import ProviderResult
@@ -197,6 +197,41 @@ def run_totals(repo_root: Path, run_id: int) -> dict:
             (run_id,),
         ).fetchone()
         return dict(row)
+
+
+def provider_pressure(repo_root: Path, *, window_hours: float, provider: str | None = None) -> list[dict]:
+    """Per-provider consumption over a rolling window — the routing signal.
+
+    Both providers are flat-rate subscriptions, so a per-call price measures
+    nothing the subscriber can act on; what binds is quota. Neither CLI
+    reports how much allowance is left (codex emits only thread/turn/item
+    events; claude reports a price but no balance), so pressure is derived
+    from what was actually recorded here.
+
+    Deliberately reports `calls` alongside every average: "0.9 success over 2
+    calls" and "0.9 over 200" are not the same claim, and a router that can't
+    tell them apart will chase noise.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    query = (
+        "SELECT provider,"
+        " COUNT(*) AS calls,"
+        " COALESCE(SUM(input_tokens + cache_read_tokens + cache_creation_tokens), 0) AS input_tokens,"
+        " COALESCE(SUM(output_tokens), 0) AS output_tokens,"
+        " COALESCE(SUM(input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens), 0)"
+        "   AS total_tokens,"
+        " ROUND(AVG(success), 3) AS success_rate,"
+        " CAST(AVG(duration_ms) AS INTEGER) AS avg_duration_ms"
+        " FROM calls WHERE started_at >= ?"
+    )
+    params: list[object] = [since]
+    if provider is not None:
+        query += " AND provider = ?"
+        params.append(provider)
+    query += " GROUP BY provider ORDER BY total_tokens DESC"
+
+    with connect(repo_root) as con:
+        return [dict(row) for row in con.execute(query, params)]
 
 
 def recent_runs(repo_root: Path, *, limit: int = 20, session_id: str | None = None) -> list[dict]:

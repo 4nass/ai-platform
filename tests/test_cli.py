@@ -131,3 +131,51 @@ def test_context_command_reports_the_cost_of_each_injection_mode(
 
     assert "pointers:" in result.stdout
     assert "full:" in result.stdout
+
+
+def test_quota_command_shows_consumption_against_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.telemetry.quota.pressure",
+        lambda repo_root, window_hours=None: [
+            {
+                "provider": "codex_cli", "calls": 3, "input_tokens": 1000, "output_tokens": 50,
+                "total_tokens": 1050, "success_rate": 1.0, "avg_duration_ms": 6000,
+                "window_hours": 5.0, "budget_tokens": 2000, "used_ratio": 0.525,
+            }
+        ],
+    )
+
+    result = runner.invoke(ai_platform.app, ["quota"])
+
+    assert result.exit_code == 0
+    assert "codex_cli" in result.stdout
+    assert "52.5%" in result.stdout
+
+
+def test_quota_command_handles_an_undeclared_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A provider with usage but no declared plan limit reports consumption
+    without a percentage rather than a misleading 0%."""
+    monkeypatch.setattr(
+        "core.telemetry.quota.pressure",
+        lambda repo_root, window_hours=None: [
+            {
+                "provider": "codex_cli", "calls": 1, "input_tokens": 10, "output_tokens": 1,
+                "total_tokens": 11, "success_rate": None, "avg_duration_ms": None,
+                "window_hours": 5.0, "budget_tokens": None, "used_ratio": None,
+            }
+        ],
+    )
+
+    result = runner.invoke(ai_platform.app, ["quota"])
+
+    assert result.exit_code == 0
+    assert "%" not in result.stdout
+
+
+def test_quota_command_with_nothing_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("core.telemetry.quota.pressure", lambda repo_root, window_hours=None: [])
+
+    result = runner.invoke(ai_platform.app, ["quota"])
+
+    assert result.exit_code == 0
+    assert "No provider usage recorded" in result.stdout
