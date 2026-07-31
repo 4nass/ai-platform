@@ -45,12 +45,13 @@ What actually runs today, as opposed to the target vision described further belo
         |                                    v
         +----------------------------> providers/
                                              |
-                        +--------------------+--------------------+
-                        v                    v                    v
-                  claude_code           codex_cli            anthropic_api /
-                  (active,              (active,               openai_api
-                   subprocess           subprocess              (stubs, not
-                   `claude -p ...`)     `codex exec --json`)     implemented)
+         +-------------+-------------+----------------+---------------+
+         v             v             v                v
+    claude_code    codex_cli     anthropic_api      openai_api
+    (active,       (active,      (implemented,      (stub, not
+     subprocess     subprocess    unexercised --      implemented)
+     `claude -p     `codex exec   needs an API key)
+     ...`)          --json`)
 ```
 
 **Key design choice: Hermes doesn't talk to a model directly.** It drives the `claude` CLI (Claude Code) as a subprocess, authenticated via the already-active subscription session (`claude auth login`) — no separate API billing. A provider abstraction (`providers/base.py`) makes the backend swappable: whichever provider runs, the contract is that the repo is already modified on disk by the time it returns, so the orchestrator stays agnostic to how the change was made.
@@ -84,8 +85,9 @@ window (5h by default, or the widest declared budget; override with
 `--window`). A provider with recorded usage but no declared budget still
 shows its consumption, just without a percentage.
 
-**Inspect a decision before spending anything.** These commands run the engine's
-reasoning without invoking an agent:
+**Inspect a decision before spending anything.** `context`, `route`, and `quota`
+run the engine's reasoning without invoking an agent; `history` doesn't reason
+at all — it just reads back what past runs already recorded:
 
 ```bash
 uv run ai-platform context "<request>"   # which files were selected, and why
@@ -218,7 +220,7 @@ LLM Agent
 
 #### 4. Code Intelligence Engine
 
-Understands the project via Tree-sitter (already used for chunking today), AST analysis, git history, and a dependency graph built with **NetworkX** (already a dependency, not yet wired in — see Roadmap). Goal: understand relationships between files, identify the impact of a change, avoid sending irrelevant code to the models.
+Understands the project via Tree-sitter (already used for chunking today), AST analysis, git history, and a dependency graph built with **NetworkX** (`core/graph/builder.py`: AST imports + git co-changes + doc mentions, ranked via personalized PageRank). Goal: understand relationships between files, identify the impact of a change, avoid sending irrelevant code to the models.
 
 Example: modifying `JwtService.java` — the system detects `AuthController`, `SecurityConfig`, and `TokenRepository` as impacted.
 
@@ -239,7 +241,7 @@ memory/
     └── ADR-001-*.md
 
 telemetry.sqlite   # runs(id, session_id, request, branch, summary, engine_commit, started_at, finished_at, duration_ms, metadata)
-                   # calls(id, run_id, stage_id, agent, provider, model, success, tokens, cost_usd, routing_reason, context_reason, metadata)
+                   # calls(id, run_id, stage_id, agent, provider, model, success, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, started_at, finished_at, duration_ms, provider_duration_ms, context_files, context_chars, routing_reason, context_reason, metadata)
 ```
 
 #### 6. Vector Database / RAG
