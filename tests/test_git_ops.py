@@ -52,7 +52,7 @@ def test_current_commit_matches_head(repo: git.Repo) -> None:
 def test_create_branch_slugifies_the_request(repo: git.Repo) -> None:
     name = create_branch(repo, "Add OAuth2 authentication!")
 
-    assert name == "hermes/add-oauth2-authentication"
+    assert name == "engine/add-oauth2-authentication"
     assert repo.active_branch.name == name
 
 
@@ -63,8 +63,8 @@ def test_create_branch_avoids_name_collision(repo: git.Repo) -> None:
     repo.git.checkout(base)
     second = create_branch(repo, "Add feature")
 
-    assert first == "hermes/add-feature"
-    assert second == "hermes/add-feature-2"
+    assert first == "engine/add-feature"
+    assert second == "engine/add-feature-2"
 
 
 def test_commit_all_with_no_changes_returns_empty(repo: git.Repo) -> None:
@@ -108,7 +108,7 @@ def test_create_worktree_checks_out_a_new_branch_from_base(repo: git.Repo) -> No
 
     worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
 
-    assert task_branch == "hermes-task/add-feature-backend"
+    assert task_branch == "engine-task/add-feature-backend"
     assert worktree_path.is_dir()
     worktree_repo = git.Repo(worktree_path)
     assert worktree_repo.active_branch.name == task_branch
@@ -197,5 +197,5 @@ def test_task_branch_names_stay_readable_when_uniquified(repo: git.Repo) -> None
 
     path_two, second = create_worktree(repo, branch, "tests")
 
-    assert second.startswith("hermes-task/add-a-thing-tests")
+    assert second.startswith("engine-task/add-a-thing-tests")
     remove_worktree(repo, path_two)

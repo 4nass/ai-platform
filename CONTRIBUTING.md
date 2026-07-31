@@ -16,4 +16,4 @@ uv run pytest tests/test_scheduler.py
 uv run pytest tests/test_scheduler.py::test_resolve_provider_known_agent
 ```
 
-`core/orchestrator/test_runner.py` runs the same suite (`uv run pytest -q`) against a task's branch after an agent makes changes, so keeping it green is what Hermes itself checks before reporting a task as passing.
+`core/orchestrator/test_runner.py` runs the same suite (`uv run pytest -q`) against a task's branch after an agent makes changes, so keeping it green is what the engine itself checks before reporting a task as passing.

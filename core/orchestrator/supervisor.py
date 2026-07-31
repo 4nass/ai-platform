@@ -5,7 +5,7 @@ independent tasks (e.g. backend/frontend, both only depending on
 architecture) can run at the same time without the claude_code provider's
 concurrent CLI processes colliding on the same working tree. Only the merge
 of a finished task's worktree branch back into the shared run branch
-(hermes/<slug>) is serialized on the main thread — that's cheap; the
+(engine/<slug>) is serialized on the main thread — that's cheap; the
 expensive part (the actual provider call) runs concurrently, up to
 `Plan.max_parallel` tasks at once.
 """
@@ -170,7 +170,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
         git_ops.ensure_clean_worktree(repo)
         git_ops.prune_worktrees(repo)
 
-    console.rule("Hermes")
+    console.rule("Engine")
 
     workflow = planner.plan(repo_root)
     console.print(f"[bold]Plan generated[/bold]: {len(workflow.tasks)} tasks (up to {workflow.max_parallel} in parallel)")

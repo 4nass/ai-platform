@@ -32,7 +32,7 @@ def _result(*, success=True, cost=0.05, model="claude-sonnet-5", tokens=100) -> 
 def test_recorder_creates_run_and_calls(tmp_path: Path) -> None:
     recorder = telemetry.RunRecorder(tmp_path, "add oauth2", session_id="sig-1", engine_commit="abc123")
     recorder.record_call(agent="backend", provider="claude_code", result=_result(), stage_id="backend")
-    recorder.finish(branch="hermes/x", summary="done")
+    recorder.finish(branch="engine/x", summary="done")
 
     with telemetry.connect(tmp_path) as con:
         run = con.execute("SELECT * FROM runs").fetchone()
@@ -41,7 +41,7 @@ def test_recorder_creates_run_and_calls(tmp_path: Path) -> None:
     assert run["request"] == "add oauth2"
     assert run["session_id"] == "sig-1"
     assert run["engine_commit"] == "abc123"
-    assert run["branch"] == "hermes/x"
+    assert run["branch"] == "engine/x"
     assert run["summary"] == "done"
     assert run["duration_ms"] is not None
 

@@ -39,7 +39,7 @@ def _unused_branch_name(repo: git.Repo, base_name: str) -> str:
 
 
 def create_branch(repo: git.Repo, request: str) -> str:
-    branch_name = _unused_branch_name(repo, f"hermes/{_slugify(request)}")
+    branch_name = _unused_branch_name(repo, f"engine/{_slugify(request)}")
     new_branch = repo.create_head(branch_name)
     new_branch.checkout()
     return branch_name
@@ -61,7 +61,7 @@ def commit_all(repo: git.Repo, summary: str) -> list[str]:
     repo.git.add(A=True)
     changed = [d.a_path or d.b_path for d in repo.index.diff("HEAD")]
     if changed:
-        repo.git.commit("-m", f"hermes: {summary}")
+        repo.git.commit("-m", f"engine: {summary}")
     return changed
 
 
@@ -89,10 +89,10 @@ def create_worktree(repo: git.Repo, base_branch: str, task_id: str) -> tuple[Pat
     """Isolated checkout for one task, branched from the current tip of
     base_branch — so it sees everything merged from earlier stages so far.
 
-    The branch lives in a separate `hermes-task/` namespace, not nested
-    under `hermes/<slug>`: git refs can't have one branch be both a leaf and
-    a directory prefix of another (hermes/<slug>/<task_id> would collide
-    with hermes/<slug> itself).
+    The branch lives in a separate `engine-task/` namespace, not nested
+    under `engine/<slug>`: git refs can't have one branch be both a leaf and
+    a directory prefix of another (engine/<slug>/<task_id> would collide
+    with engine/<slug> itself).
 
     The name is uniquified for the same reason `create_branch` does it.
     Without that, a stage that failed in an earlier run left its branch
@@ -101,9 +101,9 @@ def create_worktree(repo: git.Repo, base_branch: str, task_id: str) -> tuple[Pat
     reaching its provider, with nothing recorded to explain why.
     """
     task_branch = _unused_branch_name(
-        repo, base_branch.replace("hermes/", "hermes-task/", 1) + f"-{task_id}"
+        repo, base_branch.replace("engine/", "engine-task/", 1) + f"-{task_id}"
     )
-    worktree_path = Path(tempfile.mkdtemp(prefix=f"hermes-{task_id}-"))
+    worktree_path = Path(tempfile.mkdtemp(prefix=f"engine-{task_id}-"))
     worktree_path.rmdir()  # `git worktree add` needs to create this path itself
     repo.git.worktree("add", str(worktree_path), "-b", task_branch, base_branch)
     return worktree_path, task_branch
@@ -116,7 +116,7 @@ def merge_worktree(repo: git.Repo, task_branch: str) -> bool:
     attempts automatic resolution.
     """
     try:
-        repo.git.merge(task_branch, "--no-ff", "-m", f"hermes: merge {task_branch}")
+        repo.git.merge(task_branch, "--no-ff", "-m", f"engine: merge {task_branch}")
         return True
     except git.GitCommandError:
         repo.git.merge("--abort")

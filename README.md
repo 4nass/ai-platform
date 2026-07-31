@@ -34,7 +34,7 @@ What actually runs today, as opposed to the target vision described further belo
                          User
                           |
                           v
-                       Hermes
+                       Engine
                           |
         +-----------------+-----------------+
         |                                   |
@@ -54,12 +54,12 @@ What actually runs today, as opposed to the target vision described further belo
      ...`)          --json`)
 ```
 
-**Key design choice: Hermes doesn't talk to a model directly.** It drives the `claude` CLI (Claude Code) as a subprocess, authenticated via the already-active subscription session (`claude auth login`) — no separate API billing. A provider abstraction (`providers/base.py`) makes the backend swappable: whichever provider runs, the contract is that the repo is already modified on disk by the time it returns, so the orchestrator stays agnostic to how the change was made.
+**Key design choice: the engine doesn't talk to a model directly.** It drives the `claude` CLI (Claude Code) as a subprocess, authenticated via the already-active subscription session (`claude auth login`) — no separate API billing. A provider abstraction (`providers/base.py`) makes the backend swappable: whichever provider runs, the contract is that the repo is already modified on disk by the time it returns, so the orchestrator stays agnostic to how the change was made.
 
 **How a run works:**
 1. `core/context/manager.py` indexes the repo (tree-sitter chunking for Python, section chunking for Markdown, whole-file otherwise) into a local, file-mode Qdrant vector index, then selects the chunks/files relevant to the request, plus the current git diff and `memory/*.md`.
 2. `core/orchestrator/router.py` picks a provider for the role from the preference order in `config/agents.yaml`, skipping one that is over its declared quota or has been failing that role, and records the reason it chose. `core/orchestrator/scheduler.py` then builds and dispatches the task.
-3. `core/orchestrator/planner.py` builds the task DAG declared in `config/workflow.yaml` (by default: architecture → backend/frontend → tests → security → documentation); a `decomposer` role call then prunes it to the subset of tasks the request actually needs, bridging dependencies through anything it drops. `core/orchestrator/supervisor.py` creates the isolated `hermes/<slug>` branch, then runs the (pruned) DAG — each task in its own git worktree, up to `max_parallel` tasks at once — merging every finished task's branch back with `--no-ff`. A task that writes outside its role's declared contract (`core/orchestrator/contracts.py`) is flagged; a merge conflict blocks that branch for manual resolution rather than being auto-resolved.
+3. `core/orchestrator/planner.py` builds the task DAG declared in `config/workflow.yaml` (by default: architecture → backend/frontend → tests → security → documentation); a `decomposer` role call then prunes it to the subset of tasks the request actually needs, bridging dependencies through anything it drops. `core/orchestrator/supervisor.py` creates the isolated `engine/<slug>` branch, then runs the (pruned) DAG — each task in its own git worktree, up to `max_parallel` tasks at once — merging every finished task's branch back with `--no-ff`. A task that writes outside its role's declared contract (`core/orchestrator/contracts.py`) is flagged; a merge conflict blocks that branch for manual resolution rather than being auto-resolved.
 4. Once the DAG finishes, the supervisor runs the test suite and sends the run's full diff to the `reviewer` role; its `VERDICT: PASS`/`FAIL` (`core/orchestrator/review.py`) gates the run's overall outcome alongside the tests.
 
 **Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, plus the internal `decomposer` role. Each role declares an ordered list of providers that may serve it; `decomposer` and `reviewer` prefer `codex_cli`, the rest `claude_code`. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction.
@@ -123,7 +123,7 @@ The rest of this document describes where the project is headed, not what's buil
                           |
                           v
 
-                  Hermes Orchestrator
+                  Engine Orchestrator
 
                           |
         +-----------------+-----------------+
@@ -172,12 +172,12 @@ The rest of this document describes where the project is headed, not what's buil
 
 ### Main components
 
-#### 1. Hermes Orchestrator
+#### 1. Engine Orchestrator
 
 The orchestration brain. It doesn't produce code directly. Responsibilities: understand the user request, break the work down, build a workflow, choose the agents, manage dependencies, control execution, supervise the results.
 
 ```
-Hermes
+Engine
 ├── Planner
 ├── Scheduler
 ├── Supervisor
@@ -296,7 +296,7 @@ Windows
        +-- uv
        +-- Claude Code
        +-- Codex CLI
-       +-- Hermes
+       +-- Engine
 ```
 
 This is the full target, not just what prototype 1 needs — deliberately: no Redis, no PostgreSQL, no Kubernetes, ever. The vector index (Qdrant), the graph (NetworkX), and the run history (SQLite) are all local, embedded, file-based — no service to start or administer. Podman shows up only as a tool the DevOps Agent can call for the user's own project builds, not as infrastructure this platform depends on.
@@ -327,7 +327,7 @@ This is the full target, not just what prototype 1 needs — deliberately: no Re
 - [x] Documentation Agent (prompt written, not yet exercised)
 - [x] Frontend / Tests Agents (prompts written, not yet exercised)
 
-### Phase 4 - Hermes
+### Phase 4 - Engine
 - [x] Planner (task DAG from `config/workflow.yaml`, pruned per request by the `decomposer` role)
 - [x] Scheduler (concurrent — up to `max_parallel` tasks at once, each in its own git worktree)
 - [x] Supervisor (branch, run task DAG in per-task worktrees, merge `--no-ff`, test, review gate, report)

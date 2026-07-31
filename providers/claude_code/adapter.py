@@ -1,4 +1,4 @@
-"""Claude Code CLI provider: Hermes doesn't talk to the model, it drives the CLI.
+"""Claude Code CLI provider: the engine doesn't talk to the model, it drives the CLI.
 
 `claude -p` runs in non-interactive mode, authenticated via the already
 active subscription session (`claude auth login`) — no API key. The CLI

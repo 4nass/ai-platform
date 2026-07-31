@@ -8,7 +8,7 @@ Accepted — implemented in `core/orchestrator/supervisor.py`'s `run()` (see Roa
 
 `ai-platform run "<request>"` (`src/ai_platform/__init__.py`) currently has one
 path: `core/orchestrator/supervisor.run()` always goes all the way through —
-plan, decompose, create a `hermes/<slug>` branch, execute every selected
+plan, decompose, create an `engine/<slug>` branch, execute every selected
 task's agent in its own worktree, commit, run tests, run review — before
 returning a report. There is no way to see what a request *would* do without
 those side effects.

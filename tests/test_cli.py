@@ -15,7 +15,7 @@ runner = CliRunner()
 def _report(summary: str) -> RunReport:
     ok = summary == "done"
     return RunReport(
-        branch="hermes/test",
+        branch="engine/test",
         stages=[],
         files_changed=[],
         tests_passed=ok,

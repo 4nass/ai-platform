@@ -500,7 +500,7 @@ def test_run_dry_run_invokes_only_the_decomposer_and_skips_the_rest(
     assert report.summary == "dry-run"
     assert report.stages == []
     assert report.files_changed == []
-    assert repo.active_branch.name == branch_before  # no hermes/<slug> branch created
+    assert repo.active_branch.name == branch_before  # no engine/<slug> branch created
 
 
 def test_run_dry_run_without_decomposition_invokes_no_agent_at_all(
@@ -519,7 +519,7 @@ def test_run_dry_run_without_decomposition_invokes_no_agent_at_all(
     assert report.summary == "dry-run"
     assert report.stages == []
     assert report.files_changed == []
-    assert repo.active_branch.name == branch_before  # no hermes/<slug> branch created
+    assert repo.active_branch.name == branch_before  # no engine/<slug> branch created
 
 
 def test_run_dry_run_prints_the_full_planned_workflow(

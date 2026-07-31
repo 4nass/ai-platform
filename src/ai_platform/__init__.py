@@ -1,4 +1,4 @@
-"""CLI entry point for prototype 1 (minimal Hermes)."""
+"""CLI entry point for the ai-platform engine."""
 
 from __future__ import annotations
 
