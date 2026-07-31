@@ -39,7 +39,7 @@ def test_resolve_provider_unknown_agent_raises(repo_root: Path) -> None:
 
 
 def test_resolve_provider_missing_provider_key_raises(repo_root: Path) -> None:
-    with pytest.raises(ConfigError, match="no 'provider' set"):
+    with pytest.raises(ConfigError, match="declares no providers"):
         scheduler.resolve_provider(repo_root, "no_provider")
 
 
@@ -308,3 +308,34 @@ def test_run_task_without_context_records_no_reason(
     scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
 
     assert recorder.calls[0]["context_reason"] == ""
+
+
+def test_run_task_records_why_the_provider_was_chosen(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    """routing_reason has been in the schema and empty since step 1, on the
+    principle that a decision is recorded as it happens or not at all."""
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert recorder.calls[0]["routing_reason"]
+
+
+def test_routing_reads_history_from_the_main_repo_not_the_task_worktree(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path
+) -> None:
+    """DAG stages run in a throwaway worktree. Routing off that path would
+    decide from an empty database — every stage cold-starting forever — and
+    would drop a stray telemetry.sqlite in the worktree for the stage's own
+    commit to sweep up (it did, and the contract check caught it)."""
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
+    worktree = tmp_path / "worktree"
+    (worktree / "config").mkdir(parents=True)
+    (worktree / "config" / "agents.yaml").write_text(AGENTS_YAML, encoding="utf-8")
+
+    scheduler.run_task(worktree, "backend", "x", routing_root=repo_root)
+
+    assert not (worktree / "telemetry.sqlite").exists()
+    assert (repo_root / "telemetry.sqlite").exists()

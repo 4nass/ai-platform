@@ -20,7 +20,16 @@ import git
 from rich.console import Console
 
 from core.context.manager import ContextManager, SelectedContext
-from core.orchestrator import contracts, decomposer, git_ops, planner, review, scheduler, test_runner
+from core.orchestrator import (
+    contracts,
+    decomposer,
+    git_ops,
+    planner,
+    review,
+    router,
+    scheduler,
+    test_runner,
+)
 from core.orchestrator.scheduler import StageResult
 from core.telemetry import store as telemetry
 from providers.base import ProviderResult, display_name
@@ -129,6 +138,9 @@ def _run_stage_in_worktree(
         context,
         recorder=recorder,
         stage_id=task.id,
+        # Routing reads recorded history, which lives in the main repo — the
+        # worktree is thrown away when the stage finishes.
+        routing_root=repo_root,
     )
 
     worktree_repo = git.Repo(worktree_path)
@@ -188,6 +200,7 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
     # be reconstructed from a past row: they're what makes runs comparable
     # across engine versions and across config changes.
     recorder = None
+    routing = router.load_thresholds(repo_root)
     if not dry_run:
         recorder = telemetry.RunRecorder(
             repo_root,
@@ -207,6 +220,13 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
                 "min_similarity_ratio": context_manager.config.min_similarity_ratio,
                 "min_lift": context_manager.config.min_lift,
                 "max_context_chars": context_manager.config.max_context_chars,
+                # The thresholds routing was judged against. Same reason as the
+                # context floors: comparing two runs' provider choices means
+                # nothing without knowing the bar each was held to.
+                "max_quota_ratio": routing.max_quota_ratio,
+                "min_success_rate": routing.min_success_rate,
+                "min_samples": routing.min_samples,
+                "routing_window_hours": routing.window_hours,
                 "decompose": workflow.decompose,
                 "max_parallel": workflow.max_parallel,
             },

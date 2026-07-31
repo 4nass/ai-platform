@@ -162,6 +162,55 @@ def history(
 
 
 @app.command()
+def route(
+    role: str = typer.Argument(None, help="Role to explain. Omit to show every configured role."),
+) -> None:
+    """Shows which provider would serve a role, and why — without running it.
+
+    The counterpart to `context`: no agent is invoked and no quota is spent, so
+    the routing thresholds can be tuned against real history for free.
+    """
+    from rich.table import Table
+
+    import yaml
+
+    from core.orchestrator import router as routing
+    from core.orchestrator import scheduler
+
+    if role:
+        roles = [role]
+    else:
+        config = yaml.safe_load((REPO_ROOT / routing.AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
+        roles = sorted(config)
+
+    for name in roles:
+        try:
+            decision = scheduler.route_agent(REPO_ROOT, name)
+        except Exception as exc:
+            console.print(f"[bold red]{name}:[/bold red] {exc}")
+            continue
+
+        table = Table(title=f"{name} → {decision.provider}")
+        for column in ("rank", "provider", "quota", "success", "calls", "decision"):
+            table.add_column(column)
+
+        for candidate in decision.candidates:
+            quota_ratio = f"{candidate.quota_ratio:.0%}" if candidate.quota_ratio is not None else "-"
+            success = f"{candidate.success_rate:.0%}" if candidate.success_rate is not None else "-"
+            style = "green" if candidate.chosen else "dim"
+            table.add_row(
+                str(candidate.rank),
+                candidate.provider,
+                quota_ratio,
+                success,
+                str(candidate.calls),
+                f"[{style}]{candidate.reason}[/{style}]",
+            )
+
+        console.print(table)
+
+
+@app.command()
 def quota(
     window: float = typer.Option(
         None, "--window", help="Rolling window in hours (defaults to the widest declared budget)."

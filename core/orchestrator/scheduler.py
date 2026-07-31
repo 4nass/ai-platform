@@ -15,19 +15,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-import yaml
-
 from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
-from core.errors import ConfigError
+from core.orchestrator import router
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
 from providers.base import AgentTask, ProviderResult, reads_files
 from providers.claude_code import adapter as claude_code
 from providers.codex_cli import adapter as codex_cli
 from providers.openai_api import adapter as openai_api
-
-AGENTS_CONFIG_PATH = Path("config/agents.yaml")
 
 PROVIDERS = {
     "claude_code": claude_code,
@@ -46,23 +42,16 @@ class StageResult:
 
 
 def resolve_provider(repo_root: Path, agent: str) -> str:
-    config = yaml.safe_load((repo_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
+    """The provider this role should use right now, per the router.
 
-    if agent not in config:
-        known = ", ".join(sorted(config)) or "(none configured)"
-        raise ConfigError(f"Unknown agent role '{agent}'. Configured roles: {known}")
+    Was a static config lookup; it is now a decision. Callers that only need
+    the name keep this signature — `route_agent` returns the reasoning too.
+    """
+    return route_agent(repo_root, agent).provider
 
-    provider_name = (config[agent] or {}).get("provider")
-    if not provider_name:
-        raise ConfigError(f"Agent role '{agent}' has no 'provider' set in {AGENTS_CONFIG_PATH}")
 
-    if provider_name not in PROVIDERS:
-        known = ", ".join(sorted(PROVIDERS))
-        raise ConfigError(
-            f"Unknown provider '{provider_name}' for agent '{agent}'. Available providers: {known}"
-        )
-
-    return provider_name
+def route_agent(repo_root: Path, agent: str) -> router.Decision:
+    return router.route(repo_root, agent, known_providers=set(PROVIDERS))
 
 
 def run_task(
@@ -73,6 +62,7 @@ def run_task(
     *,
     recorder=None,
     stage_id: str | None = None,
+    routing_root: Path | None = None,
 ) -> ProviderResult:
     """Runs one task through its configured provider, recording what it cost.
 
@@ -86,12 +76,16 @@ def run_task(
     call site, and the char count recorded is what was really sent instead of
     the length of a string the provider may have ignored.
 
-    `recorder` is passed in rather than built from `repo_root`: for DAG
-    stages `repo_root` is the task's throwaway worktree, while the telemetry
-    belongs to the main repo. Keyword-only and optional, so callers that
-    don't care about telemetry (and every existing test) are unaffected.
+    `recorder` and `routing_root` are both passed in rather than built from
+    `repo_root`, for the same reason: for DAG stages `repo_root` is the task's
+    throwaway worktree, while the telemetry lives in the main repo. Routing
+    reads that telemetry, so pointing it at the worktree would have it decide
+    from an empty database — every stage cold-starting forever — and would
+    create a stray `telemetry.sqlite` inside the worktree for the stage's own
+    commit to sweep up.
     """
-    provider_name = resolve_provider(repo_root, agent)
+    decision = route_agent(routing_root or repo_root, agent)
+    provider_name = decision.provider
     provider = PROVIDERS[provider_name]
 
     provider_reads_files = reads_files(provider)
@@ -124,6 +118,7 @@ def run_task(
             context_chars=len(rendered.text) if rendered else 0,
             duration_ms=duration_ms,
             started_at=started_at,
+            routing_reason=decision.reason,
             context_reason=_context_reason(context, rendered),
             # Per call, not per run: two providers in the same run can get
             # different renderings, so the run-level config snapshot alone

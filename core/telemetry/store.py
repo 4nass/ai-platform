@@ -234,6 +234,31 @@ def provider_pressure(repo_root: Path, *, window_hours: float, provider: str | N
         return [dict(row) for row in con.execute(query, params)]
 
 
+def role_performance(repo_root: Path, agent: str, *, window_hours: float) -> dict[str, dict]:
+    """How each provider has actually done on one role, keyed by provider.
+
+    The router's second gate reads this. `calls` is returned alongside every
+    average for the same reason as in provider_pressure: a success rate with
+    no sample size behind it invites a policy built on two data points.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    rows = {}
+    with connect(repo_root) as con:
+        for row in con.execute(
+            "SELECT provider,"
+            " COUNT(*) AS calls,"
+            " ROUND(AVG(success), 3) AS success_rate,"
+            " CAST(AVG(duration_ms) AS INTEGER) AS avg_duration_ms,"
+            " CAST(AVG(input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens)"
+            "   AS INTEGER) AS avg_tokens"
+            " FROM calls WHERE agent = ? AND started_at >= ?"
+            " GROUP BY provider",
+            (agent, since),
+        ):
+            rows[row["provider"]] = dict(row)
+    return rows
+
+
 def recent_runs(repo_root: Path, *, limit: int = 20, session_id: str | None = None) -> list[dict]:
     """Recent runs with their rolled-up call totals, newest first."""
     # input_tokens is only the uncached remainder — the real prompt size is

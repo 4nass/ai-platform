@@ -1,23 +1,33 @@
+# Which providers may serve each role, in order of preference.
+#
+# The list declares *eligibility*, which the engine cannot derive: anthropic_api
+# has no disk access, and a role's contract may rule a provider out entirely.
+# The router (core/orchestrator/router.py) walks this order and takes the first
+# candidate that clears its quota and failure gates — your order governs, and it
+# only overrides on measurable grounds.
+#
+# A bare `provider: X` still works; it reads as a one-element list.
+
 decomposer:
-  provider: codex_cli
+  providers: [codex_cli, claude_code]
 
 architect:
-  provider: claude_code
+  providers: [claude_code]
 
 backend:
-  provider: claude_code
+  providers: [claude_code]
 
 frontend:
-  provider: claude_code
+  providers: [claude_code]
 
 reviewer:
-  provider: codex_cli
+  providers: [codex_cli, claude_code]
 
 security:
-  provider: claude_code
+  providers: [claude_code, codex_cli]
 
 tests:
-  provider: claude_code
+  providers: [claude_code]
 
 documentation:
-  provider: claude_code
+  providers: [claude_code]
