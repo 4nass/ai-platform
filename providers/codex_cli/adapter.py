@@ -13,6 +13,9 @@ assumed:
   difference between the two providers.
 - **Token accounting follows the OpenAI convention**, which is not the
   platform's — see _parse_usage.
+- **Execution profiles are explicit command overrides.** A selected model is
+  passed with `--model`; effort is a TOML string in `model_reasoning_effort`,
+  so neither silently falls back to a user's local default.
 
 This module previously refused to guess the interface. It no longer has to.
 """
@@ -164,6 +167,12 @@ def run(task: AgentTask) -> ProviderResult:
             "codex",
             "exec",
             "--json",
+        ]
+        if task.model:
+            cmd.extend(["--model", task.model])
+        if task.reasoning_effort:
+            cmd.extend(["-c", f"model_reasoning_effort={json.dumps(task.reasoning_effort)}"])
+        cmd.extend([
             "--sandbox",
             _sandbox(task.agent),
             "--cd",
@@ -172,7 +181,7 @@ def run(task: AgentTask) -> ProviderResult:
             "--output-last-message",
             str(last_message_path),
             _build_prompt(task),
-        ]
+        ])
 
         try:
             proc = subprocess.run(
@@ -208,7 +217,7 @@ def run(task: AgentTask) -> ProviderResult:
             success=False,
             summary=f"codex CLI failed (code {proc.returncode}): {proc.stderr.strip() or message}",
             raw=proc.stdout,
-            usage=_parse_usage(usage),
+            usage=_parse_usage(usage, task.model or ""),
         )
 
     if usage is None and not message:
@@ -218,4 +227,4 @@ def run(task: AgentTask) -> ProviderResult:
             raw=proc.stdout,
         )
 
-    return ProviderResult(success=True, summary=message, raw=proc.stdout, usage=_parse_usage(usage))
+    return ProviderResult(success=True, summary=message, raw=proc.stdout, usage=_parse_usage(usage, task.model or ""))

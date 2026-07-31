@@ -27,15 +27,15 @@ def _config(repo_root: Path, agents: str, quota: str = "", routing: str = "") ->
 
 
 def _calls(repo_root: Path, agent: str, provider: str, *, successes: int, failures: int = 0,
-           tokens: int = 0) -> None:
+           tokens: int = 0, model: str = "", effort: str = "") -> None:
     now = datetime.now(timezone.utc).isoformat()
     with store.connect(repo_root) as con:
         for success in [1] * successes + [0] * failures:
             con.execute(
-                "INSERT INTO calls(run_id, agent, provider, success, input_tokens,"
+                "INSERT INTO calls(run_id, agent, provider, model, reasoning_effort, success, input_tokens,"
                 " cache_read_tokens, cache_creation_tokens, output_tokens, started_at, duration_ms)"
-                " VALUES(1,?,?,?,?,0,0,0,?,100)",
-                (agent, provider, success, tokens, now),
+                " VALUES(1,?,?,?,?,?, ?,0,0,0,?,100)",
+                (agent, provider, model, effort, success, tokens, now),
             )
 
 
@@ -81,6 +81,59 @@ def test_a_bare_provider_key_still_works(tmp_path: Path) -> None:
     _config(tmp_path, "reviewer:\n  provider: claude_code\n")
 
     assert _route(tmp_path).provider == "claude_code"
+
+
+def test_legacy_provider_entry_can_be_augmented_with_profile_fields(tmp_path: Path) -> None:
+    _config(
+        tmp_path,
+        "reviewer:\n  provider: codex_cli\n  model: gpt-x\n  reasoning_effort: minimal\n",
+    )
+
+    decision = _route(tmp_path)
+
+    assert (decision.model, decision.reasoning_effort) == ("gpt-x", "minimal")
+
+
+def test_profile_exposes_model_effort_and_distinct_candidate_identity(tmp_path: Path) -> None:
+    _config(tmp_path, """reviewer:
+  profiles:
+    - {provider: codex_cli, model: gpt-fast, reasoning_effort: low}
+    - {provider: codex_cli, model: gpt-deep, reasoning_effort: high}
+""")
+
+    decision = _route(tmp_path)
+
+    assert (decision.provider, decision.model, decision.reasoning_effort) == (
+        "codex_cli", "gpt-fast", "low"
+    )
+    assert [(c.model, c.reasoning_effort) for c in decision.candidates] == [
+        ("gpt-fast", "low"), ("gpt-deep", "high")
+    ]
+    assert "gpt-fast/low" in decision.reason
+
+
+def test_failure_gate_is_scoped_to_the_exact_profile(tmp_path: Path) -> None:
+    _config(tmp_path, """reviewer:
+  profiles:
+    - {provider: codex_cli, model: gpt-fast, reasoning_effort: low}
+    - {provider: codex_cli, model: gpt-deep, reasoning_effort: high}
+""")
+    _calls(tmp_path, "reviewer", "codex_cli", successes=0, failures=6,
+           model="gpt-fast", effort="low")
+    _calls(tmp_path, "reviewer", "codex_cli", successes=6,
+           model="gpt-deep", effort="high")
+
+    decision = _route(tmp_path)
+
+    assert (decision.model, decision.reasoning_effort) == ("gpt-deep", "high")
+    assert decision.candidates[0].rule == router.FAILING_ROLE
+
+
+def test_invalid_codex_effort_is_a_config_error(tmp_path: Path) -> None:
+    _config(tmp_path, "reviewer:\n  profiles: [{provider: codex_cli, reasoning_effort: extreme}]\n")
+
+    with pytest.raises(ConfigError, match="Unsupported Codex reasoning_effort"):
+        _route(tmp_path)
 
 
 # --- gate 1: quota pressure ---

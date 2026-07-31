@@ -1,4 +1,4 @@
-# Which providers may serve each role, in order of preference.
+# Which execution profiles may serve each role, in order of preference.
 #
 # The list declares *eligibility*, which the engine cannot derive: anthropic_api
 # has no disk access, and a role's contract may rule a provider out entirely.
@@ -6,10 +6,13 @@
 # candidate that clears its quota and failure gates — your order governs, and it
 # only overrides on measurable grounds.
 #
-# A bare `provider: X` still works; it reads as a one-element list.
+# Profiles may pin a model and reasoning effort. Bare `providers: [X]` and
+# legacy `provider: X` entries remain supported.
 
 decomposer:
-  providers: [codex_cli, claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-terra, reasoning_effort: low}
+    - {provider: claude_code}
 
 architect:
   providers: [claude_code]
@@ -21,10 +24,14 @@ frontend:
   providers: [claude_code]
 
 reviewer:
-  providers: [codex_cli, claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-sol, reasoning_effort: medium}
+    - {provider: claude_code}
 
 security:
-  providers: [claude_code, codex_cli]
+  profiles:
+    - {provider: claude_code}
+    - {provider: codex_cli, model: gpt-5.6-sol, reasoning_effort: high}
 
 tests:
   providers: [codex_cli, claude_code]

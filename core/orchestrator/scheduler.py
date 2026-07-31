@@ -100,6 +100,8 @@ def run_task(
         description=description,
         repo_root=repo_root,
         engine_root=engine_root,
+        model=decision.model,
+        reasoning_effort=decision.reasoning_effort,
         context_paths=context_paths,
         context_render=rendered.text if rendered else "",
     )
@@ -113,6 +115,8 @@ def run_task(
         recorder.record_call(
             agent=agent,
             provider=provider_name,
+            model=decision.model,
+            reasoning_effort=decision.reasoning_effort,
             result=result,
             stage_id=stage_id,
             # What this call actually received — not what was selected. The

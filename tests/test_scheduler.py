@@ -89,6 +89,25 @@ def test_run_task_dispatches_to_the_resolved_provider(monkeypatch: pytest.Monkey
     assert captured["task"].context_paths == ["a.py", "b.py"]
 
 
+def test_run_task_propagates_the_selected_execution_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "agents.yaml").write_text(
+        "backend:\n  profiles: [{provider: codex_cli, model: gpt-x, reasoning_effort: low}]\n",
+        encoding="utf-8",
+    )
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "codex_cli", _fake_provider(captured))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(tmp_path, "backend", "x", recorder=recorder)
+
+    assert (captured["task"].model, captured["task"].reasoning_effort) == ("gpt-x", "low")
+    assert recorder.calls[0]["model"] == "gpt-x"
+    assert recorder.calls[0]["reasoning_effort"] == "low"
+
+
 def test_run_task_renders_pointers_for_a_provider_that_reads_files(
     monkeypatch: pytest.MonkeyPatch, repo_root: Path
 ) -> None:

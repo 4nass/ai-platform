@@ -37,6 +37,8 @@ class AgentTask:
     core.context.manager.SelectedContext.render_for — a ranked map for a
     provider that reads files itself, the full excerpt text for one that
     can't. Adapters inject it as given; they don't decide what goes in it."""
+    model: str | None = None
+    reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
         if self.engine_root is None:
