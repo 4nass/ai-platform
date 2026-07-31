@@ -1,4 +1,5 @@
 max_parallel: 2
+decompose: true
 
 tasks:
   - id: architecture

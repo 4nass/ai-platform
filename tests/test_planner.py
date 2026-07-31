@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.errors import ConfigError
-from core.orchestrator.planner import Plan, Task, load_workflow, plan
+from core.orchestrator.planner import Plan, Task, load_workflow, plan, prune
 
 
 def _write_workflow(tmp_path: Path, content: str) -> Path:
@@ -189,3 +189,88 @@ tasks:
 
     with pytest.raises(ConfigError, match="max_parallel"):
         plan(repo_root)
+
+
+def test_plan_uses_default_decompose_when_absent(tmp_path: Path) -> None:
+    repo_root = _write_workflow(
+        tmp_path,
+        """
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+""",
+    )
+
+    assert plan(repo_root).decompose is True
+
+
+def test_plan_reads_decompose_override(tmp_path: Path) -> None:
+    repo_root = _write_workflow(
+        tmp_path,
+        """
+decompose: false
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+""",
+    )
+
+    assert plan(repo_root).decompose is False
+
+
+def test_plan_rejects_non_boolean_decompose(tmp_path: Path) -> None:
+    repo_root = _write_workflow(
+        tmp_path,
+        """
+decompose: yes-please
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
+""",
+    )
+
+    with pytest.raises(ConfigError, match="decompose"):
+        plan(repo_root)
+
+
+def test_prune_keeps_only_selected_tasks() -> None:
+    original = Plan(
+        tasks=[
+            Task(id="architecture", agent="architect", depends_on=[]),
+            Task(id="backend", agent="backend", depends_on=["architecture"]),
+            Task(id="frontend", agent="frontend", depends_on=["architecture"]),
+        ]
+    )
+
+    pruned = prune(original, {"architecture", "backend"})
+
+    assert [t.id for t in pruned.tasks] == ["architecture", "backend"]
+
+
+def test_prune_drops_dangling_dependency_references() -> None:
+    original = Plan(
+        tasks=[
+            Task(id="architecture", agent="architect", depends_on=[]),
+            Task(id="backend", agent="backend", depends_on=["architecture"]),
+        ]
+    )
+
+    pruned = prune(original, {"backend"})
+
+    assert pruned.tasks == [Task(id="backend", agent="backend", depends_on=[])]
+
+
+def test_prune_preserves_max_parallel_and_decompose() -> None:
+    original = Plan(
+        tasks=[Task(id="architecture", agent="architect", depends_on=[])],
+        max_parallel=5,
+        decompose=False,
+    )
+
+    pruned = prune(original, {"architecture"})
+
+    assert pruned.max_parallel == 5
+    assert pruned.decompose is False

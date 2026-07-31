@@ -1,3 +1,6 @@
+decomposer:
+  provider: claude_code
+
 architect:
   provider: claude_code
 

@@ -20,7 +20,7 @@ import git
 from rich.console import Console
 
 from core.context.manager import ContextManager, SelectedContext
-from core.orchestrator import contracts, git_ops, planner, review, scheduler, test_runner
+from core.orchestrator import contracts, decomposer, git_ops, planner, review, scheduler, test_runner
 from core.orchestrator.scheduler import StageResult
 from providers.base import ProviderResult, display_name
 
@@ -115,6 +115,25 @@ def run(repo_root: Path, request: str) -> RunReport:
     context_manager.index_repo()
     context = context_manager.select_context(request)
     console.print(f"[bold]Context selected:[/bold] {len(context.context_paths())} files")
+
+    if workflow.decompose:
+        known_ids = [t.id for t in workflow.tasks]
+        decomposer_result = scheduler.run_task(
+            repo_root,
+            "decomposer",
+            decomposer.build_description(request, known_ids),
+            context.context_paths(),
+            context.render(),
+        )
+        chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
+        if chosen is None:
+            console.print("[bold yellow]Decomposition unavailable[/bold yellow] — running the full workflow")
+        else:
+            workflow = planner.prune(workflow, set(chosen))
+            dropped = sorted(set(known_ids) - set(chosen))
+            selected = ", ".join(t.id for t in workflow.tasks)
+            dropped_note = f" ({', '.join(dropped)} not needed)" if dropped else ""
+            console.print(f"[bold]Decomposed to:[/bold] {selected}{dropped_note}")
 
     base_sha = git_ops.current_commit(repo)
     branch = git_ops.create_branch(repo, request)

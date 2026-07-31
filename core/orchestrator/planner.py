@@ -1,10 +1,13 @@
 """Planner: builds the task DAG for a run.
 
-No LLM involved yet — the DAG is a static template declared in
+The DAG's dependency structure is a static template declared in
 config/workflow.yaml, the same "declared, not inferred" pattern already used
-for config/agents.yaml. Real per-request decomposition (a Task Decomposer
-agent) is a later phase; for now every run gets the same dependency graph,
-regardless of what the request says.
+for config/agents.yaml — task ids, roles and edges are never invented by an
+LLM. What *can* vary per request is which subset of that pre-validated DAG
+actually runs: core.orchestrator.decomposer (an LLM call) picks a subset of
+task ids, and `prune()` here narrows the plan down to it. Pruning a subgraph
+of an already-cycle-free, already-reference-checked DAG is safe by
+construction — no need to re-validate.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from core.errors import ConfigError
 
 WORKFLOW_CONFIG_PATH = Path("config/workflow.yaml")
 DEFAULT_MAX_PARALLEL = 2
+DEFAULT_DECOMPOSE = True
 
 
 @dataclass
@@ -31,6 +35,7 @@ class Task:
 class Plan:
     tasks: list[Task]
     max_parallel: int = DEFAULT_MAX_PARALLEL
+    decompose: bool = DEFAULT_DECOMPOSE
 
 
 def _parse_tasks(data: dict) -> list[Task]:
@@ -88,6 +93,13 @@ def _parse_max_parallel(data: dict) -> int:
     return value
 
 
+def _parse_decompose(data: dict) -> bool:
+    value = data.get("decompose", DEFAULT_DECOMPOSE)
+    if not isinstance(value, bool):
+        raise ConfigError(f"'decompose' must be a boolean, got: {value!r}")
+    return value
+
+
 def load_workflow(repo_root: Path) -> list[Task]:
     data = _read_workflow_data(repo_root)
     tasks = _parse_tasks(data)
@@ -97,4 +109,17 @@ def load_workflow(repo_root: Path) -> list[Task]:
 def plan(repo_root: Path) -> Plan:
     data = _read_workflow_data(repo_root)
     tasks = _topological_order(_parse_tasks(data))
-    return Plan(tasks=tasks, max_parallel=_parse_max_parallel(data))
+    return Plan(tasks=tasks, max_parallel=_parse_max_parallel(data), decompose=_parse_decompose(data))
+
+
+def prune(plan: Plan, keep_ids: set[str]) -> Plan:
+    """Keeps only the tasks in keep_ids, dropping any depends_on reference
+    to a task that got pruned out. Safe by construction: a subgraph of an
+    already-cycle-free, already-reference-checked DAG is still cycle-free
+    and still has no dangling references — no re-validation needed."""
+    kept = [task for task in plan.tasks if task.id in keep_ids]
+    pruned_tasks = [
+        Task(id=task.id, agent=task.agent, depends_on=[dep for dep in task.depends_on if dep in keep_ids])
+        for task in kept
+    ]
+    return Plan(tasks=pruned_tasks, max_parallel=plan.max_parallel, decompose=plan.decompose)

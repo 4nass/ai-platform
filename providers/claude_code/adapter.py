@@ -28,6 +28,7 @@ DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash(uv run pytest*)"
 ROLE_ALLOWED_TOOLS = {
     "reviewer": "Read,Grep,Glob",
     "security": "Read,Grep,Glob",
+    "decomposer": "Read,Grep,Glob",
     "architect": "Read,Edit,Write,Grep,Glob",
     "documentation": "Read,Edit,Write,Grep,Glob",
 }

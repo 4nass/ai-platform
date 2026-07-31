@@ -25,9 +25,16 @@ documentation:
   provider: claude_code
 reviewer:
   provider: claude_code
+decomposer:
+  provider: claude_code
 """
 
+# decompose: false here -- these fixtures exercise DAG execution mechanics,
+# not decomposition, and none of the fake providers below know how to answer
+# a decomposer call. Decomposition itself is tested separately below with
+# its own workflow.yaml (decompose defaults to true when the key is absent).
 WORKFLOW_YAML = """max_parallel: 2
+decompose: false
 tasks:
   - id: architecture
     agent: architect
@@ -312,3 +319,57 @@ def test_run_stops_early_when_the_first_stage_fails_with_no_disk_writes(
     assert all(s.status == "skipped" for s in report.stages[1:])
     assert report.files_changed == []
     assert report.summary == "needs attention"
+
+
+def _enable_decompose(repo_root: Path) -> None:
+    workflow_yaml = WORKFLOW_YAML.replace("decompose: false", "decompose: true")
+    (repo_root / "config" / "workflow.yaml").write_text(workflow_yaml, encoding="utf-8")
+    repo = git.Repo(repo_root)
+    repo.index.add(["config/workflow.yaml"])
+    repo.index.commit("enable decomposition")
+
+
+def test_run_prunes_the_plan_when_decomposer_selects_a_subset(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _enable_decompose(fake_repo)
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "decomposer":
+            return ProviderResult(success=True, summary="Reasoning...\nTASKS: architecture, backend")
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2")
+
+    ids = {s.id for s in report.stages}
+    assert ids == {"architecture", "backend"}  # frontend/tests/security/documentation never even appear
+    assert report.summary == "done"
+
+
+def test_run_falls_back_to_the_full_plan_when_decomposition_is_unparseable(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _enable_decompose(fake_repo)
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "decomposer":
+            return ProviderResult(success=True, summary="I'm not sure what's needed here.")
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2")
+
+    ids = {s.id for s in report.stages}
+    assert ids == {"architecture", "backend", "frontend", "tests", "security", "documentation"}
+    assert report.summary == "done"
