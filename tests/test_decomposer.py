@@ -39,3 +39,21 @@ def test_parse_tasks_returns_none_when_line_missing() -> None:
 
 def test_parse_tasks_returns_none_when_nothing_valid_survives() -> None:
     assert parse_tasks("TASKS: made_up_a, made_up_b", KNOWN_IDS) is None
+
+
+def test_parse_tasks_ignores_an_inline_example_and_takes_the_real_answer() -> None:
+    """prompts/decomposer.md documents the format with an example, and that
+    file is in the decomposer's own context — an inline mention must not win
+    over the trailing answer, which would silently truncate the workflow."""
+    text = (
+        'The prompt shows examples like "TASKS: backend, tests".\n'
+        "For this request I need the full pipeline:\n"
+        "\n"
+        "TASKS: architecture, backend, frontend, tests, security, documentation"
+    )
+
+    assert parse_tasks(text, KNOWN_IDS) == KNOWN_IDS
+
+
+def test_parse_tasks_accepts_markdown_emphasis() -> None:
+    assert parse_tasks("**TASKS:** backend, tests", KNOWN_IDS) == ["backend", "tests"]

@@ -20,5 +20,8 @@ Rules:
 - When in doubt about whether a change is security-sensitive, include `security` — a report that
   finds nothing costs little; skipping it on a genuinely sensitive change costs more.
 - End your response with exactly one line: `TASKS: ` followed by a comma-separated list of the
-  selected task types (e.g. `TASKS: backend, tests`). This line is parsed automatically — don't
-  add anything else to it, and don't include task types outside the six listed above.
+  selected task types (e.g. `TASKS: backend, tests`). This line is parsed automatically: it must
+  start at the very beginning of its own line (no indentation, no list marker, no surrounding
+  prose) and contain nothing else. Don't include task types outside the six listed above, and if
+  you mention the format inline while reasoning, keep that mention indented so it can't be
+  mistaken for your actual answer.

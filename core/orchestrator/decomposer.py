@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import re
 
-_TASKS_RE = re.compile(r"TASKS:\s*(.+)")
+# Line-anchored + last-match-wins, same reasoning as review._VERDICT_RE: the
+# decomposer sees prompts/*.md in its context, which document the "TASKS: ..."
+# format with examples, so an inline mention must not win over the real
+# trailing answer.
+_TASKS_RE = re.compile(r"^\**TASKS:\**\s*(.+)", re.IGNORECASE | re.MULTILINE)
 
 
 def build_description(request: str, known_ids: list[str]) -> str:
@@ -29,11 +33,11 @@ def parse_tasks(text: str, known_ids: list[str]) -> list[str] | None:
     decomposition. Returns None (the caller falls back to the full plan) if
     the line is missing, or if nothing valid survives the filter.
     """
-    match = _TASKS_RE.search(text)
-    if not match:
+    lines = _TASKS_RE.findall(text)
+    if not lines:
         return None
 
     known = set(known_ids)
-    selected = [item.strip() for item in match.group(1).split(",")]
+    selected = [item.strip() for item in lines[-1].split(",")]
     valid = [item for item in selected if item in known]
     return valid or None

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import git
+
 from core.context.chunking import chunk_file, iter_source_files
 
 
@@ -22,6 +24,43 @@ def test_iter_source_files_ignores_non_indexable_suffix(tmp_path: Path) -> None:
     (tmp_path / "image.png").write_bytes(b"\x89PNG")
 
     assert iter_source_files(tmp_path) == []
+
+
+def test_iter_source_files_skips_gitignored_files(tmp_path: Path) -> None:
+    """Anything indexed here is embedded and shipped to the model, so a
+    gitignored secrets file must never make it into the index."""
+    git.Repo.init(tmp_path)
+    (tmp_path / ".gitignore").write_text("secrets.yaml\nlocal.toml\n", encoding="utf-8")
+    (tmp_path / "secrets.yaml").write_text("api_key: sk-ant-EXAMPLE\n", encoding="utf-8")
+    (tmp_path / "local.toml").write_text('password = "hunter2"\n', encoding="utf-8")
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    names = {f.name for f in iter_source_files(tmp_path)}
+
+    assert "app.py" in names
+    assert "secrets.yaml" not in names
+    assert "local.toml" not in names
+
+
+def test_iter_source_files_skips_gitignored_directory_contents(tmp_path: Path) -> None:
+    git.Repo.init(tmp_path)
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "generated.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("y = 2\n", encoding="utf-8")
+
+    names = {f.name for f in iter_source_files(tmp_path)}
+
+    assert "app.py" in names
+    assert "generated.py" not in names
+
+
+def test_iter_source_files_works_outside_a_git_repo(tmp_path: Path) -> None:
+    """Indexing a plain directory must keep working — the gitignore filter
+    degrades to a no-op rather than failing."""
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert [f.name for f in iter_source_files(tmp_path)] == ["app.py"]
 
 
 def test_chunk_file_python_splits_by_function_and_class(tmp_path: Path) -> None:

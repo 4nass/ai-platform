@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import git
 from tree_sitter import Language, Node, Parser
 import tree_sitter_python as tspython
 
@@ -29,8 +30,32 @@ class Chunk:
     text: str
 
 
+def _git_ignored(repo_root: Path, paths: list[Path]) -> set[Path]:
+    """The subset of `paths` that git would ignore.
+
+    Everything indexed here ends up embedded and shipped to the model, so
+    honoring .gitignore is a confidentiality boundary, not a tidiness one:
+    without it, a gitignored `secrets.yaml` / `local.toml` (both indexable
+    suffixes) would be sent to the provider along with the rest of the repo.
+
+    Returns an empty set when `repo_root` isn't a git repo, so callers that
+    index a plain directory keep working.
+    """
+    if not paths:
+        return set()
+    try:
+        repo = git.Repo(repo_root)
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError):
+        return set()
+    try:
+        return {Path(p) for p in repo.ignored(*paths)}
+    except git.GitCommandError:
+        # Don't silently index what we failed to check — fail closed.
+        return set(paths)
+
+
 def iter_source_files(repo_root: Path) -> list[Path]:
-    files: list[Path] = []
+    candidates: list[Path] = []
     for path in sorted(repo_root.rglob("*")):
         if not path.is_file():
             continue
@@ -40,8 +65,10 @@ def iter_source_files(repo_root: Path) -> list[Path]:
             continue
         if path.suffix not in INDEXABLE_SUFFIXES:
             continue
-        files.append(path)
-    return files
+        candidates.append(path)
+
+    ignored = _git_ignored(repo_root, candidates)
+    return [path for path in candidates if path not in ignored]
 
 
 def chunk_file(repo_root: Path, path: Path) -> list[Chunk]:

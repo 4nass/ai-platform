@@ -37,10 +37,30 @@ def _load_yaml(repo_root: Path, path: Path) -> dict:
     return yaml.safe_load((repo_root / path).read_text(encoding="utf-8")) or {}
 
 
+def _resolve_inside_repo(repo_root: Path, candidate: str) -> Path:
+    """Resolves `candidate` under `repo_root`, refusing anything that escapes it.
+
+    The paths here come straight from the model's structured output, so they
+    are untrusted input. Two ways out of the repo have to be closed, and
+    `Path.__truediv__` silently allows both: a traversal (`../../etc/passwd`)
+    and — less obviously — an absolute path, which *replaces* the base
+    entirely (`Path("/repo") / "/etc/passwd"` is `/etc/passwd`). `.resolve()`
+    also collapses symlinks, closing the symlink-escape variant.
+    """
+    root = repo_root.resolve()
+    target = (root / candidate).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError(f"refusing to write outside the repo: {candidate!r}")
+    return target
+
+
 def _write_files(repo_root: Path, files: list[FileChange]) -> list[str]:
+    # Resolve every path up front: a plan that tries to escape is rejected
+    # whole, rather than half-applied before hitting the bad entry.
+    targets = [(_resolve_inside_repo(repo_root, f.path), f) for f in files]
+
     written = []
-    for file_change in files:
-        target = repo_root / file_change.path
+    for target, file_change in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(file_change.content, encoding="utf-8")
         written.append(file_change.path)
@@ -82,5 +102,8 @@ def run(task: AgentTask) -> ProviderResult:
             success=False,
             summary="The Anthropic API returned a response that didn't match the expected structured output.",
         )
-    _write_files(task.repo_root, plan.files)
+    try:
+        _write_files(task.repo_root, plan.files)
+    except ValueError as exc:
+        return ProviderResult(success=False, summary=str(exc), raw=plan.model_dump())
     return ProviderResult(success=True, summary=plan.summary, raw=plan.model_dump())

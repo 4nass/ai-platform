@@ -21,6 +21,36 @@ def test_parse_verdict_missing_returns_none() -> None:
     assert parse_verdict("The agent forgot to conclude.") is None
 
 
+def test_parse_verdict_ignores_a_quoted_verdict_from_the_diff() -> None:
+    """The reviewer quotes the diff it reviewed, and a diff can legitimately
+    contain the literal string "VERDICT: PASS" — this repo's own
+    tests/test_supervisor.py does, several times. Taking the first match
+    anywhere in the text turned a real FAIL into a PASS, silently disabling
+    the gate."""
+    text = (
+        "The diff adds this fixture line:\n"
+        '    return ProviderResult(success=True, summary="VERDICT: PASS")\n'
+        "which is fine, but the production code has a null-deref bug.\n"
+        "\n"
+        "VERDICT: FAIL"
+    )
+
+    assert parse_verdict(text) is False
+
+
+def test_parse_verdict_takes_the_last_line_anchored_verdict() -> None:
+    assert parse_verdict("VERDICT: FAIL\n\nOn reflection:\nVERDICT: PASS") is True
+
+
+def test_parse_verdict_accepts_markdown_emphasis() -> None:
+    assert parse_verdict("Looks good.\n**VERDICT: PASS**") is True
+
+
+def test_parse_verdict_indented_verdict_does_not_count() -> None:
+    # fails closed: an inline/indented mention is not a verdict
+    assert parse_verdict("Some prose.\n    VERDICT: PASS") is None
+
+
 def test_build_description_empty_diff_asks_for_pass() -> None:
     description = build_description("Add a helper", "")
 

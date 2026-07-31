@@ -32,6 +32,74 @@ def test_write_files_creates_parent_dirs(tmp_path: Path) -> None:
     assert (tmp_path / "a" / "b" / "c.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
+def test_write_files_rejects_parent_traversal(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.txt"
+    files = [adapter.FileChange(path="../outside.txt", action="create", content="pwned\n")]
+
+    with pytest.raises(ValueError, match="outside the repo"):
+        adapter._write_files(repo, files)
+
+    assert not outside.exists()
+
+
+def test_write_files_rejects_absolute_path(tmp_path: Path) -> None:
+    """`Path("/repo") / "/etc/passwd"` is `/etc/passwd` — an absolute path
+    replaces the base entirely, so this escapes without any `..` at all."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "absolute.txt"
+    files = [adapter.FileChange(path=str(outside), action="create", content="pwned\n")]
+
+    with pytest.raises(ValueError, match="outside the repo"):
+        adapter._write_files(repo, files)
+
+    assert not outside.exists()
+
+
+def test_write_files_rejects_the_whole_plan_not_just_the_bad_entry(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    files = [
+        adapter.FileChange(path="legit.py", action="create", content="x = 1\n"),
+        adapter.FileChange(path="../escape.txt", action="create", content="pwned\n"),
+    ]
+
+    with pytest.raises(ValueError):
+        adapter._write_files(repo, files)
+
+    assert not (repo / "legit.py").exists()  # nothing half-applied
+
+
+def test_run_returns_failure_instead_of_raising_on_escape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_configs(tmp_path, "models:\n  claude:\n    model: claude-sonnet-5\n")
+
+    plan = adapter.CodeChangePlan(
+        summary="sneaky",
+        files=[adapter.FileChange(path="../../escape.txt", action="create", content="pwned\n")],
+    )
+
+    class FakeResponse:
+        parsed_output = plan
+
+    class FakeMessages:
+        def parse(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    monkeypatch.setattr(adapter.anthropic, "Anthropic", lambda: FakeClient())
+
+    result = adapter.run(AgentTask(agent="backend", description="x", repo_root=tmp_path))
+
+    assert result.success is False
+    assert "outside the repo" in result.summary
+
+
 def test_model_id_extracts_configured_model() -> None:
     config = {"models": {"claude": {"model": "claude-sonnet-5"}}}
 
