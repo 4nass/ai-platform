@@ -29,6 +29,12 @@ def test_documentation_touching_application_code_is_flagged() -> None:
     assert violations("documentation", files) == ["core/auth/oauth.py"]
 
 
+def test_documentation_allows_a_new_top_level_markdown_file() -> None:
+    # Found via a real run: a legitimate, requested CONTRIBUTING.md at the
+    # repo root was wrongly flagged before this pattern was broadened.
+    assert violations("documentation", ["CONTRIBUTING.md"]) == []
+
+
 def test_security_may_not_touch_any_file() -> None:
     assert violations("security", ["README.md"]) == ["README.md"]
 

@@ -19,7 +19,12 @@ from fnmatch import fnmatch
 
 ROLE_ARTIFACT_PATTERNS: dict[str, list[str]] = {
     "architect": ["memory/architecture.md", "memory/adr/*.md"],
-    "documentation": ["README.md", "memory/*.md", "memory/adr/*.md"],
+    # Any markdown file, anywhere -- not just README.md/memory/*.md. Found via a
+    # real run: the original narrower list blocked a legitimate, requested
+    # CONTRIBUTING.md at the repo root. prompts/documentation.md's own rule is
+    # about following existing *format/style*, not about restricting *where*
+    # docs may live -- the extension is the real boundary of this role's job.
+    "documentation": ["*.md"],
     "security": [],  # never modifies any file -- also enforced via ROLE_ALLOWED_TOOLS (defense in depth)
 }
 
