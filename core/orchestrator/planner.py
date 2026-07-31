@@ -113,13 +113,37 @@ def plan(repo_root: Path) -> Plan:
 
 
 def prune(plan: Plan, keep_ids: set[str]) -> Plan:
-    """Keeps only the tasks in keep_ids, dropping any depends_on reference
-    to a task that got pruned out. Safe by construction: a subgraph of an
-    already-cycle-free, already-reference-checked DAG is still cycle-free
-    and still has no dangling references — no re-validation needed."""
-    kept = [task for task in plan.tasks if task.id in keep_ids]
+    """Keeps only the tasks in keep_ids. A dependency on a pruned-out task is
+    *bridged* to that task's own dependencies (recursively), not dropped
+    outright — pruning `security` from `tests -> security -> documentation`
+    must leave `documentation` depending on `tests`, not on nothing. Dropping
+    the edge instead of bridging it would silently let `documentation` start
+    before `tests` even ran, with no visibility into what was actually built
+    (found via a real decomposition that pruned exactly this way — the
+    resulting docs described the feature as unbuilt while `backend`, running
+    concurrently and invisibly to it, was implementing it).
+
+    Safe by construction: a subgraph of an already-cycle-free,
+    already-reference-checked DAG is still cycle-free, so the recursion
+    below always terminates without needing to re-run cycle detection.
+    """
+    by_id = {task.id: task for task in plan.tasks}
+
+    def bridged_deps(task_id: str, seen: set[str]) -> set[str]:
+        result: set[str] = set()
+        for dep in by_id[task_id].depends_on:
+            if dep in seen:
+                continue
+            seen.add(dep)
+            if dep in keep_ids:
+                result.add(dep)
+            else:
+                result |= bridged_deps(dep, seen)
+        return result
+
     pruned_tasks = [
-        Task(id=task.id, agent=task.agent, depends_on=[dep for dep in task.depends_on if dep in keep_ids])
-        for task in kept
+        Task(id=task.id, agent=task.agent, depends_on=sorted(bridged_deps(task.id, set())))
+        for task in plan.tasks
+        if task.id in keep_ids
     ]
     return Plan(tasks=pruned_tasks, max_parallel=plan.max_parallel, decompose=plan.decompose)

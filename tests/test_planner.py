@@ -250,7 +250,7 @@ def test_prune_keeps_only_selected_tasks() -> None:
     assert [t.id for t in pruned.tasks] == ["architecture", "backend"]
 
 
-def test_prune_drops_dangling_dependency_references() -> None:
+def test_prune_removes_dependency_that_has_nothing_to_bridge_to() -> None:
     original = Plan(
         tasks=[
             Task(id="architecture", agent="architect", depends_on=[]),
@@ -261,6 +261,40 @@ def test_prune_drops_dangling_dependency_references() -> None:
     pruned = prune(original, {"backend"})
 
     assert pruned.tasks == [Task(id="backend", agent="backend", depends_on=[])]
+
+
+def test_prune_bridges_dependency_through_a_pruned_middle_node() -> None:
+    # tests -> security -> documentation, security pruned out: found via a
+    # real decomposition, documentation must still depend on tests, not run
+    # with zero visibility into what tests (and backend before it) produced.
+    original = Plan(
+        tasks=[
+            Task(id="tests", agent="tests", depends_on=[]),
+            Task(id="security", agent="security", depends_on=["tests"]),
+            Task(id="documentation", agent="documentation", depends_on=["security"]),
+        ]
+    )
+
+    pruned = prune(original, {"tests", "documentation"})
+
+    by_id = {t.id: t for t in pruned.tasks}
+    assert by_id["documentation"].depends_on == ["tests"]
+
+
+def test_prune_bridges_through_multiple_consecutive_pruned_nodes() -> None:
+    original = Plan(
+        tasks=[
+            Task(id="a", agent="a", depends_on=[]),
+            Task(id="b", agent="b", depends_on=["a"]),
+            Task(id="c", agent="c", depends_on=["b"]),
+            Task(id="d", agent="d", depends_on=["c"]),
+        ]
+    )
+
+    pruned = prune(original, {"a", "d"})
+
+    by_id = {t.id: t for t in pruned.tasks}
+    assert by_id["d"].depends_on == ["a"]
 
 
 def test_prune_preserves_max_parallel_and_decompose() -> None:
