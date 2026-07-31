@@ -22,6 +22,7 @@ from core.errors import ConfigError
 WORKFLOW_CONFIG_PATH = Path("config/workflow.yaml")
 DEFAULT_MAX_PARALLEL = 2
 DEFAULT_DECOMPOSE = True
+DEFAULT_MAX_CORRECTION_ATTEMPTS = 1
 
 
 @dataclass
@@ -36,6 +37,11 @@ class Plan:
     tasks: list[Task]
     max_parallel: int = DEFAULT_MAX_PARALLEL
     decompose: bool = DEFAULT_DECOMPOSE
+    max_correction_attempts: int = DEFAULT_MAX_CORRECTION_ATTEMPTS
+    """How many test/review-failure -> corrector -> re-check passes run() may
+    attempt before giving up as "needs attention". Bounded on purpose: an
+    unbounded retry against a real provider is a quota/cost risk, not just a
+    latency one (see core.orchestrator.correction)."""
 
 
 def _parse_tasks(data: dict) -> list[Task]:
@@ -81,8 +87,8 @@ def _topological_order(tasks: list[Task]) -> list[Task]:
     return ordered
 
 
-def _read_workflow_data(repo_root: Path) -> dict:
-    path = repo_root / WORKFLOW_CONFIG_PATH
+def _read_workflow_data(engine_root: Path) -> dict:
+    path = engine_root / WORKFLOW_CONFIG_PATH
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
@@ -100,16 +106,28 @@ def _parse_decompose(data: dict) -> bool:
     return value
 
 
-def load_workflow(repo_root: Path) -> list[Task]:
-    data = _read_workflow_data(repo_root)
+def _parse_max_correction_attempts(data: dict) -> int:
+    value = data.get("max_correction_attempts", DEFAULT_MAX_CORRECTION_ATTEMPTS)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ConfigError(f"'max_correction_attempts' must be a non-negative integer, got: {value!r}")
+    return value
+
+
+def load_workflow(engine_root: Path) -> list[Task]:
+    data = _read_workflow_data(engine_root)
     tasks = _parse_tasks(data)
     return _topological_order(tasks)
 
 
-def plan(repo_root: Path) -> Plan:
-    data = _read_workflow_data(repo_root)
+def plan(engine_root: Path) -> Plan:
+    data = _read_workflow_data(engine_root)
     tasks = _topological_order(_parse_tasks(data))
-    return Plan(tasks=tasks, max_parallel=_parse_max_parallel(data), decompose=_parse_decompose(data))
+    return Plan(
+        tasks=tasks,
+        max_parallel=_parse_max_parallel(data),
+        decompose=_parse_decompose(data),
+        max_correction_attempts=_parse_max_correction_attempts(data),
+    )
 
 
 def prune(plan: Plan, keep_ids: set[str]) -> Plan:
@@ -146,4 +164,9 @@ def prune(plan: Plan, keep_ids: set[str]) -> Plan:
         for task in plan.tasks
         if task.id in keep_ids
     ]
-    return Plan(tasks=pruned_tasks, max_parallel=plan.max_parallel, decompose=plan.decompose)
+    return Plan(
+        tasks=pruned_tasks,
+        max_parallel=plan.max_parallel,
+        decompose=plan.decompose,
+        max_correction_attempts=plan.max_correction_attempts,
+    )

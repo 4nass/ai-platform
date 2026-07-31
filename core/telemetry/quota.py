@@ -31,11 +31,11 @@ class Budget:
     tokens: int
 
 
-def load_budgets(repo_root: Path) -> dict[str, Budget]:
+def load_budgets(engine_root: Path) -> dict[str, Budget]:
     """Declared budgets per provider. Missing file or missing provider is not
     an error: pressure is then reported as consumption without a percentage,
     which is still useful and beats refusing to run over a config gap."""
-    path = repo_root / CONFIG_PATH
+    path = engine_root / CONFIG_PATH
     if not path.is_file():
         return {}
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -53,18 +53,22 @@ def load_budgets(repo_root: Path) -> dict[str, Budget]:
     return budgets
 
 
-def pressure(repo_root: Path, *, window_hours: float | None = None) -> list[dict]:
+def pressure(engine_root: Path, *, window_hours: float | None = None) -> list[dict]:
     """Per-provider consumption in the window, with its share of budget.
+
+    Both the budgets and the telemetry read here are engine-scoped (shared
+    across every target repo the engine operates on) because quota is a
+    subscription resource, not a per-project one.
 
     `used_ratio` is None where no budget is declared — distinct from 0.0,
     which would claim the provider is idle.
     """
-    budgets = load_budgets(repo_root)
+    budgets = load_budgets(engine_root)
     window = window_hours or max(
         (b.window_hours for b in budgets.values()), default=DEFAULT_WINDOW_HOURS
     )
 
-    rows = store.provider_pressure(repo_root, window_hours=window)
+    rows = store.provider_pressure(engine_root, window_hours=window)
     for row in rows:
         budget = budgets.get(row["provider"])
         row["window_hours"] = window

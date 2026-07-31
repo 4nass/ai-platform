@@ -16,7 +16,7 @@ from core.graph.ast_deps import extract_imports
 from core.graph.git_deps import co_change_counts
 from core.graph.knowledge import mention_edges
 
-CACHE_PATH = Path("vector/graph.pkl")
+CACHE_PATH = Path(".ai-platform/graph.pkl")
 DOC_FILES = [
     Path("README.md"),
     Path("memory/architecture.md"),

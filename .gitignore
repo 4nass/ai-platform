@@ -11,11 +11,13 @@ wheels/
 
 .claude
 
-# Local vector index (generated)
-vector/*
-!vector/.gitkeep
+# Local per-target index: vector store + dependency graph cache, and the
+# target's own declared test command (see core/context/manager.py,
+# core/orchestrator/test_runner.py). Generated fresh per repo `--repo`
+# points at.
+.ai-platform/
 
-# Engine telemetry (local analytical memory)
+# Engine telemetry (local analytical memory, shared across every --repo target)
 telemetry.sqlite
 telemetry.sqlite-wal
 telemetry.sqlite-shm

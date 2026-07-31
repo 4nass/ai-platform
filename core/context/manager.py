@@ -31,7 +31,10 @@ from core.graph import builder as graph_builder
 from core.memory.loader import load_memory_docs
 
 CONFIG_PATH = Path("config/context.yaml")
-VECTOR_STORAGE_PATH = Path("vector/qdrant_db")
+VECTOR_STORAGE_PATH = Path(".ai-platform/vector/qdrant_db")
+"""Under the target repo, not the engine install: this indexes the target's
+own source, so a second `--repo` target must not share (or collide with) the
+first one's index."""
 
 POINTERS = "pointers"
 FULL = "full"
@@ -288,8 +291,8 @@ def _best_score_per_file(chunks: list[dict]) -> list[tuple[str, float]]:
     return list(best.items())
 
 
-def load_config(repo_root: Path) -> ContextConfig:
-    path = repo_root / CONFIG_PATH
+def load_config(engine_root: Path) -> ContextConfig:
+    path = engine_root / CONFIG_PATH
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     config = ContextConfig(**{k: v for k, v in data.items() if k in ContextConfig.__dataclass_fields__})
     if config.injection_mode not in INJECTION_MODES:
@@ -301,9 +304,14 @@ def load_config(repo_root: Path) -> ContextConfig:
 
 
 class ContextManager:
-    def __init__(self, repo_root: Path):
+    def __init__(self, repo_root: Path, *, engine_root: Path | None = None):
+        """`repo_root` is the target being indexed and searched. `engine_root`
+        is where config/context.yaml's thresholds live — the engine install,
+        which defaults to `repo_root` so self-targeting (still the common
+        case) and existing callers/tests need no change."""
         self.repo_root = repo_root
-        self.config = load_config(repo_root)
+        self.engine_root = engine_root if engine_root is not None else repo_root
+        self.config = load_config(self.engine_root)
         self._store: VectorStore | None = None
         self._graph: nx.MultiDiGraph | None = None
 

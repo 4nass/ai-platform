@@ -20,6 +20,14 @@ class AgentTask:
     agent: str
     description: str
     repo_root: Path
+    """The repo this task writes to and (for a CLI provider) runs in — the
+    target repo, or one of its task worktrees. Never where prompts/config
+    live when the two differ; see `engine_root`."""
+    engine_root: Path = None  # type: ignore[assignment]
+    """Where prompts/<agent>.md (and, for anthropic_api, models.yaml /
+    token_budget.yaml) are read from. Defaults to `repo_root` so a caller
+    that never set up the engine/target split (most tests, and every
+    self-targeting run before --repo existed) keeps working unchanged."""
     context_paths: list[str] = field(default_factory=list)
     """The selected paths, most relevant first — the machine-readable form of
     the selection (counted in telemetry). The prose the model actually reads
@@ -29,6 +37,10 @@ class AgentTask:
     core.context.manager.SelectedContext.render_for — a ranked map for a
     provider that reads files itself, the full excerpt text for one that
     can't. Adapters inject it as given; they don't decide what goes in it."""
+
+    def __post_init__(self) -> None:
+        if self.engine_root is None:
+            self.engine_root = self.repo_root
 
 
 @dataclass

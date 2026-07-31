@@ -8,9 +8,15 @@ from pathlib import Path
 # core/ and providers/ live at the repo root (outside the installed
 # src/ai_platform package): make them importable by adding the repo root to
 # sys.path, regardless of the cwd the script is launched from.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+#
+# This is also the engine install itself -- config/, prompts/ and the shared
+# telemetry.sqlite all live here (see core.telemetry.store, providers.base).
+# It's fixed, unlike the repo a command actually operates on (see --repo
+# below): the engine's own operating parameters don't move just because it's
+# pointed at a different project.
+ENGINE_ROOT = Path(__file__).resolve().parents[2]
+if str(ENGINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(ENGINE_ROOT))
 
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
@@ -18,6 +24,18 @@ from rich.console import Console  # noqa: E402
 console = Console()
 
 app = typer.Typer(help="ai-platform — request -> RAG context -> task DAG -> verified modification.")
+
+
+REPO_OPTION = typer.Option(
+    None,
+    "--repo",
+    help="Repo to operate on (default: the current directory). The engine's own "
+    "config/prompts/telemetry always come from the ai-platform install, regardless of this.",
+)
+
+
+def _target_root(repo: Path | None) -> Path:
+    return (repo or Path.cwd()).resolve()
 
 
 @app.callback()
@@ -28,6 +46,7 @@ def callback() -> None:
 @app.command()
 def run(
     request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
+    repo: Path = REPO_OPTION,
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -43,7 +62,7 @@ def run(
     from core.orchestrator import supervisor
 
     try:
-        report = supervisor.run(REPO_ROOT, request, dry_run=dry_run, session_id=session)
+        report = supervisor.run(ENGINE_ROOT, _target_root(repo), request, dry_run=dry_run, session_id=session)
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)
@@ -58,6 +77,7 @@ def run(
 @app.command()
 def context(
     request: str = typer.Argument(..., help="The request to select context for."),
+    repo: Path = REPO_OPTION,
     show_dropped: bool = typer.Option(
         True, "--dropped/--no-dropped", help="Also list the candidates that were rejected."
     ),
@@ -72,7 +92,7 @@ def context(
 
     from core.context.manager import FULL, POINTERS, ContextManager
 
-    manager = ContextManager(REPO_ROOT)
+    manager = ContextManager(_target_root(repo), engine_root=ENGINE_ROOT)
     manager.index_repo()
     selected = manager.select_context(request)
 
@@ -116,15 +136,23 @@ def context(
 
 @app.command()
 def history(
+    repo: Path = REPO_OPTION,
     runs: int = typer.Option(20, "--runs", help="How many recent runs to show."),
     session: str = typer.Option(None, "--session", help="Only show runs from this session."),
 ) -> None:
-    """Shows what recent runs cost — tokens, price, duration, outcome."""
+    """Shows what recent runs cost — tokens, price, duration, outcome.
+
+    Telemetry is shared across every repo the engine has been pointed at
+    (see core.telemetry.store), so this scopes to the resolved --repo —
+    self-targeting by default, meaning nothing changes if you never pass one.
+    """
     from rich.table import Table
 
     from core.telemetry import store as telemetry
 
-    rows = telemetry.recent_runs(REPO_ROOT, limit=runs, session_id=session)
+    rows = telemetry.recent_runs(
+        ENGINE_ROOT, limit=runs, session_id=session, target_repo=str(_target_root(repo))
+    )
     if not rows:
         console.print("No runs recorded yet.")
         return
@@ -180,12 +208,12 @@ def route(
     if role:
         roles = [role]
     else:
-        config = yaml.safe_load((REPO_ROOT / routing.AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
+        config = yaml.safe_load((ENGINE_ROOT / routing.AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
         roles = sorted(config)
 
     for name in roles:
         try:
-            decision = scheduler.route_agent(REPO_ROOT, name)
+            decision = scheduler.route_agent(ENGINE_ROOT, name)
         except Exception as exc:
             console.print(f"[bold red]{name}:[/bold red] {exc}")
             continue
@@ -225,7 +253,7 @@ def quota(
 
     from core.telemetry import quota as quota_store
 
-    rows = quota_store.pressure(REPO_ROOT, window_hours=window)
+    rows = quota_store.pressure(ENGINE_ROOT, window_hours=window)
     if not rows:
         console.print("No provider usage recorded yet, and no budgets declared.")
         return

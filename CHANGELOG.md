@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Subscription quota accounting (`core/telemetry/quota.py`, `config/quota.yaml`): neither CLI reports a remaining balance, so declared budgets are compared against tokens actually recorded. `ai-platform quota` shows the pressure per provider.
 - `ai-platform context` and `ai-platform route`: inspect the file selection and the provider choice without invoking an agent.
 - `ai-platform history`: shows recent runs' cost, tokens, duration, and outcome from recorded telemetry.
+- `--repo` flag on `run`, `context` and `history`: operate on any git repo, not just the ai-platform repo itself. The engine's own config/prompts/telemetry stay fixed at the install (`ENGINE_ROOT`), separate from the repo actually being modified (`target_root`) — `core/orchestrator/scheduler.run_task` and `core/orchestrator/supervisor.run` now take both explicitly.
+- Per-target `.ai-platform.yml` declares the test command `core/orchestrator/test_runner.py` runs — `pytest -q` is only true for this repo, so a `--repo` target on another stack (npm, go, cargo, ...) provides its own. Absent entirely, tests are skipped and clearly labeled `SKIPPED`, rather than run against a command that doesn't apply.
+- Bounded test/review correction loop: when tests fail or the review verdict is FAIL — and every DAG stage otherwise completed — a new `corrector` role gets the failure output for up to `max_correction_attempts` fix-and-recheck passes (`config/workflow.yaml`, default 1) before the run reports `needs attention` (`core/orchestrator/correction.py`, `prompts/corrector.md`).
 
 ### Changed
 
@@ -28,6 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Reporting leads with tokens, duration and outcome rather than dollars. With two flat-rate subscriptions a per-call price measures nothing actionable; cost is still recorded where a provider volunteers one, but nothing decides on it.
 - `providers/base.TokenUsage` now states the platform's token convention explicitly, and each adapter converts into it. Anthropic reports the cached count *disjoint* from the input count; OpenAI reports it as a *subset*. Summing both shapes the same way would have reported 25,002 tokens for a 13,994-token Codex prompt.
 - Documentation's artifact contract broadened from `README.md`/`memory/*.md` to any `*.md` file, after a real run needed to create `CONTRIBUTING.md` at the repo root (`core/orchestrator/contracts.py`).
+- `tests` role now prefers `codex_cli` over `claude_code` (`config/agents.yaml`).
+- `telemetry.sqlite` is now shared across every `--repo` target instead of living inside whichever repo happened to be operated on: quota is a subscription resource, not a per-project one, so routing/quota pressure has to aggregate across all of them. Each run records which target it touched (`runs.target_repo`, backfilled on migration for pre-existing rows); `ai-platform history` scopes to the resolved `--repo` by default.
+- The vector store and dependency graph cache moved from `vector/qdrant_db` / `vector/graph.pkl` to `.ai-platform/vector/qdrant_db` / `.ai-platform/graph.pkl`, always under the target repo being indexed — a single, target-scoped rule that also holds up for an external `--repo` target, which never had a `vector/` directory of its own.
 
 ### Fixed
 

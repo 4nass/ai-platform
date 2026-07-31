@@ -28,7 +28,8 @@ def _report(summary: str) -> RunReport:
 
 def test_cli_exits_zero_when_summary_is_done(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.orchestrator.supervisor.run", lambda repo_root, request, dry_run=False, session_id=None: _report("done")
+        "core.orchestrator.supervisor.run",
+        lambda engine_root, target_root, request, dry_run=False, session_id=None: _report("done"),
     )
 
     result = runner.invoke(ai_platform.app, ["run", "add a thing"])
@@ -38,7 +39,8 @@ def test_cli_exits_zero_when_summary_is_done(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_cli_exits_nonzero_when_summary_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.orchestrator.supervisor.run", lambda repo_root, request, dry_run=False, session_id=None: _report("needs attention")
+        "core.orchestrator.supervisor.run",
+        lambda engine_root, target_root, request, dry_run=False, session_id=None: _report("needs attention"),
     )
 
     result = runner.invoke(ai_platform.app, ["run", "add a thing"])
@@ -49,7 +51,7 @@ def test_cli_exits_nonzero_when_summary_needs_attention(monkeypatch: pytest.Monk
 def test_cli_dry_run_passes_flag_through_and_ignores_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
-    def fake_run(repo_root, request, dry_run=False, session_id=None):
+    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None):
         captured["dry_run"] = dry_run
         return _report("needs attention")
 
@@ -61,8 +63,28 @@ def test_cli_dry_run_passes_flag_through_and_ignores_summary(monkeypatch: pytest
     assert captured["dry_run"] is True
 
 
+def test_cli_run_passes_the_repo_flag_through_as_target_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    captured: dict = {}
+
+    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None):
+        captured["engine_root"] = engine_root
+        captured["target_root"] = target_root
+        return _report("done")
+
+    monkeypatch.setattr("core.orchestrator.supervisor.run", fake_run)
+
+    result = runner.invoke(ai_platform.app, ["run", "add a thing", "--repo", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["target_root"] == tmp_path.resolve()
+    assert captured["engine_root"] == ai_platform.ENGINE_ROOT
+    assert captured["engine_root"] != captured["target_root"]
+
+
 def test_cli_exits_nonzero_and_prints_clean_error_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    def raise_error(repo_root, request, dry_run=False, session_id=None):
+    def raise_error(engine_root, target_root, request, dry_run=False, session_id=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("core.orchestrator.supervisor.run", raise_error)
@@ -77,8 +99,9 @@ def test_cli_exits_nonzero_and_prints_clean_error_on_exception(monkeypatch: pyte
 class _FakeContextManager:
     """Stands in for the real one so the CLI test needs no index or graph."""
 
-    def __init__(self, repo_root) -> None:
+    def __init__(self, repo_root, *, engine_root=None) -> None:
         self.repo_root = repo_root
+        self.engine_root = engine_root
 
     def index_repo(self) -> int:
         return 0

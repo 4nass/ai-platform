@@ -34,6 +34,27 @@ def test_agent_task_defaults() -> None:
     assert task.context_render == ""
 
 
+def test_agent_task_engine_root_defaults_to_repo_root() -> None:
+    """Self-targeting (no --repo) is still the common case, and every
+    existing caller that only ever set repo_root must keep working
+    unchanged -- prompts/config load from wherever repo_root points."""
+    task = AgentTask(agent="backend", description="do x", repo_root=Path("/some/repo"))
+
+    assert task.engine_root == Path("/some/repo")
+
+
+def test_agent_task_engine_root_kept_when_given_explicitly() -> None:
+    task = AgentTask(
+        agent="backend",
+        description="do x",
+        repo_root=Path("/target/repo"),
+        engine_root=Path("/engine/install"),
+    )
+
+    assert task.engine_root == Path("/engine/install")
+    assert task.repo_root == Path("/target/repo")
+
+
 def test_provider_result_defaults() -> None:
     result = ProviderResult(success=True, summary="done")
 

@@ -56,18 +56,32 @@ What actually runs today, as opposed to the target vision described further belo
 
 **Key design choice: the engine doesn't talk to a model directly.** It drives the `claude` CLI (Claude Code) as a subprocess, authenticated via the already-active subscription session (`claude auth login`) — no separate API billing. A provider abstraction (`providers/base.py`) makes the backend swappable: whichever provider runs, the contract is that the repo is already modified on disk by the time it returns, so the orchestrator stays agnostic to how the change was made.
 
-**How a run works:**
-1. `core/context/manager.py` indexes the repo (tree-sitter chunking for Python, section chunking for Markdown, whole-file otherwise) into a local, file-mode Qdrant vector index, then selects the chunks/files relevant to the request, plus the current git diff and `memory/*.md`.
-2. `core/orchestrator/router.py` picks a provider for the role from the preference order in `config/agents.yaml`, skipping one that is over its declared quota or has been failing that role, and records the reason it chose. `core/orchestrator/scheduler.py` then builds and dispatches the task.
-3. `core/orchestrator/planner.py` builds the task DAG declared in `config/workflow.yaml` (by default: architecture → backend/frontend → tests → security → documentation); a `decomposer` role call then prunes it to the subset of tasks the request actually needs, bridging dependencies through anything it drops. `core/orchestrator/supervisor.py` creates the isolated `engine/<slug>` branch, then runs the (pruned) DAG — each task in its own git worktree, up to `max_parallel` tasks at once — merging every finished task's branch back with `--no-ff`. A task that writes outside its role's declared contract (`core/orchestrator/contracts.py`) is flagged; a merge conflict blocks that branch for manual resolution rather than being auto-resolved.
-4. Once the DAG finishes, the supervisor runs the test suite and sends the run's full diff to the `reviewer` role; its `VERDICT: PASS`/`FAIL` (`core/orchestrator/review.py`) gates the run's overall outcome alongside the tests.
+**Engine vs. target repo.** The engine's own operating parameters — `config/*.yaml`, `prompts/*.md`, and the shared `telemetry.sqlite` — always live at the ai-platform install (`ENGINE_ROOT`), fixed regardless of what's being worked on. The repo actually being modified (`--repo`, default: the current directory) is a separate `target_root`: that's where git branches/worktrees are created, where the target's own test command runs, and where its context index (`.ai-platform/vector/`, `.ai-platform/graph.pkl`) and project memory (`memory/*.md`, if the target has one) live. They coincide when the engine runs on itself — the only mode that existed before `--repo` — but nothing in the target repo is assumed to look like ai-platform's own layout.
 
-**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, plus the internal `decomposer` role. Each role declares an ordered list of providers that may serve it; `decomposer` and `reviewer` prefer `codex_cli`, the rest `claude_code`. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction.
+**How a run works:**
+1. `core/context/manager.py` indexes the target repo (tree-sitter chunking for Python, section chunking for Markdown, whole-file otherwise) into a local, file-mode Qdrant vector index under `.ai-platform/`, then selects the chunks/files relevant to the request, plus the current git diff and the target's own `memory/*.md`.
+2. `core/orchestrator/router.py` picks a provider for the role from the preference order in `config/agents.yaml`, skipping one that is over its declared quota or has been failing that role, and records the reason it chose. `core/orchestrator/scheduler.py` then builds and dispatches the task.
+3. `core/orchestrator/planner.py` builds the task DAG declared in `config/workflow.yaml` (by default: architecture → backend/frontend → tests → security → documentation); a `decomposer` role call then prunes it to the subset of tasks the request actually needs, bridging dependencies through anything it drops. `core/orchestrator/supervisor.py` creates the isolated `engine/<slug>` branch on the target repo, then runs the (pruned) DAG — each task in its own git worktree, up to `max_parallel` tasks at once — merging every finished task's branch back with `--no-ff`. A task that writes outside its role's declared contract (`core/orchestrator/contracts.py`) is flagged; a merge conflict blocks that branch for manual resolution rather than being auto-resolved.
+4. Once the DAG finishes, the supervisor runs the target's test suite (`core/orchestrator/test_runner.py`, per `.ai-platform.yml` — see below) and sends the run's full diff to the `reviewer` role; its `VERDICT: PASS`/`FAIL` (`core/orchestrator/review.py`) gates the run's overall outcome alongside the tests.
+5. If tests failed or the review verdict was FAIL — and every DAG stage otherwise completed — the `corrector` role gets the failure output and one bounded shot at fixing it (`config/workflow.yaml: max_correction_attempts`, default 1): fix, commit, re-run tests, re-run review, repeat until it passes or the attempts run out. A stage that itself failed, was skipped, or hit a merge conflict isn't something a corrector pass can retroactively complete, so those runs go straight to `needs attention` as before.
+
+**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, `corrector`, plus the internal `decomposer` role. Each role declares an ordered list of providers that may serve it; `decomposer`, `reviewer`, `tests` and `corrector` prefer `codex_cli`, the rest `claude_code`. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction.
 
 **Run it:**
 
 ```bash
 uv run ai-platform run "Add a simple utility function"
+
+# Against a different project (defaults to the current directory otherwise):
+uv run ai-platform run "Add a simple utility function" --repo ~/code/some-other-project
+```
+
+**Declaring how a target repo validates a change.** `core/orchestrator/test_runner.py` never assumes `pytest`: it reads `test_command` (and optionally `test_timeout`, default 120s) from a `.ai-platform.yml` at the target repo's root. Absent entirely, tests are skipped — cleanly labeled `SKIPPED`, not silently treated as passing without saying so — rather than run a command that doesn't apply to that stack.
+
+```yaml
+# .ai-platform.yml, at the target repo's root
+test_command: "uv run pytest -q"   # or a list: [npm, test] — or go test ./..., cargo test, etc.
+test_timeout: 120
 ```
 
 **Check subscription pressure:**
@@ -110,7 +124,14 @@ key, which is separate per-token billing rather than a subscription. Also
 absent: MCP integration, model-level routing (codex reports no model at all, so
 there is nothing to measure), and any persisted `memory/*.md` content — the
 files exist but are empty, and `core/memory/loader.py` globs only `memory/*.md`,
-so `memory/adr/` is not loaded as memory either.
+so `memory/adr/` is not loaded as memory either. The decomposer still only
+*prunes* the fixed DAG in `config/workflow.yaml`; it never composes a plan
+tailored to the request. Correction attempts (see above) are recorded as
+ordinary `calls` rows — `stage_id` `correction-1`, `correction-2`, ... — so
+they already feed the existing quota/success-rate routing gates
+(`core/orchestrator/router.py`) with no separate mechanism needed; there is
+no dedicated policy that reacts to "this role/provider needed N correction
+passes" beyond that.
 
 ---
 
@@ -229,7 +250,7 @@ Example: modifying `JwtService.java` — the system detects `AuthController`, `S
 Two different kinds of persisted knowledge, kept deliberately separate:
 
 - **Markdown, for human-authored knowledge** — decisions and project rules a person wrote and can read/edit directly: `memory/architecture.md`, `memory/coding_rules.md`, `memory/business_rules.md`, `memory/roadmap.md`, `memory/adr/ADR-*.md`.
-- **SQLite, for machine-generated history** — task runs, which agent/provider handled each one, and token/cost metrics per run. A local `.sqlite` file, no server, queryable directly (`sqlite3`, or `ai-platform history`) — implemented (`core/telemetry/store.py`).
+- **SQLite, for machine-generated history** — task runs, which agent/provider handled each one, and token/cost metrics per run. A local `.sqlite` file, no server, queryable directly (`sqlite3`, or `ai-platform history`) — implemented (`core/telemetry/store.py`). Lives at `ENGINE_ROOT`, shared across every `--repo` target (quota is a subscription resource, not a per-project one), with each run tagged by which target it touched (`runs.target_repo`); `ai-platform history` scopes to the resolved `--repo` by default.
 
 ```
 memory/
@@ -240,7 +261,7 @@ memory/
 └── adr/
     └── ADR-001-*.md
 
-telemetry.sqlite   # runs(id, session_id, request, branch, summary, engine_commit, started_at, finished_at, duration_ms, metadata)
+telemetry.sqlite   # runs(id, session_id, target_repo, request, branch, summary, engine_commit, started_at, finished_at, duration_ms, metadata)
                    # calls(id, run_id, stage_id, agent, provider, model, success, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, started_at, finished_at, duration_ms, provider_duration_ms, context_files, context_chars, routing_reason, context_reason, metadata)
 ```
 
@@ -335,6 +356,12 @@ This is the full target, not just what prototype 1 needs — deliberately: no Re
 - [x] `run --dry-run` flag: print the planned workflow and the decomposer's
       selected tasks without invoking any workflow-task agent (see
       `memory/adr/ADR-001-cli-dry-run-flag.md`)
+- [x] `--repo` flag: operate on any git repo, not just the ai-platform repo
+      itself — engine config/prompts/telemetry stay fixed at the install,
+      the target repo's own `.ai-platform.yml` declares its test command
+- [x] Bounded test/review correction loop: on failure, feed the corrector
+      role the failure output for up to `max_correction_attempts` fix passes
+      before giving up as `needs attention`
 
 ### Phase 5 - Automation
 - [ ] MCP

@@ -274,6 +274,33 @@ def test_context_manager_index_and_select(fake_repo: Path) -> None:
     assert any(c["path"] == "auth.py" for c in context.chunks)
 
 
+def test_context_manager_indexes_under_dot_ai_platform_in_the_target(fake_repo: Path) -> None:
+    """The vector store/graph cache live under the target being indexed, not
+    the engine install -- a second --repo target must get its own index, not
+    share (or overwrite) the first one's."""
+    manager = ContextManager(fake_repo)
+
+    manager.index_repo()
+
+    assert (fake_repo / ".ai-platform" / "vector" / "qdrant_db").exists()
+
+
+def test_context_manager_loads_thresholds_from_engine_root_not_repo_root(tmp_path: Path) -> None:
+    """config/context.yaml is engine policy: it must be read from the engine
+    install even when repo_root points at a target with no config/ of its
+    own (an external --repo target has no reason to carry ai-platform's own
+    config directory)."""
+    engine_root = tmp_path / "engine"
+    target_root = tmp_path / "target"
+    (engine_root / "config").mkdir(parents=True)
+    (engine_root / "config" / "context.yaml").write_text("max_files: 42\n", encoding="utf-8")
+    git.Repo.init(target_root)
+
+    manager = ContextManager(target_root, engine_root=engine_root)
+
+    assert manager.config.max_files == 42
+
+
 def test_select_context_expands_with_the_graph_when_enabled(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:

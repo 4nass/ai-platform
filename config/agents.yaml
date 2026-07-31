@@ -27,7 +27,10 @@ security:
   providers: [claude_code, codex_cli]
 
 tests:
-  providers: [claude_code]
+  providers: [codex_cli, claude_code]
 
 documentation:
   providers: [claude_code]
+
+corrector:
+  providers: [codex_cli, claude_code]

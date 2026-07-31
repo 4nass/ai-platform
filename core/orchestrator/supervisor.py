@@ -22,6 +22,7 @@ from rich.console import Console
 from core.context.manager import ContextManager, SelectedContext
 from core.orchestrator import (
     contracts,
+    correction,
     decomposer,
     git_ops,
     planner,
@@ -59,6 +60,10 @@ class RunReport:
     totals: dict = field(default_factory=dict)
     """Rolled-up cost/tokens for the run (see core.telemetry.store.run_totals).
     Empty on a dry run, which records nothing."""
+    correction_attempts: int = 0
+    """How many test/review-failure -> corrector -> re-check passes actually
+    ran (see planner.Plan.max_correction_attempts). 0 means either nothing
+    failed, or nothing failed *and had files to fix* — see run()."""
 
 
 def format_totals(totals: dict) -> str:
@@ -100,8 +105,15 @@ def format_totals(totals: dict) -> str:
     return line
 
 
+def _test_label(result: test_runner.TestResult) -> str:
+    if result.skipped:
+        return "SKIPPED"
+    return "PASS" if result.passed else "FAIL"
+
+
 def _run_stage_in_worktree(
-    repo_root: Path,
+    target_root: Path,
+    engine_root: Path,
     branch: str,
     task: planner.Task,
     request: str,
@@ -122,12 +134,12 @@ def _run_stage_in_worktree(
     other tasks are still in flight.
     """
     try:
-        worktree_path, task_branch = git_ops.create_worktree(git.Repo(repo_root), branch, task.id)
+        worktree_path, task_branch = git_ops.create_worktree(git.Repo(target_root), branch, task.id)
     except git.GitCommandError as exc:
         failure = ProviderResult(success=False, summary=f"worktree setup failed: {exc}")
         return StageResult(task=task, status="failed", result=failure), None, None
 
-    provider_name = scheduler.resolve_provider(repo_root, task.agent)
+    provider_name = scheduler.resolve_provider(engine_root, task.agent)
     console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
 
     description = scheduler.build_stage_description(request, completed_snapshot)
@@ -138,9 +150,7 @@ def _run_stage_in_worktree(
         context,
         recorder=recorder,
         stage_id=task.id,
-        # Routing reads recorded history, which lives in the main repo — the
-        # worktree is thrown away when the stage finishes.
-        routing_root=repo_root,
+        engine_root=engine_root,
     )
 
     worktree_repo = git.Repo(worktree_path)
@@ -164,18 +174,32 @@ def _run_stage_in_worktree(
     return StageResult(task=task, status=status, result=result, files_changed=changed), worktree_path, task_branch
 
 
-def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | None = None) -> RunReport:
-    repo = git.Repo(repo_root)
+def run(
+    engine_root: Path,
+    target_root: Path,
+    request: str,
+    dry_run: bool = False,
+    session_id: str | None = None,
+) -> RunReport:
+    """`engine_root` is the ai-platform install (config/, prompts/, the
+    shared telemetry.sqlite); `target_root` is the repo this run actually
+    modifies. They're the same directory when the engine operates on itself
+    — the only mode that existed before `--repo` — but must not be conflated
+    for an external target: config/prompts/telemetry are engine-scoped and
+    fixed, while git operations, the test command and the context index are
+    target-scoped (see core.context.manager, core.orchestrator.test_runner).
+    """
+    repo = git.Repo(target_root)
     if not dry_run:
         git_ops.ensure_clean_worktree(repo)
         git_ops.prune_worktrees(repo)
 
     console.rule("Engine")
 
-    workflow = planner.plan(repo_root)
+    workflow = planner.plan(engine_root)
     console.print(f"[bold]Plan generated[/bold]: {len(workflow.tasks)} tasks (up to {workflow.max_parallel} in parallel)")
 
-    context_manager = ContextManager(repo_root)
+    context_manager = ContextManager(target_root, engine_root=engine_root)
     context_manager.index_repo()
     context = context_manager.select_context(request)
     kept_files = len(context.context_paths())
@@ -200,11 +224,12 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
     # be reconstructed from a past row: they're what makes runs comparable
     # across engine versions and across config changes.
     recorder = None
-    routing = router.load_thresholds(repo_root)
+    routing = router.load_thresholds(engine_root)
     if not dry_run:
         recorder = telemetry.RunRecorder(
-            repo_root,
+            engine_root,
             request,
+            target_repo=str(target_root),
             session_id=session_id,
             engine_commit=git_ops.current_commit(repo),
             metadata={
@@ -229,17 +254,19 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
                 "routing_window_hours": routing.window_hours,
                 "decompose": workflow.decompose,
                 "max_parallel": workflow.max_parallel,
+                "max_correction_attempts": workflow.max_correction_attempts,
             },
         )
 
     if workflow.decompose:
         known_ids = [t.id for t in workflow.tasks]
         decomposer_result = scheduler.run_task(
-            repo_root,
+            target_root,
             "decomposer",
             decomposer.build_description(request, known_ids),
             context,
             recorder=recorder,
+            engine_root=engine_root,
         )
         chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
         if chosen is None:
@@ -304,7 +331,15 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
                 del remaining[task_id]
                 snapshot = list(completed)
                 future = executor.submit(
-                    _run_stage_in_worktree, repo_root, branch, task, request, context, snapshot, recorder
+                    _run_stage_in_worktree,
+                    target_root,
+                    engine_root,
+                    branch,
+                    task,
+                    request,
+                    context,
+                    snapshot,
+                    recorder,
                 )
                 in_flight[future] = task
 
@@ -359,14 +394,14 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
 
     any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
-    test_result = test_runner.run_tests(repo_root)
-    console.print(f"[bold]Tests:[/bold] {'PASS' if test_result.passed else 'FAIL'}")
+    test_result = test_runner.run_tests(target_root)
+    console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
     if test_result.output:
         console.print(test_result.output)
 
     diff = git_ops.diff_since(repo, base_sha)
     review_result = scheduler.run_task(
-        repo_root, "reviewer", review.build_description(request, diff), recorder=recorder
+        target_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root
     )
     review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
     review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
@@ -375,14 +410,78 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
         console.print(review_result.summary)
 
     overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
+
+    # Bounded test/review -> corrector -> re-check loop (see
+    # core.orchestrator.correction and planner.Plan.max_correction_attempts).
+    # Deliberately scoped to test/review failure only: a DAG stage that
+    # itself failed, was skipped, or hit a merge conflict isn't something a
+    # single corrector pass can retroactively complete, so those runs go
+    # straight to "needs attention" as before.
+    correction_attempts = 0
+    can_correct = (
+        not any_stage_incomplete
+        and not overall_ok
+        and any(s.status == "done" and s.files_changed for s in stage_reports)
+    )
+    if can_correct:
+        for attempt in range(1, workflow.max_correction_attempts + 1):
+            correction_attempts = attempt
+            console.print(
+                f"[bold yellow]Correction attempt {attempt}/{workflow.max_correction_attempts}[/bold yellow]"
+            )
+            correction_description = correction.build_description(
+                request,
+                test_output=test_result.output if not test_result.passed else "",
+                review_summary=review_result.summary if review_passed is False else "",
+            )
+            correction_result = scheduler.run_task(
+                target_root,
+                "corrector",
+                correction_description,
+                context,
+                recorder=recorder,
+                stage_id=f"correction-{attempt}",
+                engine_root=engine_root,
+            )
+            corrected_files = git_ops.commit_all(
+                repo, f"correction {attempt}: {correction_result.summary or request}"
+            )
+            all_files_changed.extend(corrected_files)
+            console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
+
+            test_result = test_runner.run_tests(target_root)
+            console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
+            if test_result.output:
+                console.print(test_result.output)
+
+            diff = git_ops.diff_since(repo, base_sha)
+            review_result = scheduler.run_task(
+                target_root,
+                "reviewer",
+                review.build_description(request, diff),
+                recorder=recorder,
+                engine_root=engine_root,
+            )
+            review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
+            review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
+            console.print(f"[bold]Review:[/bold] {review_label}")
+            if review_result.summary:
+                console.print(review_result.summary)
+
+            overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
+            if overall_ok:
+                break
+
     summary = "done" if overall_ok else "needs attention"
 
     totals: dict = {}
     if recorder is not None:
         recorder.finish(branch=branch, summary=summary)
-        totals = telemetry.run_totals(repo_root, recorder.run_id)
+        totals = telemetry.run_totals(engine_root, recorder.run_id)
         console.print(f"[bold]Usage:[/bold] {format_totals(totals)}")
 
+    if correction_attempts:
+        console.print(f"[bold]Corrections:[/bold] {correction_attempts} attempt(s)")
     console.print(f"[bold]Summary:[/bold] {summary}")
 
     return RunReport(
@@ -395,4 +494,5 @@ def run(repo_root: Path, request: str, dry_run: bool = False, session_id: str | 
         review_summary=review_result.summary,
         summary=summary,
         totals=totals,
+        correction_attempts=correction_attempts,
     )

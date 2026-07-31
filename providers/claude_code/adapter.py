@@ -129,7 +129,7 @@ def run(task: AgentTask) -> ProviderResult:
     if auth_error:
         return ProviderResult(success=False, summary=auth_error)
 
-    system_prompt = load_role_prompt(task.repo_root, task.agent)
+    system_prompt = load_role_prompt(task.engine_root, task.agent)
 
     cmd = [
         "claude",

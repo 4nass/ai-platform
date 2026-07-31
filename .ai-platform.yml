@@ -1,0 +1,6 @@
+# Declares how this repo validates a change. Read by
+# core/orchestrator/test_runner.py -- a `--repo` target on a different stack
+# would provide its own with a command appropriate to it (npm test,
+# go test ./..., etc). Absent entirely, tests are skipped rather than
+# assumed to be "uv run pytest -q".
+test_command: "uv run pytest -q"

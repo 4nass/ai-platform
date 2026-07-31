@@ -323,19 +323,20 @@ def test_run_task_records_why_the_provider_was_chosen(
     assert recorder.calls[0]["routing_reason"]
 
 
-def test_routing_reads_history_from_the_main_repo_not_the_task_worktree(
+def test_routing_reads_history_from_engine_root_not_the_task_worktree(
     monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path
 ) -> None:
     """DAG stages run in a throwaway worktree. Routing off that path would
     decide from an empty database — every stage cold-starting forever — and
     would drop a stray telemetry.sqlite in the worktree for the stage's own
-    commit to sweep up (it did, and the contract check caught it)."""
+    commit to sweep up (it did, and the contract check caught it). Passing
+    `engine_root` explicitly is what fixes it — it's never derived from
+    `repo_root`, worktree or not."""
     monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider({}))
     worktree = tmp_path / "worktree"
-    (worktree / "config").mkdir(parents=True)
-    (worktree / "config" / "agents.yaml").write_text(AGENTS_YAML, encoding="utf-8")
+    worktree.mkdir()
 
-    scheduler.run_task(worktree, "backend", "x", routing_root=repo_root)
+    scheduler.run_task(worktree, "backend", "x", engine_root=repo_root)
 
     assert not (worktree / "telemetry.sqlite").exists()
     assert (repo_root / "telemetry.sqlite").exists()

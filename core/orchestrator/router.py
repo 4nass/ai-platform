@@ -68,8 +68,8 @@ class Decision:
     candidates: list[Candidate]
 
 
-def load_thresholds(repo_root: Path) -> Thresholds:
-    path = repo_root / ROUTING_CONFIG_PATH
+def load_thresholds(engine_root: Path) -> Thresholds:
+    path = engine_root / ROUTING_CONFIG_PATH
     if not path.is_file():
         return Thresholds()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -78,14 +78,14 @@ def load_thresholds(repo_root: Path) -> Thresholds:
     )
 
 
-def eligible_providers(repo_root: Path, agent: str) -> list[str]:
+def eligible_providers(engine_root: Path, agent: str) -> list[str]:
     """The declared preference order for a role.
 
     Accepts either `providers: [a, b]` or the older `provider: a`, which reads
     as a one-element list — the migration is mechanical and old configs keep
     working.
     """
-    config = yaml.safe_load((repo_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
+    config = yaml.safe_load((engine_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
 
     if agent not in config:
         known = ", ".join(sorted(config)) or "(none configured)"
@@ -102,7 +102,7 @@ def eligible_providers(repo_root: Path, agent: str) -> list[str]:
 
 
 def route(
-    repo_root: Path,
+    engine_root: Path,
     agent: str,
     known_providers: set[str],
     *,
@@ -110,13 +110,18 @@ def route(
 ) -> Decision:
     """Picks a provider for this role and explains the choice.
 
+    `engine_root` is the ai-platform install, never a target repo's worktree:
+    provider eligibility, thresholds and the recorded history this reads are
+    all engine-scoped, not per-project, so they stay fixed no matter which
+    repo a task is currently operating on.
+
     Never returns without a provider. If every candidate is gated, the declared
     first choice runs anyway and the reason says so: a tool driven from a phone
     must not refuse to work because a config threshold was crossed. Degrading
     loudly beats failing.
     """
-    thresholds = thresholds or load_thresholds(repo_root)
-    declared = eligible_providers(repo_root, agent)
+    thresholds = thresholds or load_thresholds(engine_root)
+    declared = eligible_providers(engine_root, agent)
 
     unknown = [p for p in declared if p not in known_providers]
     if unknown:
@@ -127,9 +132,9 @@ def route(
 
     pressure = {
         row["provider"]: row
-        for row in quota_store.pressure(repo_root, window_hours=thresholds.window_hours)
+        for row in quota_store.pressure(engine_root, window_hours=thresholds.window_hours)
     }
-    history = telemetry.role_performance(repo_root, agent, window_hours=thresholds.window_hours)
+    history = telemetry.role_performance(engine_root, agent, window_hours=thresholds.window_hours)
 
     candidates: list[Candidate] = []
     chosen: str | None = None

@@ -29,14 +29,22 @@ reviewer:
   provider: claude_code
 decomposer:
   provider: claude_code
+corrector:
+  provider: claude_code
 """
 
 # decompose: false here -- these fixtures exercise DAG execution mechanics,
 # not decomposition, and none of the fake providers below know how to answer
 # a decomposer call. Decomposition itself is tested separately below with
 # its own workflow.yaml (decompose defaults to true when the key is absent).
+#
+# max_correction_attempts: 0 -- these fixtures exercise the DAG/test/review
+# gate itself; the correction loop that can follow a test/review failure is
+# tested separately below (test_run_correction_loop_*), which overrides this
+# to a positive value on its own copy of the workflow.
 WORKFLOW_YAML = """max_parallel: 2
 decompose: false
+max_correction_attempts: 0
 tasks:
   - id: architecture
     agent: architect
@@ -73,9 +81,10 @@ def fake_repo(tmp_path: Path) -> Path:
     (tmp_path / "config" / "agents.yaml").write_text(AGENTS_YAML, encoding="utf-8")
     (tmp_path / "config" / "workflow.yaml").write_text(WORKFLOW_YAML, encoding="utf-8")
     (tmp_path / "src.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
-    # mirrors the real repo's .gitignore: the embedded vector DB is generated,
-    # not something a stage's commit should ever sweep up
-    (tmp_path / ".gitignore").write_text("vector/*\n", encoding="utf-8")
+    # mirrors the real repo's .gitignore: the embedded vector store/graph
+    # cache under .ai-platform/ is generated, not something a stage's commit
+    # should ever sweep up (see core.context.manager.VECTOR_STORAGE_PATH)
+    (tmp_path / ".gitignore").write_text(".ai-platform/\n", encoding="utf-8")
 
     repo.index.add([".gitignore", "config/context.yaml", "config/agents.yaml", "config/workflow.yaml", "src.py"])
     repo.index.commit("initial commit")
@@ -126,7 +135,7 @@ def test_run_executes_all_stages_respecting_dependency_order(
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="6 passed")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     ids = [s.id for s in report.stages]
     assert ids[0] == "architecture"
@@ -161,7 +170,7 @@ def test_run_executes_independent_stages_concurrently(monkeypatch: pytest.Monkey
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     assert report.summary == "done"
     backend_start, backend_end = intervals["backend"]
@@ -175,7 +184,7 @@ def test_run_skips_downstream_tasks_when_a_dependency_fails(monkeypatch: pytest.
     _patch_provider(monkeypatch, _multi_stage_run(fail_agents=frozenset({"backend"})))
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     by_id = {s.id: s for s in report.stages}
     assert by_id["architecture"].status == "done"
@@ -191,7 +200,7 @@ def test_run_commits_each_stage_separately(monkeypatch: pytest.MonkeyPatch, fake
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    supervisor.run(fake_repo, "add oauth2")
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     repo = git.Repo(fake_repo)
     messages = [c.message for c in repo.iter_commits(max_count=20)]
@@ -219,7 +228,7 @@ def test_run_isolates_a_failed_stages_partial_edits_to_its_own_worktree(
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     by_id = {s.id: s for s in report.stages}
     assert "backend_partial.py" in by_id["backend"].files_changed
@@ -246,7 +255,7 @@ def test_run_marks_conflicting_sibling_as_conflict_and_keeps_its_worktree(
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     by_id = {s.id: s for s in report.stages}
     # both add the same file with different content -- whichever merges
@@ -261,20 +270,23 @@ def test_run_needs_attention_when_tests_fail(monkeypatch: pytest.MonkeyPatch, fa
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=False, output="1 failed")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     assert report.summary == "needs attention"
     assert report.tests_passed is False
+    # max_correction_attempts: 0 in this fixture -- no correction attempted
+    assert report.correction_attempts == 0
 
 
 def test_run_needs_attention_when_review_fails(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
     _patch_provider(monkeypatch, _multi_stage_run(verdict="VERDICT: FAIL"))
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     assert report.summary == "needs attention"
     assert report.review_passed is False
+    assert report.correction_attempts == 0
 
 
 def test_run_marks_a_stage_violated_when_it_writes_outside_its_contract(
@@ -294,7 +306,7 @@ def test_run_marks_a_stage_violated_when_it_writes_outside_its_contract(
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     by_id = {s.id: s for s in report.stages}
     assert by_id["architecture"].status == "violated"
@@ -314,7 +326,7 @@ def test_run_stops_early_when_the_first_stage_fails_with_no_disk_writes(
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     by_id = {s.id: s for s in report.stages}
     assert by_id["architecture"].status == "failed"
@@ -390,7 +402,7 @@ def test_run_records_telemetry_for_every_provider_call(
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     with telemetry.connect(fake_repo) as con:
         run = con.execute("SELECT * FROM runs").fetchone()
@@ -425,7 +437,7 @@ def test_run_records_the_decomposer_call_too(monkeypatch: pytest.MonkeyPatch, fa
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    supervisor.run(fake_repo, "add oauth2")
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     with telemetry.connect(fake_repo) as con:
         agents = [r["agent"] for r in con.execute("SELECT agent FROM calls ORDER BY id")]
@@ -438,7 +450,7 @@ def test_dry_run_records_nothing(monkeypatch: pytest.MonkeyPatch, fake_repo: Pat
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", dry_run=True)
 
     assert report.totals == {}
     assert not (fake_repo / "telemetry.sqlite").exists()
@@ -448,7 +460,7 @@ def test_run_stores_the_session_id(monkeypatch: pytest.MonkeyPatch, fake_repo: P
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    supervisor.run(fake_repo, "add oauth2", session_id="whatsapp-42")
+    supervisor.run(fake_repo, fake_repo, "add oauth2", session_id="whatsapp-42")
 
     with telemetry.connect(fake_repo) as con:
         assert con.execute("SELECT session_id FROM runs").fetchone()[0] == "whatsapp-42"
@@ -470,7 +482,7 @@ def test_run_prunes_the_plan_when_decomposer_selects_a_subset(
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     ids = {s.id for s in report.stages}
     assert ids == {"architecture", "backend"}  # frontend/tests/security/documentation never even appear
@@ -494,7 +506,7 @@ def test_run_dry_run_invokes_only_the_decomposer_and_skips_the_rest(
     repo = git.Repo(fake_repo)
     branch_before = repo.active_branch.name
 
-    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", dry_run=True)
 
     assert invoked_agents == ["decomposer"]  # no work agent, no reviewer
     assert report.summary == "dry-run"
@@ -514,7 +526,7 @@ def test_run_dry_run_without_decomposition_invokes_no_agent_at_all(
     repo = git.Repo(fake_repo)
     branch_before = repo.active_branch.name
 
-    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", dry_run=True)
 
     assert report.summary == "dry-run"
     assert report.stages == []
@@ -535,7 +547,7 @@ def test_run_dry_run_prints_the_full_planned_workflow(
 
     _patch_provider(monkeypatch, fake_run)
 
-    supervisor.run(fake_repo, "add oauth2", dry_run=True)
+    supervisor.run(fake_repo, fake_repo, "add oauth2", dry_run=True)
 
     out = capsys.readouterr().out
     assert "Dry run" in out
@@ -557,7 +569,7 @@ def test_run_dry_run_prints_the_decomposers_pruned_selection(
 
     _patch_provider(monkeypatch, fake_run)
 
-    report = supervisor.run(fake_repo, "add oauth2", dry_run=True)
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", dry_run=True)
 
     out = capsys.readouterr().out
     assert "Decomposed to:" in out
@@ -588,8 +600,112 @@ def test_run_falls_back_to_the_full_plan_when_decomposition_is_unparseable(
     _patch_provider(monkeypatch, fake_run)
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    report = supervisor.run(fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     ids = {s.id for s in report.stages}
     assert ids == {"architecture", "backend", "frontend", "tests", "security", "documentation"}
     assert report.summary == "done"
+
+
+def _enable_correction(repo_root: Path, max_attempts: int = 1) -> None:
+    workflow_yaml = WORKFLOW_YAML.replace("max_correction_attempts: 0", f"max_correction_attempts: {max_attempts}")
+    (repo_root / "config" / "workflow.yaml").write_text(workflow_yaml, encoding="utf-8")
+    repo = git.Repo(repo_root)
+    repo.index.add(["config/workflow.yaml"])
+    repo.index.commit("enable correction")
+
+
+def test_run_correction_loop_fixes_a_failing_test_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The corrector role is only invoked once tests/review actually failed --
+    and once it "fixes" the problem, run() stops retrying instead of burning
+    its remaining budget."""
+    _enable_correction(fake_repo, max_attempts=2)
+    corrector_calls: list[AgentTask] = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "corrector":
+            corrector_calls.append(task)
+            Path(task.repo_root, "fix.py").write_text("x = 1\n", encoding="utf-8")
+            return ProviderResult(success=True, summary="fixed the failing assertion")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+
+    test_calls = {"n": 0}
+
+    def fake_run_tests(repo_root: Path) -> test_runner.TestResult:
+        test_calls["n"] += 1
+        if test_calls["n"] == 1:
+            return test_runner.TestResult(passed=False, output="1 failed")
+        return test_runner.TestResult(passed=True, output="all passed")
+
+    monkeypatch.setattr(test_runner, "run_tests", fake_run_tests)
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert len(corrector_calls) == 1  # stopped after the first attempt fixed it
+    assert report.correction_attempts == 1
+    assert report.tests_passed is True
+    assert report.summary == "done"
+    assert "fix.py" in report.files_changed
+
+
+def test_run_correction_loop_exhausts_attempts_and_still_needs_attention(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _enable_correction(fake_repo, max_attempts=2)
+    corrector_calls: list[AgentTask] = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "corrector":
+            corrector_calls.append(task)
+            return ProviderResult(success=True, summary="tried, but couldn't reproduce the failure")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=False, output="still failing")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert len(corrector_calls) == 2  # both attempts used, neither fixed it
+    assert report.correction_attempts == 2
+    assert report.tests_passed is False
+    assert report.summary == "needs attention"
+
+
+def test_run_correction_loop_does_not_trigger_on_a_dag_stage_failure(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A stage that itself failed/was skipped isn't something a corrector
+    pass can retroactively complete -- correction is scoped to test/review
+    failure on an otherwise-complete DAG (see supervisor.run's `can_correct`)."""
+    _enable_correction(fake_repo, max_attempts=2)
+    corrector_calls: list[AgentTask] = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "corrector":
+            corrector_calls.append(task)
+            return ProviderResult(success=True, summary="corrector done")
+        if task.agent == "backend":
+            return ProviderResult(success=False, summary="backend failed")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert corrector_calls == []
+    assert report.correction_attempts == 0
+    assert report.summary == "needs attention"

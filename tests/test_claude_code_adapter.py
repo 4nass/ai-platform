@@ -16,11 +16,14 @@ def _task(
     agent: str = "backend",
     context_paths: list[str] | None = None,
     context_render: str = "",
+    repo_root: Path = Path("."),
+    engine_root: Path | None = None,
 ) -> AgentTask:
     return AgentTask(
         agent=agent,
         description="do x",
-        repo_root=Path("."),
+        repo_root=repo_root,
+        engine_root=engine_root,
         context_paths=context_paths or [],
         context_render=context_render,
     )
@@ -167,6 +170,36 @@ def test_run_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result.success is True
     assert result.summary == "done"
+
+
+def test_run_loads_the_system_prompt_from_engine_root_not_repo_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A --repo target has no prompts/ directory of its own -- the role
+    prompt always comes from the engine install, never from wherever the
+    task happens to write files."""
+    engine_root = tmp_path / "engine"
+    target_root = tmp_path / "target"
+    (engine_root / "prompts").mkdir(parents=True)
+    (engine_root / "prompts" / "backend.md").write_text("You are the Backend Agent.", encoding="utf-8")
+    target_root.mkdir()
+
+    captured_cmd = {}
+
+    def fake_run(cmd, **kw):
+        captured_cmd["cmd"] = cmd
+        if cmd[0:2] == ["claude", "auth"]:
+            return _completed(cmd, 0, '{"loggedIn": true}')
+        return _completed(cmd, 0, '{"result": "done", "is_error": false}')
+
+    monkeypatch.setattr(adapter.subprocess, "run", fake_run)
+
+    result = adapter.run(_task(repo_root=target_root, engine_root=engine_root))
+
+    assert result.success is True
+    cmd = captured_cmd["cmd"]
+    assert "--append-system-prompt" in cmd
+    assert cmd[cmd.index("--append-system-prompt") + 1] == "You are the Backend Agent."
 
 
 def test_run_is_error_true(monkeypatch: pytest.MonkeyPatch) -> None:

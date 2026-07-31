@@ -32,6 +32,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY,
   session_id    TEXT,
+  target_repo   TEXT,
   request       TEXT,
   branch        TEXT,
   summary       TEXT,
@@ -76,15 +77,45 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _migrate(con: sqlite3.Connection, engine_root: Path) -> None:
+    """Adds columns to a pre-existing runs table that `CREATE TABLE IF NOT
+    EXISTS` can't retrofit. Guarded so it's a no-op on a fresh database (the
+    schema above already declares the column) and idempotent on repeated
+    calls.
+
+    Every row that predates `--repo` was, by construction, a self-targeting
+    run — `target_root` and `engine_root` were always the same directory
+    before this column existed. Backfilling those rows with `engine_root`
+    (rather than leaving them NULL) means `recent_runs(..., target_repo=...)`
+    can filter safely without silently hiding a repo's own pre-migration
+    history the first time it's queried.
+    """
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(runs)")}
+    if "target_repo" not in columns:
+        con.execute("ALTER TABLE runs ADD COLUMN target_repo TEXT")
+        con.execute(
+            "UPDATE runs SET target_repo = ? WHERE target_repo IS NULL OR target_repo = ''",
+            (str(engine_root),),
+        )
+
+
 @contextmanager
-def connect(repo_root: Path):
-    """Opens the telemetry DB, creating it and its schema on first use."""
-    path = repo_root / DB_PATH
+def connect(engine_root: Path):
+    """Opens the telemetry DB, creating it and its schema on first use.
+
+    Bound to `engine_root`, never to a target repo's worktree: this is the
+    engine's own shared analytical memory (which provider is cheapest, which
+    model succeeds most often), invariant across every project the engine is
+    pointed at via `--repo`. Which project a given run touched is recorded
+    per-row (`runs.target_repo`), not by moving the database.
+    """
+    path = engine_root / DB_PATH
     con = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
     try:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.executescript(SCHEMA)
+        _migrate(con, engine_root)
         yield con
         con.commit()
     finally:
@@ -94,27 +125,32 @@ def connect(repo_root: Path):
 class RunRecorder:
     """Records one run and every provider call it makes.
 
-    Always bind this to the MAIN repo root, never to a task worktree: DAG
-    stages run against a throwaway worktree that gets deleted when the stage
-    finishes, and the telemetry has to outlive it.
+    Always bind this to `engine_root`, never to a task worktree or to
+    `target_root`: DAG stages run against a throwaway worktree that gets
+    deleted when the stage finishes, and the telemetry has to outlive it —
+    and it's the engine's own shared memory, not a per-project log (see
+    `connect`). `target_repo` records which project this particular run was
+    against, so `recent_runs` can still be scoped per project even though the
+    database is shared.
     """
 
     def __init__(
         self,
-        repo_root: Path,
+        engine_root: Path,
         request: str,
         *,
+        target_repo: str = "",
         session_id: str | None = None,
         engine_commit: str = "",
         metadata: dict | None = None,
     ) -> None:
-        self.repo_root = repo_root
+        self.engine_root = engine_root
         self._started_at = _now()
-        with connect(repo_root) as con:
+        with connect(engine_root) as con:
             cursor = con.execute(
-                "INSERT INTO runs(session_id, request, engine_commit, started_at, metadata) "
-                "VALUES(?, ?, ?, ?, ?)",
-                (session_id, request, engine_commit, self._started_at, json.dumps(metadata or {})),
+                "INSERT INTO runs(session_id, target_repo, request, engine_commit, started_at, metadata) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (session_id, target_repo, request, engine_commit, self._started_at, json.dumps(metadata or {})),
             )
             self.run_id = cursor.lastrowid
 
@@ -134,7 +170,7 @@ class RunRecorder:
         metadata: dict | None = None,
     ) -> None:
         usage = result.usage
-        with connect(self.repo_root) as con:
+        with connect(self.engine_root) as con:
             con.execute(
                 "INSERT INTO calls("
                 " run_id, stage_id, agent, provider, model, success,"
@@ -170,14 +206,14 @@ class RunRecorder:
         finished_at = _now()
         started = datetime.fromisoformat(self._started_at)
         duration_ms = int((datetime.fromisoformat(finished_at) - started).total_seconds() * 1000)
-        with connect(self.repo_root) as con:
+        with connect(self.engine_root) as con:
             con.execute(
                 "UPDATE runs SET branch = ?, summary = ?, finished_at = ?, duration_ms = ? WHERE id = ?",
                 (branch, summary, finished_at, duration_ms, self.run_id),
             )
 
 
-def run_totals(repo_root: Path, run_id: int) -> dict:
+def run_totals(engine_root: Path, run_id: int) -> dict:
     """Aggregate cost/tokens for one run — what the CLI prints at the end.
 
     `priced_calls` is reported alongside `calls` on purpose: a provider that
@@ -185,7 +221,7 @@ def run_totals(repo_root: Path, run_id: int) -> dict:
     was, so the caller can tell "$0.42 across 8 calls" from "$0.42 across the
     3 of 8 calls that reported a price".
     """
-    with connect(repo_root) as con:
+    with connect(engine_root) as con:
         row = con.execute(
             "SELECT COUNT(*) AS calls, COUNT(cost_usd) AS priced_calls,"
             " COALESCE(SUM(cost_usd), 0) AS cost_usd,"
@@ -199,7 +235,7 @@ def run_totals(repo_root: Path, run_id: int) -> dict:
         return dict(row)
 
 
-def provider_pressure(repo_root: Path, *, window_hours: float, provider: str | None = None) -> list[dict]:
+def provider_pressure(engine_root: Path, *, window_hours: float, provider: str | None = None) -> list[dict]:
     """Per-provider consumption over a rolling window — the routing signal.
 
     Both providers are flat-rate subscriptions, so a per-call price measures
@@ -230,11 +266,11 @@ def provider_pressure(repo_root: Path, *, window_hours: float, provider: str | N
         params.append(provider)
     query += " GROUP BY provider ORDER BY total_tokens DESC"
 
-    with connect(repo_root) as con:
+    with connect(engine_root) as con:
         return [dict(row) for row in con.execute(query, params)]
 
 
-def role_performance(repo_root: Path, agent: str, *, window_hours: float) -> dict[str, dict]:
+def role_performance(engine_root: Path, agent: str, *, window_hours: float) -> dict[str, dict]:
     """How each provider has actually done on one role, keyed by provider.
 
     The router's second gate reads this. `calls` is returned alongside every
@@ -243,7 +279,7 @@ def role_performance(repo_root: Path, agent: str, *, window_hours: float) -> dic
     """
     since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
     rows = {}
-    with connect(repo_root) as con:
+    with connect(engine_root) as con:
         for row in con.execute(
             "SELECT provider,"
             " COUNT(*) AS calls,"
@@ -259,12 +295,19 @@ def role_performance(repo_root: Path, agent: str, *, window_hours: float) -> dic
     return rows
 
 
-def recent_runs(repo_root: Path, *, limit: int = 20, session_id: str | None = None) -> list[dict]:
-    """Recent runs with their rolled-up call totals, newest first."""
+def recent_runs(
+    engine_root: Path, *, limit: int = 20, session_id: str | None = None, target_repo: str | None = None
+) -> list[dict]:
+    """Recent runs with their rolled-up call totals, newest first.
+
+    Filtered to `target_repo` by callers that resolved one via `--repo` — the
+    database is shared across every project (see `connect`), so without this
+    a run's history would show every other project's runs mixed in.
+    """
     # input_tokens is only the uncached remainder — the real prompt size is
     # that plus the cache reads and writes (see format_totals).
     query = (
-        "SELECT r.id, r.session_id, r.request, r.branch, r.summary, r.started_at,"
+        "SELECT r.id, r.session_id, r.target_repo, r.request, r.branch, r.summary, r.started_at,"
         " r.duration_ms, r.engine_commit,"
         " COUNT(c.id) AS calls, COUNT(c.cost_usd) AS priced_calls,"
         " COALESCE(SUM(c.cost_usd), 0) AS cost_usd,"
@@ -273,12 +316,18 @@ def recent_runs(repo_root: Path, *, limit: int = 20, session_id: str | None = No
         " COALESCE(SUM(c.output_tokens), 0) AS output_tokens"
         " FROM runs r LEFT JOIN calls c ON c.run_id = r.id"
     )
+    clauses: list[str] = []
     params: list[object] = []
     if session_id is not None:
-        query += " WHERE r.session_id = ?"
+        clauses.append("r.session_id = ?")
         params.append(session_id)
+    if target_repo is not None:
+        clauses.append("r.target_repo = ?")
+        params.append(target_repo)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
     query += " GROUP BY r.id ORDER BY r.id DESC LIMIT ?"
     params.append(limit)
 
-    with connect(repo_root) as con:
+    with connect(engine_root) as con:
         return [dict(row) for row in con.execute(query, params)]

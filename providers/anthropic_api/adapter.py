@@ -101,12 +101,12 @@ def _model_id(models_config: dict) -> str:
 
 
 def run(task: AgentTask) -> ProviderResult:
-    models_config = _load_yaml(task.repo_root, MODELS_CONFIG_PATH)
-    token_budget = _load_yaml(task.repo_root, TOKEN_BUDGET_CONFIG_PATH)
+    models_config = _load_yaml(task.engine_root, MODELS_CONFIG_PATH)
+    token_budget = _load_yaml(task.engine_root, TOKEN_BUDGET_CONFIG_PATH)
 
     model_id = _model_id(models_config)
     max_tokens = token_budget.get(task.agent, 10000)
-    system_prompt = load_role_prompt(task.repo_root, task.agent)
+    system_prompt = load_role_prompt(task.engine_root, task.agent)
 
     context_note = f"\n\nContext:\n{task.context_render}" if task.context_render else ""
     user_prompt = f"Request:\n{task.description}{context_note}"

@@ -53,7 +53,7 @@ def _build_prompt(task: AgentTask) -> str:
     authority than the rest of the message — worth knowing when comparing a
     role's behaviour across the two providers.
     """
-    parts = [p for p in (load_role_prompt(task.repo_root, task.agent), task.description) if p]
+    parts = [p for p in (load_role_prompt(task.engine_root, task.agent), task.description) if p]
     if task.context_render:
         parts.append(task.context_render)
     return "\n\n".join(parts)

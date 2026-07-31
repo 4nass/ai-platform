@@ -41,17 +41,17 @@ class StageResult:
     files_changed: list[str] = field(default_factory=list)
 
 
-def resolve_provider(repo_root: Path, agent: str) -> str:
+def resolve_provider(engine_root: Path, agent: str) -> str:
     """The provider this role should use right now, per the router.
 
     Was a static config lookup; it is now a decision. Callers that only need
     the name keep this signature — `route_agent` returns the reasoning too.
     """
-    return route_agent(repo_root, agent).provider
+    return route_agent(engine_root, agent).provider
 
 
-def route_agent(repo_root: Path, agent: str) -> router.Decision:
-    return router.route(repo_root, agent, known_providers=set(PROVIDERS))
+def route_agent(engine_root: Path, agent: str) -> router.Decision:
+    return router.route(engine_root, agent, known_providers=set(PROVIDERS))
 
 
 def run_task(
@@ -62,7 +62,7 @@ def run_task(
     *,
     recorder=None,
     stage_id: str | None = None,
-    routing_root: Path | None = None,
+    engine_root: Path | None = None,
 ) -> ProviderResult:
     """Runs one task through its configured provider, recording what it cost.
 
@@ -72,19 +72,22 @@ def run_task(
 
     The context arrives unrendered on purpose. Which rendering a provider gets
     depends on whether it can read the repo itself, and that isn't known until
-    `resolve_provider` has run — so rendering happens here rather than at the
+    the router has picked one — so rendering happens here rather than at the
     call site, and the char count recorded is what was really sent instead of
     the length of a string the provider may have ignored.
 
-    `recorder` and `routing_root` are both passed in rather than built from
-    `repo_root`, for the same reason: for DAG stages `repo_root` is the task's
-    throwaway worktree, while the telemetry lives in the main repo. Routing
-    reads that telemetry, so pointing it at the worktree would have it decide
-    from an empty database — every stage cold-starting forever — and would
-    create a stray `telemetry.sqlite` inside the worktree for the stage's own
-    commit to sweep up.
+    `repo_root` is the target — the repo being modified, or one of its task
+    worktrees. `engine_root` is the ai-platform install: where prompts/config
+    live and where the shared telemetry/routing state is read and written.
+    They coincide when the engine operates on itself and by default here (so
+    existing single-repo callers/tests keep working unchanged), but must not
+    be conflated in general — routing decisions and recorded history are
+    engine-scoped, not per-worktree, so pointing them at a throwaway worktree
+    would have every stage cold-start from an empty, momentary copy instead
+    of the engine's real, persistent one.
     """
-    decision = route_agent(routing_root or repo_root, agent)
+    engine_root = engine_root or repo_root
+    decision = route_agent(engine_root, agent)
     provider_name = decision.provider
     provider = PROVIDERS[provider_name]
 
@@ -96,6 +99,7 @@ def run_task(
         agent=agent,
         description=description,
         repo_root=repo_root,
+        engine_root=engine_root,
         context_paths=context_paths,
         context_render=rendered.text if rendered else "",
     )
