@@ -57,15 +57,15 @@ What actually runs today, as opposed to the target vision described further belo
 
 **How a run works:**
 1. `core/context/manager.py` indexes the repo (tree-sitter chunking for Python, section chunking for Markdown, whole-file otherwise) into a local, file-mode Qdrant vector index, then selects the chunks/files relevant to the request, plus the current git diff and `memory/*.md`.
-2. `core/orchestrator/scheduler.py` resolves which provider to use for the requested role from `config/agents.yaml`, and builds the task.
+2. `core/orchestrator/router.py` picks a provider for the role from the preference order in `config/agents.yaml`, skipping one that is over its declared quota or has been failing that role, and records the reason it chose. `core/orchestrator/scheduler.py` then builds and dispatches the task.
 3. `core/orchestrator/supervisor.py` creates an isolated `hermes/<slug>` git branch *before* running the provider (a CLI provider edits files live), runs it, commits whatever changed, then runs the test suite and reports PASS/FAIL.
 
-**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, plus the internal `decomposer` role. Routing is per role — `decomposer` and `reviewer` go to `codex_cli`, the rest to `claude_code`. `reviewer` and `security` are restricted to read-only tools — their output is a report, not a code change, enforced at the tool level, not just by prompt instruction.
+**Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, plus the internal `decomposer` role. Each role declares an ordered list of providers that may serve it; `decomposer` and `reviewer` prefer `codex_cli`, the rest `claude_code`. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction.
 
 **Run it:**
 
 ```bash
-uv run ai-platform run "Add a simple utility function" --agent backend
+uv run ai-platform run "Add a simple utility function"
 ```
 
 **Check subscription pressure:**
@@ -83,7 +83,30 @@ window (5h by default, or the widest declared budget; override with
 `--window`). A provider with recorded usage but no declared budget still
 shows its consumption, just without a percentage.
 
-**Not implemented yet:** `anthropic_api` and `openai_api` providers (stubs only — no verified CLI/API syntax), the code graph (`use_graph` in `config/context.yaml` is acknowledged but ignored), MCP integration, multi-step task planning (the planner currently produces a single task), and any persisted `memory/*.md` content (the files exist but are empty).
+**Inspect a decision before spending anything.** Three commands run the engine's
+reasoning without invoking an agent:
+
+```bash
+uv run ai-platform context "<request>"   # which files were selected, and why
+uv run ai-platform route reviewer        # which provider would run, and why
+uv run ai-platform quota                 # pressure on each subscription
+```
+
+`route` walks the role's preference order and shows each candidate's quota
+share, success rate and sample size, marking the one that would run. Your
+declared order governs — it is overridden only on grounds the engine can
+measure (`config/routing.yaml`), never on a marginal quality judgement, and a
+run is never blocked: if every candidate is gated, the first choice runs anyway
+and says so.
+
+**Not implemented yet:** the `openai_api` provider (a stub — out of scope while
+the engine drives subscription CLIs). `anthropic_api` is implemented (Messages
+API, Pydantic-structured output) but has never been exercised: it needs an API
+key, which is separate per-token billing rather than a subscription. Also
+absent: MCP integration, model-level routing (codex reports no model at all, so
+there is nothing to measure), and any persisted `memory/*.md` content — the
+files exist but are empty, and `core/memory/loader.py` globs only `memory/*.md`,
+so `memory/adr/` is not loaded as memory either.
 
 ---
 
