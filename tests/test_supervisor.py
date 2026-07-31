@@ -331,6 +331,37 @@ def _enable_decompose(repo_root: Path) -> None:
     repo.index.commit("enable decomposition")
 
 
+def test_format_totals_counts_cached_input_not_just_the_uncached_remainder() -> None:
+    """`input_tokens` is only what wasn't served from cache. Reporting it
+    alone showed "28 in" for a real run that processed ~600k tokens, because
+    prompt caching moves nearly everything into cache_read/cache_creation.
+    Figures below are from that run.
+    """
+    line = supervisor.format_totals(
+        {
+            "calls": 3,
+            "priced_calls": 3,
+            "cost_usd": 0.7410,
+            "input_tokens": 28,
+            "cache_read_tokens": 514064,
+            "cache_creation_tokens": 87578,
+            "output_tokens": 3957,
+        }
+    )
+
+    assert "601,670 in" in line
+    assert "514,064 cached" in line
+    assert "28 in" not in line
+
+
+def test_format_totals_flags_unpriced_calls() -> None:
+    line = supervisor.format_totals(
+        {"calls": 8, "priced_calls": 3, "cost_usd": 0.42, "input_tokens": 100, "output_tokens": 10}
+    )
+
+    assert "(3/8 priced)" in line
+
+
 def test_run_records_telemetry_for_every_provider_call(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:

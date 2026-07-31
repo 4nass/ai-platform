@@ -71,7 +71,7 @@ def history(
         return
 
     table = Table(title="Recent runs")
-    for column in ("id", "started", "request", "summary", "calls", "in", "out", "cost", "duration"):
+    for column in ("id", "started", "request", "summary", "calls", "in", "cached", "out", "cost", "duration"):
         table.add_column(column)
 
     for row in rows:
@@ -87,6 +87,7 @@ def history(
             row["summary"] or "-",
             calls,
             f"{row['input_tokens']:,}",
+            f"{row['cache_read_tokens']:,}",
             f"{row['output_tokens']:,}",
             f"${row['cost_usd']:.4f}",
             duration,

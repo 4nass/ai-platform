@@ -201,12 +201,15 @@ def run_totals(repo_root: Path, run_id: int) -> dict:
 
 def recent_runs(repo_root: Path, *, limit: int = 20, session_id: str | None = None) -> list[dict]:
     """Recent runs with their rolled-up call totals, newest first."""
+    # input_tokens is only the uncached remainder — the real prompt size is
+    # that plus the cache reads and writes (see format_totals).
     query = (
         "SELECT r.id, r.session_id, r.request, r.branch, r.summary, r.started_at,"
         " r.duration_ms, r.engine_commit,"
         " COUNT(c.id) AS calls, COUNT(c.cost_usd) AS priced_calls,"
         " COALESCE(SUM(c.cost_usd), 0) AS cost_usd,"
-        " COALESCE(SUM(c.input_tokens), 0) AS input_tokens,"
+        " COALESCE(SUM(c.input_tokens + c.cache_read_tokens + c.cache_creation_tokens), 0) AS input_tokens,"
+        " COALESCE(SUM(c.cache_read_tokens), 0) AS cache_read_tokens,"
         " COALESCE(SUM(c.output_tokens), 0) AS output_tokens"
         " FROM runs r LEFT JOIN calls c ON c.run_id = r.id"
     )

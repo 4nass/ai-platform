@@ -55,18 +55,29 @@ class RunReport:
 def format_totals(totals: dict) -> str:
     """One-line cost summary.
 
-    Reports how many calls were actually priced when that differs from the
-    call count: a provider that returns no cost (anthropic_api) would
-    otherwise make a run look cheaper than it was.
+    Two things this has to get right, both learned from a real run:
+
+    - `input_tokens` alone is only the *uncached remainder*. With prompt
+      caching almost everything arrives as cache reads/writes, so reporting
+      that field on its own showed "28 in" for a run that actually processed
+      600k tokens. Report the sum, and break out the cached share, since a
+      cache read costs roughly a tenth of a fresh input token.
+    - When some calls report no price, say so, or an unpriced provider makes
+      a run look cheaper than it was.
     """
     if not totals:
         return "not recorded"
     calls = totals.get("calls", 0)
     priced = totals.get("priced_calls", 0)
     priced_note = f" ({priced}/{calls} priced)" if priced != calls else ""
+
+    cached = totals.get("cache_read_tokens", 0)
+    total_in = totals.get("input_tokens", 0) + cached + totals.get("cache_creation_tokens", 0)
+    cached_note = f" ({cached:,} cached)" if cached else ""
+
     return (
         f"${totals.get('cost_usd', 0):.4f}{priced_note} · "
-        f"{totals.get('input_tokens', 0):,} in / {totals.get('output_tokens', 0):,} out · "
+        f"{total_in:,} in{cached_note} / {totals.get('output_tokens', 0):,} out · "
         f"{calls} calls"
     )
 
