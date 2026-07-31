@@ -58,7 +58,8 @@ What actually runs today, as opposed to the target vision described further belo
 **How a run works:**
 1. `core/context/manager.py` indexes the repo (tree-sitter chunking for Python, section chunking for Markdown, whole-file otherwise) into a local, file-mode Qdrant vector index, then selects the chunks/files relevant to the request, plus the current git diff and `memory/*.md`.
 2. `core/orchestrator/router.py` picks a provider for the role from the preference order in `config/agents.yaml`, skipping one that is over its declared quota or has been failing that role, and records the reason it chose. `core/orchestrator/scheduler.py` then builds and dispatches the task.
-3. `core/orchestrator/supervisor.py` creates an isolated `hermes/<slug>` git branch *before* running the provider (a CLI provider edits files live), runs it, commits whatever changed, then runs the test suite and reports PASS/FAIL.
+3. `core/orchestrator/planner.py` builds the task DAG declared in `config/workflow.yaml` (by default: architecture → backend/frontend → tests → security → documentation); a `decomposer` role call then prunes it to the subset of tasks the request actually needs, bridging dependencies through anything it drops. `core/orchestrator/supervisor.py` creates the isolated `hermes/<slug>` branch, then runs the (pruned) DAG — each task in its own git worktree, up to `max_parallel` tasks at once — merging every finished task's branch back with `--no-ff`. A task that writes outside its role's declared contract (`core/orchestrator/contracts.py`) is flagged; a merge conflict blocks that branch for manual resolution rather than being auto-resolved.
+4. Once the DAG finishes, the supervisor runs the test suite and sends the run's full diff to the `reviewer` role; its `VERDICT: PASS`/`FAIL` (`core/orchestrator/review.py`) gates the run's overall outcome alongside the tests.
 
 **Available roles** (`prompts/*.md` + `config/agents.yaml`): `backend`, `architect`, `frontend`, `reviewer`, `security`, `tests`, `documentation`, plus the internal `decomposer` role. Each role declares an ordered list of providers that may serve it; `decomposer` and `reviewer` prefer `codex_cli`, the rest `claude_code`. `reviewer` and `security` never get write access — read-only tools on `claude_code`, a `read-only` sandbox on `codex_cli` — because their output is a report, not a code change, and that is enforced by the CLI rather than by prompt instruction.
 
@@ -83,13 +84,14 @@ window (5h by default, or the widest declared budget; override with
 `--window`). A provider with recorded usage but no declared budget still
 shows its consumption, just without a percentage.
 
-**Inspect a decision before spending anything.** Three commands run the engine's
+**Inspect a decision before spending anything.** These commands run the engine's
 reasoning without invoking an agent:
 
 ```bash
 uv run ai-platform context "<request>"   # which files were selected, and why
 uv run ai-platform route reviewer        # which provider would run, and why
 uv run ai-platform quota                 # pressure on each subscription
+uv run ai-platform history               # what recent runs cost -- tokens, price, duration, outcome
 ```
 
 `route` walks the role's preference order and shows each candidate's quota
@@ -225,7 +227,7 @@ Example: modifying `JwtService.java` — the system detects `AuthController`, `S
 Two different kinds of persisted knowledge, kept deliberately separate:
 
 - **Markdown, for human-authored knowledge** — decisions and project rules a person wrote and can read/edit directly: `memory/architecture.md`, `memory/coding_rules.md`, `memory/business_rules.md`, `memory/roadmap.md`, `memory/adr/ADR-*.md`.
-- **SQLite, for machine-generated history** — task runs, which agent/provider handled each one, and token/cost metrics per run. A local `.sqlite` file, no server, queryable directly (`sqlite3`, or a `history` CLI command later). Not yet implemented — see Roadmap.
+- **SQLite, for machine-generated history** — task runs, which agent/provider handled each one, and token/cost metrics per run. A local `.sqlite` file, no server, queryable directly (`sqlite3`, or `ai-platform history`) — implemented (`core/telemetry/store.py`).
 
 ```
 memory/
@@ -236,7 +238,8 @@ memory/
 └── adr/
     └── ADR-001-*.md
 
-hermes.sqlite   # runs(id, agent, provider, request, branch, success, tokens, cost, ts)
+telemetry.sqlite   # runs(id, session_id, request, branch, summary, engine_commit, started_at, finished_at, duration_ms, metadata)
+                   # calls(id, run_id, stage_id, agent, provider, model, success, tokens, cost_usd, routing_reason, context_reason, metadata)
 ```
 
 #### 6. Vector Database / RAG
@@ -309,10 +312,10 @@ This is the full target, not just what prototype 1 needs — deliberately: no Re
 ### Phase 2 - Context Engine
 - [x] Git diff analysis
 - [x] Code parsing with Tree-sitter
-- [ ] Dependency graph with NetworkX (`use_graph` acknowledged, not implemented)
+- [x] Dependency graph with NetworkX (`core/graph/builder.py`: AST imports + git co-changes + doc mentions, ranked via personalized PageRank)
 - [x] Vector search (embedded Qdrant + sentence-transformers)
 - [x] Memory Manager (loads `memory/*.md`; files still empty)
-- [ ] SQLite run history (task, agent, provider, tokens, cost per run)
+- [x] SQLite run history (`core/telemetry/store.py`; `ai-platform history`)
 
 ### Phase 3 - Agent System
 - [x] Architect Agent (prompt written, not yet exercised end-to-end)
@@ -323,10 +326,10 @@ This is the full target, not just what prototype 1 needs — deliberately: no Re
 - [x] Frontend / Tests Agents (prompts written, not yet exercised)
 
 ### Phase 4 - Hermes
-- [x] Planner (single-task only — no real breakdown yet)
-- [x] Scheduler (synchronous, no parallelism)
-- [x] Supervisor (branch, run, commit, test, report)
-- [ ] Workflow Engine (multi-step plans)
+- [x] Planner (task DAG from `config/workflow.yaml`, pruned per request by the `decomposer` role)
+- [x] Scheduler (concurrent — up to `max_parallel` tasks at once, each in its own git worktree)
+- [x] Supervisor (branch, run task DAG in per-task worktrees, merge `--no-ff`, test, review gate, report)
+- [x] Workflow Engine (task DAG declared in `config/workflow.yaml`, per-task git worktrees, `decomposer`-pruned per request)
 - [x] `run --dry-run` flag: print the planned workflow and the decomposer's
       selected tasks without invoking any workflow-task agent (see
       `memory/adr/ADR-001-cli-dry-run-flag.md`)
