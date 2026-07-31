@@ -22,7 +22,7 @@ import git
 from rich.console import Console
 
 from core.context.manager import ContextManager, SelectedContext
-from core.orchestrator import git_ops, planner, review, scheduler, test_runner
+from core.orchestrator import contracts, git_ops, planner, review, scheduler, test_runner
 from core.orchestrator.scheduler import StageResult
 from providers.base import display_name
 
@@ -33,7 +33,7 @@ console = Console()
 class StageReport:
     id: str
     agent: str
-    status: str  # "done" | "failed" | "skipped"
+    status: str  # "done" | "failed" | "skipped" | "violated"
     summary: str
     files_changed: list[str] = field(default_factory=list)
 
@@ -67,8 +67,19 @@ def _run_stage(
     status = "done" if result.success else "failed"
     changed = git_ops.commit_all(repo, f"{task.id}: {result.summary or request}")
 
-    if not result.success:
+    bad_files: list[str] = []
+    if result.success:
+        bad_files = contracts.violations(task.agent, changed)
+        if bad_files:
+            status = "violated"
+
+    if status == "failed":
         console.print(f"[bold red]{task.id} failed[/bold red]: {result.summary}")
+    elif status == "violated":
+        console.print(
+            f"[bold red]{task.id} violated its contract[/bold red]: touched "
+            f"{', '.join(bad_files)} — outside its declared scope"
+        )
     else:
         console.print(f"[bold]{task.id}[/bold]: {git_ops.format_changed_files(changed)}")
 

@@ -35,7 +35,7 @@ PROVIDERS = {
 @dataclass
 class StageResult:
     task: Task
-    status: Literal["done", "failed", "skipped"]
+    status: Literal["done", "failed", "skipped", "violated"]
     result: ProviderResult | None = None
     files_changed: list[str] = field(default_factory=list)
 

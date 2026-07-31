@@ -62,8 +62,11 @@ def fake_repo(tmp_path: Path) -> Path:
     (tmp_path / "config" / "agents.yaml").write_text(AGENTS_YAML, encoding="utf-8")
     (tmp_path / "config" / "workflow.yaml").write_text(WORKFLOW_YAML, encoding="utf-8")
     (tmp_path / "src.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
+    # mirrors the real repo's .gitignore: the embedded vector DB is generated,
+    # not something a stage's commit should ever sweep up
+    (tmp_path / ".gitignore").write_text("vector/*\n", encoding="utf-8")
 
-    repo.index.add(["config/context.yaml", "config/agents.yaml", "config/workflow.yaml", "src.py"])
+    repo.index.add([".gitignore", "config/context.yaml", "config/agents.yaml", "config/workflow.yaml", "src.py"])
     repo.index.commit("initial commit")
     return tmp_path
 
@@ -78,13 +81,29 @@ def _patch_tests(monkeypatch: pytest.MonkeyPatch, passed: bool, output: str = ""
     )
 
 
+def _write_compliant_artifact(task: AgentTask) -> None:
+    """Writes a file inside the agent's declared contract (see
+    core.orchestrator.contracts) so these fakes don't spuriously trip the
+    Phase 2 contract check."""
+    if task.agent == "architect":
+        path = Path(task.repo_root, "memory/architecture.md")
+    elif task.agent == "documentation":
+        path = Path(task.repo_root, "README.md")
+    elif task.agent == "security":
+        return  # never writes any file
+    else:
+        path = Path(task.repo_root, f"{task.agent}.py")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# produced by {task.agent}\n", encoding="utf-8")
+
+
 def _multi_stage_run(verdict: str = "VERDICT: PASS", fail_agents: frozenset[str] = frozenset()):
     def fake_run(task: AgentTask) -> ProviderResult:
         if task.agent == "reviewer":
             return ProviderResult(success=True, summary=f"Review notes.\n{verdict}")
         if task.agent in fail_agents:
             return ProviderResult(success=False, summary=f"{task.agent} failed")
-        Path(task.repo_root, f"{task.agent}.py").write_text(f"# {task.agent}\n", encoding="utf-8")
+        _write_compliant_artifact(task)
         return ProviderResult(success=True, summary=f"{task.agent} done")
 
     return fake_run
@@ -146,7 +165,7 @@ def test_run_commits_partial_edits_from_a_failed_stage_so_they_dont_leak_into_th
         if task.agent == "backend":
             Path(task.repo_root, "backend_partial.py").write_text("x = 1\n", encoding="utf-8")
             return ProviderResult(success=False, summary="backend crashed mid-edit")
-        Path(task.repo_root, f"{task.agent}.py").write_text(f"# {task.agent}\n", encoding="utf-8")
+        _write_compliant_artifact(task)
         return ProviderResult(success=True, summary=f"{task.agent} done")
 
     _patch_provider(monkeypatch, fake_run)
@@ -177,6 +196,32 @@ def test_run_needs_attention_when_review_fails(monkeypatch: pytest.MonkeyPatch, 
 
     assert report.summary == "needs attention"
     assert report.review_passed is False
+
+
+def test_run_marks_a_stage_violated_when_it_writes_outside_its_contract(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "architect":
+            # succeeds, but writes application code -- outside its contract
+            Path(task.repo_root, "core/auth/oauth.py").parent.mkdir(parents=True, exist_ok=True)
+            Path(task.repo_root, "core/auth/oauth.py").write_text("x = 1\n", encoding="utf-8")
+            return ProviderResult(success=True, summary="architect done")
+        Path(task.repo_root, f"{task.agent}.py").write_text(f"# {task.agent}\n", encoding="utf-8")
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    assert by_id["architecture"].status == "violated"
+    assert by_id["backend"].status == "skipped"
+    assert by_id["frontend"].status == "skipped"
+    assert report.summary == "needs attention"
 
 
 def test_run_stops_early_when_the_first_stage_fails_with_no_disk_writes(
