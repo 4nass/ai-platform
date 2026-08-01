@@ -1,57 +1,64 @@
 # Testing
 
-## Test layers
+## Test strategy
 
-The suite separates five concerns:
+The suite covers policy and data contracts, provider adapters, context selection, orchestration, and real Git isolation. It uses deterministic fake providers for default tests; live model calls are deliberately excluded.
 
-1. router validation and deterministic profile selection;
-2. provider command construction and response normalization;
-3. scheduler propagation and telemetry;
-4. decomposer parsing and bounded complexity;
-5. supervisor integration with Git worktrees, DAG execution, tests, review, and correction.
+| Layer | What it proves |
+|---|---|
+| Configuration | Valid roles, profiles, efforts, DAG, and target policy |
+| Routing | Ordered selection, gates, forced fallback, telemetry metadata |
+| Provider adapters | Command construction, read-only flags, normalized results |
+| Context | Chunking, retrieval thresholds, graph/cache safety |
+| Scheduler | Dependencies, concurrency, skip and failure propagation |
+| Git integration | Checkout isolation, worktrees, contracts, merges, cleanup |
+| Validation | Frozen policy, sandbox command, ignored-write handling |
+| Supervisor | End-to-end run, review, correction, final report |
+| Jobs | State transitions, idempotency, atomic claim, heartbeat thread, reconciliation, crash-induced hook-lock repair, cancellation |
 
-Changes to `config/agents.yaml` should add or update tests at every affected boundary, not only YAML parsing.
-
-## Standard validation
+## Standard verification
 
 ```bash
 uv run --isolated --frozen pytest -q
-```
-
-The isolated environment avoids depending on a stale project virtual environment. Worktree tests must run with a Python and Git executable native to the same operating system and filesystem. In a WSL checkout, run them from WSL; Windows Python can hold directory handles and make otherwise-correct worktree cleanup fail.
-
-Useful focused commands:
-
-```bash
-uv run --isolated --frozen pytest -q tests/test_router.py
-uv run --isolated --frozen pytest -q tests/test_scheduler.py
-uv run --isolated --frozen pytest -q tests/test_decomposer.py
-uv run --isolated --frozen pytest -q tests/test_claude_code_adapter.py
-uv run --isolated --frozen pytest -q tests/test_supervisor.py
-```
-
-Also run:
-
-```bash
 git diff --check
 uv run --isolated --frozen python -m compileall -q core providers src tests
 ```
 
-## What the automated tests must prove
+Run from WSL for a WSL checkout. Windows Python or Git can keep directory handles open and cause false worktree-cleanup failures.
 
-- every configured role has valid ordered profiles;
-- all complexity values are bounded and unknown values fail;
-- the requested model and effort reach both provider CLIs;
-- legacy keys remain readable but ambiguous duplicates fail;
-- complexity reaches every worker, reviewer, and corrector call;
-- requested settings and effective model metadata are recorded;
-- quota and exact-profile failure fallback remain deterministic;
-- read-only roles stay read-only;
-- worktree isolation and correction semantics remain intact.
+Useful focused runs:
 
-## Dry-route validation
+```bash
+uv run --isolated --frozen pytest -q tests/test_router.py
+uv run --isolated --frozen pytest -q tests/test_decomposer.py
+uv run --isolated --frozen pytest -q tests/test_supervisor.py
+uv run --isolated --frozen pytest -q tests/test_git_ops.py
+uv run --isolated --frozen pytest -q tests/test_target_config.py
+```
 
-Before merging a policy change, inspect all three complexity tiers for every role:
+Test filenames evolve; use `rg --files tests` to discover the current set.
+
+## Required invariants
+
+Automated tests should prove:
+
+- the original checkout keeps its branch, HEAD, tracked changes, and untracked changes;
+- run context comes from the same integration snapshot that agents modify;
+- frozen target policy cannot be weakened by same-run changes;
+- every writable stage uses an isolated worktree;
+- tracked, untracked, and ignored writes are inventoried;
+- allowed ephemeral caches are disposable and unknown ignored writes fail;
+- failed stages cannot leak changes and dependents are skipped;
+- merge conflicts and interruptions retain diagnosable artifacts;
+- model, effort, complexity, tokens, outcome, and routing reason reach telemetry;
+- read-only roles cannot modify files;
+- target tests run from the integrated revision in a disposable checkout;
+- correction is bounded and only used for eligible failures;
+- cleanup and finalization are idempotent.
+
+## Routing policy checks
+
+After changing `config/agents.yaml`, inspect all role/class combinations:
 
 ```bash
 for role in decomposer architect backend frontend reviewer security tests documentation corrector; do
@@ -61,16 +68,21 @@ for role in decomposer architect backend frontend reviewer security tests docume
 done
 ```
 
-This performs no model call.
+This does not launch implementation agents. It may read telemetry to explain current gate decisions.
 
-## Real-provider smoke test
+## Real-provider smoke tests
 
-Automated adapter tests mock subprocesses; they prove command construction, not account availability. When credentials and budget permit, perform a minimal read-only call with each provider after changing model names or effort levels. Confirm:
+Mocks prove adapter contracts, not account availability or current model names. After changing provider flags, model identifiers, or effort semantics, make one minimal read-only call per provider when credentials and quota permit. Verify accepted options, effective model, session metadata, and zero filesystem changes.
 
-- the CLI accepts the requested identifier;
-- the reported effective model is plausible;
-- the selected effort is accepted;
-- telemetry contains provider, model, effort, complexity, and session data;
-- no files changed for a read-only role.
+Live calls must never be part of the default suite: they are non-deterministic, externally billed or quota-limited, and require personal credentials.
 
-Never make real-provider calls part of the default test suite. They are non-deterministic, consume quota, and depend on external authentication.
+## Documentation verification
+
+Documentation changes must pass:
+
+- `git diff --check`;
+- local Markdown link validation;
+- Mermaid syntax inspection for changed diagrams;
+- feature-status review so planned behavior is not described as delivered.
+
+Do not hardcode the passing test count in documentation; the suite changes frequently.

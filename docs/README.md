@@ -1,31 +1,38 @@
-# Documentation
+# Technical documentation
 
-This directory documents the implemented system. The root README mixes the current prototype with the long-term vision; the guides below are the operational reference for the code that runs today.
+This directory is the source of truth for the platform's technical design, operational behavior, feature status, and architectural decisions. The root README intentionally contains only the product summary, quick start, and links into this documentation.
 
-- [Architecture](architecture.md) — execution flow, boundaries, isolation, and failure handling.
-- [Model routing policy](model-routing-policy.md) — complexity classes, Claude/Codex profiles, fallback rules, and rationale.
-- [Configuration](configuration.md) — YAML schemas, target-repository settings, and compatibility rules.
-- [Operations](operations.md) — setup, inspection commands, telemetry, quotas, and troubleshooting.
-- [Testing](testing.md) — test layers, safe local validation, and real-provider smoke tests.
+## Read in this order
 
-## Design principles
+1. [Product scope and terminology](product-scope.md) — what the product is and is not.
+2. [Feature status](feature-status.md) — implemented, in progress, and planned capabilities.
+3. [Architecture](architecture.md) — component boundaries and end-to-end flows.
+4. [Security model](security.md) — trust boundaries and enforcement layers.
+5. [Operations](operations.md) — how to run and troubleshoot it.
 
-1. Keep the engine separate from the repository it modifies.
-2. Let configuration choose bounded profiles; do not let an agent invent a model name.
-3. Treat the profile order as preference plus fallback, not as a multi-model vote.
-4. Make complexity explicit and conservative: unparseable classifications become `complex`.
-5. Enforce safety at the process and Git boundaries, not only in prompts.
-6. Record requested and effective execution settings so routing decisions remain auditable.
-7. Never block all work because every candidate is gated; run the declared first profile and explain why.
+## Component documentation
 
-## Source of truth
+| Area | Document | Code/config source of truth |
+|---|---|---|
+| Runtime and dependencies | [Technology stack](technology-stack.md) | `pyproject.toml`, `uv.lock` |
+| Context selection and project graph | [Context engineering](context-engineering.md) | `core/context/`, `core/graph/`, `config/context.yaml` |
+| Planning, agents, DAG, correction | [Workflow and agents](workflow-and-agents.md) | `core/orchestrator/`, `config/workflow.yaml`, `prompts/` |
+| Branches, worktrees, dirty trees | [Git and worktree isolation](git-and-worktrees.md) | `core/orchestrator/git_ops.py`, `supervisor.py` |
+| Providers, models, effort | [Providers and routing](providers-and-routing.md) | `providers/`, `config/agents.yaml`, `config/routing.yaml` |
+| Detailed routing policy | [Model and effort routing policy](model-routing-policy.md) | `config/agents.yaml` |
+| Tests and target policy | [Validation and sandboxing](validation.md) | `.ai-platform.yml`, `target_config.py`, `test_runner.py` |
+| Telemetry, jobs, tokens, quotas | [Data, telemetry, and budgets](data-and-observability.md) | `core/telemetry/`, `core/jobs/`, SQLite files |
+| Configuration | [Configuration reference](configuration.md) | `config/*.yaml`, `.ai-platform.yml` |
+| Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
 
-Runtime behavior is defined by:
+## Governance and history
 
-- `config/agents.yaml` for per-role model profiles;
-- `config/routing.yaml` and `config/quota.yaml` for measurable gates;
-- `config/workflow.yaml` for the task graph and correction limit;
-- `prompts/*.md` for role contracts;
-- `core/orchestrator/` and `providers/` for enforcement.
+- [Architecture decision records](decisions/README.md) explain why durable choices were made.
+- [Feature status](feature-status.md) separates delivered behavior from target architecture.
+- [Known limitations](known-limitations.md) records intentional boundaries and unresolved risks.
+- `CHANGELOG.md` records shipped changes chronologically.
+- `memory/adr/` contains older agent-memory ADRs; new architectural decisions belong under `docs/decisions/`.
 
-When documentation and code disagree, tests and code win; update this directory in the same change.
+## Documentation contract
+
+When code and documentation disagree, code and tests describe current behavior. Correct the documentation in the same change. A document must not describe a roadmap feature as implemented; use the status labels defined in [Feature status](feature-status.md).

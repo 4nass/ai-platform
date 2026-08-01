@@ -1,8 +1,22 @@
-# Configuration
+# Configuration reference
+
+## Configuration layers
+
+| File | Scope | Purpose |
+|---|---|---|
+| `config/agents.yaml` | engine | Ordered provider/model/effort profiles per role and complexity |
+| `config/routing.yaml` | engine | Measurable quota and recent-success routing gates |
+| `config/quota.yaml` | engine | Declared subscription token windows |
+| `config/context.yaml` | engine | Retrieval sources, thresholds, injection mode, and budgets |
+| `config/workflow.yaml` | engine | Fixed DAG, parallelism, decomposition, and correction bound |
+| `prompts/<role>.md` | engine | Role instructions and structured output contract |
+| `.ai-platform.yml` | target | Tests, timeout, sandbox, and allowed ephemeral writes |
+
+Engine policy governs orchestration. Target policy governs how a particular repository is validated. The target policy is frozen from the base revision for a run.
 
 ## Agent profiles
 
-`config/agents.yaml` is the source of truth for role-to-profile mapping.
+`config/agents.yaml` maps every role to an ordered list:
 
 ```yaml
 architect:
@@ -18,79 +32,91 @@ architect:
       - provider: codex_cli
         model: gpt-5.6-terra
         effort: medium
-      - provider: claude_code
-        model: claude-sonnet-5
-        effort: high
     critical:
       - provider: codex_cli
         model: gpt-5.6-sol
         effort: xhigh
-      - provider: claude_code
-        model: claude-opus-5
-        effort: high
 ```
 
-Rules:
+`profiles` is the `complex` policy and required fallback. Overrides accept only `routine`, `complex`, and `critical`. New policy uses `profiles` and provider-neutral `effort`; legacy `provider`, `providers`, and `reasoning_effort` remain readable for compatibility. Ambiguous duplicate fields fail validation.
 
-- `profiles` is required and is the `complex` policy;
-- every profile requires `provider`; `model` and `effort` are explicit in the shipped policy;
-- `profiles_by_complexity` accepts only `routine`, `complex`, and `critical`;
-- an absent override falls back to `profiles`;
-- `effort` must be valid for the selected provider;
-- declaring both `effort` and legacy `reasoning_effort` is rejected.
+Unsupported provider/effort pairs and empty profile lists are configuration errors. See [Model routing policy](model-routing-policy.md).
 
-The loader still accepts older `provider`, `providers`, and `reasoning_effort` keys to avoid breaking local installations. New configuration must use `profiles` and `effort`.
+## Routing and quota
 
-## Routing gates
+The shipped routing gates are:
 
-`config/routing.yaml` controls measurable routing gates such as quota pressure, recent profile failures, minimum sample size, and evaluation windows. Gates modify availability, never the semantic ordering chosen in `agents.yaml`.
+```yaml
+max_quota_ratio: 0.85
+min_success_rate: 0.6
+min_samples: 5
+window_hours: 24
+```
 
-Quota limits are declared per provider in `config/quota.yaml`. They are estimates based on recorded usage because subscription CLIs do not expose an authoritative remaining balance.
+They may skip candidates but do not rewrite semantic profile order. If every candidate is gated, the first profile still runs with a visible forced-fallback reason.
+
+Quota declarations are estimates:
+
+```yaml
+providers:
+  claude_code:
+    window_hours: 5
+    tokens: 8000000
+  codex_cli:
+    window_hours: 5
+    tokens: 8000000
+```
+
+## Context
+
+```yaml
+use_git_diff: true
+use_graph: true
+use_vector_db: true
+use_memory: true
+injection_mode: pointers
+min_similarity: 0.20
+min_similarity_ratio: 0.5
+min_lift: 1.2
+max_files: 20
+max_context_chars: 20000
+```
+
+CLI providers use ranked path pointers by default because they can read the worktree. Providers without disk access receive full rendered excerpts.
 
 ## Workflow
 
-`config/workflow.yaml` defines:
-
-- the fixed task DAG;
-- stage dependencies;
-- maximum parallelism;
-- the bounded correction-attempt count.
-
-The decomposer may select a subset but cannot invent a role absent from this workflow.
-
-## Prompts and contracts
-
-`prompts/<role>.md` contains role instructions. The decomposer prompt has a machine-readable footer:
-
-```text
-COMPLEXITY: routine|complex|critical
-TASKS: comma-separated workflow task ids
+```yaml
+max_parallel: 2
+decompose: true
+max_correction_attempts: 1
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
 ```
 
-The parser accepts only those bounded values. Prompt wording is not a security boundary; filesystem contracts and provider read-only modes enforce write restrictions.
+Task IDs and roles must exist in the bounded workflow. The decomposer can prune tasks but cannot invent new roles.
 
-## Target repository
+## Target validation
 
-A target can declare its validation command in `.ai-platform.yml`:
+Recommended target configuration:
 
 ```yaml
 test_command: [uv, run, pytest, -q]
 test_timeout: 120
+test_sandbox: true
+allowed_ephemeral_writes:
+  - ".pytest_cache/**"
+  - "**/__pycache__/**"
 ```
 
-A string command is also accepted. If the file or command is absent, validation is reported as skipped. Target context artifacts are stored in `.ai-platform/` inside that target and should normally be ignored by Git.
+Use a command array. Keep allowed patterns narrow and repository-relative. Commit this file so the effective policy can be read from the run's base revision. If absent, target validation is explicitly skipped.
 
-## Environment and authentication
+## Authentication and sensitive values
 
-Subscription adapters rely on existing CLI sessions:
+Subscription adapters rely on `codex login` and `claude auth login`. API adapters use provider environment credentials and separate billing. Never store secrets in YAML policy or prompts.
 
-```bash
-codex login
-claude auth login
-```
+## Change discipline
 
-API adapters use their provider's environment credentials and separate billing. Do not commit keys, tokens, session files, generated vector indexes, telemetry databases, or provider transcripts.
-
-## Validation behavior
-
-Configuration errors are intentional hard failures. Unknown complexity keys, empty profile lists, invalid profile fields, duplicate effort keys, or unsupported effort/provider pairs must be fixed rather than silently normalized.
+A configuration change is a behavior change. Validate parsing, inspect every affected role/complexity route, run the test suite, and update the corresponding document. Consolidating overlapping budget and routing files is tracked by [#41](https://github.com/4nass/ai-platform/issues/41).

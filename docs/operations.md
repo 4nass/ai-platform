@@ -1,26 +1,36 @@
 # Operations
 
-## Install and inspect
+## Install and preflight
 
-Use the locked environment:
+Run from the engine root:
 
 ```bash
 uv sync --frozen
 uv run ai-platform --help
+git --version
+codex --version
+claude --version
 ```
 
-Inspect decisions without spending a provider call:
+Authenticate at least one delivered CLI provider:
 
 ```bash
-uv run ai-platform context "Add an OAuth callback"
-uv run ai-platform route architect --complexity routine
-uv run ai-platform route architect --complexity complex
-uv run ai-platform route architect --complexity critical
-uv run ai-platform quota
-uv run ai-platform history
+codex login
+claude auth login
 ```
 
-A route inspection shows the selected provider, requested model, effort, quota share, success history, and rejection reasons for alternatives.
+For sandboxed target tests on Linux, install Bubblewrap and verify `bwrap --version`. Without it, tests can run unsandboxed with a warning; do not accept that fallback for unattended remote work.
+
+## Read-only inspection
+
+```bash
+uv run ai-platform context "Add an OAuth callback" --repo /path/to/project
+uv run ai-platform route architect --complexity critical
+uv run ai-platform quota
+uv run ai-platform history --repo /path/to/project
+```
+
+Route inspection shows the chosen provider, requested model, effort, quota pressure, profile history, and rejected alternatives.
 
 ## Run modes
 
@@ -28,62 +38,77 @@ A route inspection shows the selected provider, requested model, effort, quota s
 # Dogfood against this repository
 uv run ai-platform run "Update model routing"
 
-# Operate on another repository
-uv run ai-platform run "Update model routing" --repo /path/to/project
+# Use another local repository
+uv run ai-platform run "Add an OAuth callback" --repo /path/to/project
 
-# Inspect the planned execution without writable agent stages
-uv run ai-platform run "Update model routing" --dry-run
+# Inspect the planned run without writable stages
+uv run ai-platform run "Add an OAuth callback" --repo /path/to/project --dry-run
 ```
 
-The run branch uses the `engine/<slug>` namespace in the target repository. The human operator should inspect the final report and Git history before merging the result onward.
+Dry run may call the decomposer, so it is not guaranteed to be provider-free.
 
-## Telemetry
+## Before a run
 
-Each provider call records:
+1. Confirm the target path and current branch.
+2. Decide whether uncommitted changes should remain outside the run.
+3. Commit `.ai-platform.yml` with a real validation command.
+4. Inspect route and quota pressure for expensive or critical work.
+5. Confirm provider authentication and local disk space.
+6. For unattended work, confirm the process has a supervision and recovery strategy.
 
-- role, stage, provider, requested model, and requested effort;
-- run complexity;
-- duration, outcome, token usage, and reported price when available;
-- provider session identifier when available;
-- `effective_model` in metadata when the provider reports the model it actually used.
+The default dirty policy starts from committed HEAD, warns about the dirty checkout, and excludes uncommitted changes from run context.
 
-Requested and effective model are intentionally separate. A provider may alias or fall back from the requested identifier; audits should prefer `effective_model` when present and preserve the original request for reproducibility.
+## During and after a run
 
-Telemetry is shared at the engine root so quota pressure reflects all target repositories. History views are scoped to the selected target by default.
+A mutating run creates `engine/<slug>` and temporary worktrees. The terminal report should expose stage states, validation, review, correction, delivery branch, and any retained diagnostic path.
 
-## Quota interpretation
+After completion:
 
-Quota is a local pressure estimate over a rolling window, not the provider's authoritative subscription balance. A profile may be gated because its provider is above the configured share. Exact-profile recent failures can gate one model/effort combination without condemning every profile on that provider.
+```bash
+git log --graph --oneline --decorate engine/<slug>
+git diff <base>...engine/<slug>
+```
 
-When all candidates are gated, the engine runs the first declared profile and makes the reason visible. This preserves progress while keeping policy deterministic.
+Inspect and test the delivery branch before manually merging or pushing. The platform does neither automatically.
+
+## Telemetry and quota
+
+History is shared at the engine root but normally filtered by target. Requested model and effective model are separate. Use the effective value when the provider reports it, while retaining the requested profile for audit.
+
+Quota is a local estimate from recorded tokens versus declared rolling-window allowance. It is a routing signal, not a provider balance or financial ceiling.
+
+## Durable jobs
+
+`submit`, `status`, `jobs`, `cancel`, and `work` (issue [#24](https://github.com/4nass/ai-platform/issues/24)) are delivered and tested against `core/jobs/`. That is a statement about the local CLI/queue contract, not about remote exposure — no authentication, project allowlist, or hard budget exists yet (see [Security](security.md)), so these commands are not yet a safe surface for an untrusted remote caller.
+
+`submit` persists the request and starts a detached worker; `status <id>` and `jobs` are readable from any process, including after the submitting terminal is closed. A job whose worker dies is reconciled to `interrupted` on the next `jobs`/`status`/`work` call, keeping its branch, base revision, and integration-worktree path. `work [--job ID]` runs one job or drains the whole queue in the foreground — the entry point a managed service unit would call once [#40](https://github.com/4nass/ai-platform/issues/40) exists.
 
 ## Troubleshooting
 
-### The wrong model appears selected
+### A provider cannot start
 
-Run `ai-platform route <role> --complexity <class>` and inspect:
+Check CLI version and authentication, then run a read-only route inspection. Distinguish authentication, unsupported model/effort, timeout, quota gate, and malformed output; they require different remedies.
 
-1. the profile order in `config/agents.yaml`;
-2. provider quota pressure;
-3. exact-profile recent failure samples;
-4. whether the run complexity was parsed or defaulted to `complex`.
+### The wrong model is selected
 
-### Claude rejects effort or model
+Check the run complexity, profile order in `config/agents.yaml`, quota ratio, and recent exact-profile outcomes. If all candidates are gated, the first declared profile runs deliberately.
 
-Check `claude --version`, update Claude Code, and compare the configured identifier with the official model configuration documentation. The shipped Pro policy does not select `ultracode`; if a custom policy enables it, use a recent compatible release.
+### Target tests are skipped
 
-### Codex rejects effort or model
+Commit a valid `.ai-platform.yml` at the base revision. Skipped is not passed.
 
-Check `codex --version` and current OpenAI model guidance. Model availability can depend on the installed client, account, and rollout.
+### Tests created forbidden cache files
 
-### A stage changed forbidden files
+Declare only the legitimate repository-relative patterns in `allowed_ephemeral_writes`. Do not broadly downgrade ignored writes to warnings.
 
-Inspect the preserved worktree and role contract. Do not weaken the contract merely to accept an unrelated edit; split the request or assign the correct role.
+### A worktree remains
 
-### Tests are skipped
+Failure, conflict, interruption, or cleanup error may intentionally retain it. Confirm the reported path and branch, inspect useful changes, then use normal Git worktree cleanup. Never delete a guessed or broad temporary path.
 
-Add `.ai-platform.yml` with the target's actual validation command. Skipped is explicit and is not equivalent to a passing test suite.
+### A run appears stuck
 
-### A temporary worktree remains
+For the synchronous path, inspect the provider subprocess and terminal output. For the jobs path, run `ai-platform status <id>` — reconciliation runs on that read and marks an abandoned run `interrupted` once its heartbeat is stale (default 180s with no beat), rather than leaving the row saying `running` forever.
 
-This normally means a merge conflict or failed cleanup. Confirm that the path belongs to the target repository and contains work worth preserving before removing it manually.
+### WSL-specific problems
+
+Use Linux-native Git, Python, and uv for a repository inside WSL. Mixing Windows processes with WSL worktrees can keep handles open and break cleanup. Reliable service startup inside WSL is tracked by [#40](https://github.com/4nass/ai-platform/issues/40).
