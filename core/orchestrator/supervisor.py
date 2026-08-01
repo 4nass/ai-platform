@@ -12,6 +12,7 @@ expensive part (the actual provider call) runs concurrently, up to
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -324,6 +325,25 @@ def _apply_dirty_policy(repo: git.Repo, policy: str) -> list[str]:
     return excluded
 
 
+def _guarded(progress: Callable[..., None] | None) -> Callable[..., None]:
+    """Wraps a progress callback so it can neither be absent nor fatal.
+
+    A callback that writes to a database, a socket or a log is a dependency
+    the run did not choose and cannot vouch for. Losing one progress update
+    costs an observer some precision; letting it raise costs the run.
+    """
+    if progress is None:
+        return lambda **_: None
+
+    def report(**fields) -> None:
+        try:
+            progress(**fields)
+        except Exception as exc:
+            console.print(f"[dim]progress not recorded: {type(exc).__name__}: {exc}[/dim]")
+
+    return report
+
+
 def _discard_integration_worktree(
     repo: git.Repo, integration_repo: git.Repo, integration_root: Path, branch: str
 ) -> None:
@@ -351,6 +371,7 @@ def run(
     dry_run: bool = False,
     session_id: str | None = None,
     dirty_policy: str = DIRTY_HEAD,
+    progress: Callable[..., None] | None = None,
 ) -> RunReport:
     """`engine_root` is the ai-platform install (config/, prompts/, the
     shared telemetry.sqlite); `target_root` is the repo this run actually
@@ -378,8 +399,20 @@ def run(
     Order matters here and is enforced by structure rather than convention:
     the run lock is taken before the first mutating operation, so a run that
     is refused has created no branch, no worktree, and pruned nothing.
+
+    `progress` is called with keyword fields as the run reaches them —
+    `base_sha`, `branch`, the integration worktree path, the stages currently
+    in flight, the correction attempt. Deliberately a bare callable rather
+    than a job-store handle: the supervisor should not know that a durable
+    queue exists (see core.jobs), and a caller with no interest in progress
+    passes nothing. What it buys is that a run killed halfway leaves a record
+    of where its work is, instead of an orphan branch nobody can attribute.
     """
     repo = git.Repo(target_root)
+    # Progress reporting must never be able to fail a run: it is bookkeeping
+    # for an observer, and a queue with a bad row is a smaller problem than a
+    # run that died reporting into it.
+    report_progress = _guarded(progress)
 
     console.rule("Engine")
 
@@ -397,6 +430,7 @@ def run(
         git_ops.prune_worktrees(repo)
 
         base_sha = git_ops.current_commit(repo)
+        report_progress(base_ref=git_ops.current_ref(repo), base_sha=base_sha)
         excluded = _apply_dirty_policy(repo, dirty_policy)
         # The run's policy, frozen. Read from the base commit rather than from
         # any working tree, and never re-read: roles without an artifact
@@ -413,6 +447,10 @@ def run(
         # pruning.
         integration_repo = git.Repo(integration_root)
         console.print(f"[bold]Integration worktree:[/bold] {integration_root} ({branch})")
+        # Reported before a single agent runs: from here on there is state on
+        # disk, and anything that kills this process without recording where
+        # it is leaves an orphan branch nobody can attribute to a request.
+        report_progress(branch=branch, integration_root=str(integration_root))
 
         # Indexed from the integration worktree, so the prompt and the edited
         # tree are the same state. The index itself stays under `target_root`:
@@ -488,9 +526,11 @@ def run(
                     "excluded_local_modifications": len(excluded),
                 },
             )
+            report_progress(run_id=recorder.run_id)
 
         complexity = router.DEFAULT_COMPLEXITY
         if workflow.decompose:
+            report_progress(stage="decompose")
             known_ids = [t.id for t in workflow.tasks]
             decomposer_result = scheduler.run_task(
                 integration_root,
@@ -545,6 +585,10 @@ def run(
         blocked_ids: set[str] = set()
         stage_reports: list[StageReport] = []
         all_files_changed: list[str] = []
+        # Reported as a set, not a single name: up to `max_parallel` stages
+        # run at once, and naming only the last dispatched would describe a
+        # run that isn't happening.
+        dispatched: set[str] = set()
 
         with ThreadPoolExecutor(max_workers=workflow.max_parallel) as executor:
             in_flight: dict[Future, planner.Task] = {}
@@ -571,6 +615,8 @@ def run(
 
                     del remaining[task_id]
                     snapshot = list(completed)
+                    dispatched.add(task.id)
+                    report_progress(stage=", ".join(sorted(dispatched)))
                     future = executor.submit(
                         _run_stage_in_worktree,
                         integration_root,
@@ -591,6 +637,8 @@ def run(
                 done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
                 for future in done:
                     task = in_flight.pop(future)
+                    dispatched.discard(task.id)
+                    report_progress(stage=", ".join(sorted(dispatched)))
                     # _run_stage_in_worktree is written never to raise, so this
                     # is the backstop for a bug in *that* guarantee: without it
                     # a single unexpected error still takes down every other
@@ -662,9 +710,11 @@ def run(
 
         any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
+        report_progress(stage="verify")
         test_result = _verify(integration_repo, branch, config)
         _print_test_result(test_result)
 
+        report_progress(stage="review")
         diff = git_ops.diff_since(integration_repo, base_sha)
         review_result = scheduler.run_task(
             integration_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
@@ -692,6 +742,7 @@ def run(
         if can_correct:
             for attempt in range(1, workflow.max_correction_attempts + 1):
                 correction_attempts = attempt
+                report_progress(stage=f"correction-{attempt}", attempt=attempt)
                 # Per actor, not once per run: earlier attempts and the
                 # merges before them may legitimately have left files here.
                 baseline_ignored = set(git_ops.ignored_writes(integration_repo))
@@ -771,6 +822,10 @@ def run(
         if overall_ok:
             try:
                 git_ops.remove_worktree(integration_repo, integration_root)
+                # Cleared rather than left pointing at a directory that no
+                # longer exists: an observer reading the job row afterwards
+                # should see "the branch is the deliverable", not a dead path.
+                report_progress(integration_root="", stage="")
             except Exception as exc:
                 console.print(
                     f"[bold yellow]could not remove {integration_root}[/bold yellow]: {exc}"

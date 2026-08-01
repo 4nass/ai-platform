@@ -234,3 +234,180 @@ def test_quota_command_with_nothing_recorded(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0
     assert "No provider usage recorded" in result.stdout
+
+
+# --- durable job lifecycle (issue #24) ---
+
+
+@pytest.fixture
+def engine(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Points the CLI's ENGINE_ROOT at a scratch directory so these tests use
+    a throwaway job database rather than the developer's real one."""
+    monkeypatch.setattr(ai_platform, "ENGINE_ROOT", tmp_path)
+    return tmp_path
+
+
+def test_cli_submit_queues_without_running_anything(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """The acceptance criterion that defines the command: an id comes back
+    before any provider is contacted."""
+    from core.jobs import store, worker
+
+    spawned: list[int] = []
+    monkeypatch.setattr(worker, "spawn_detached", lambda root, job_id: spawned.append(job_id) or 999)
+    monkeypatch.setattr(
+        "core.orchestrator.supervisor.run",
+        lambda *a, **k: pytest.fail("submit must not run the supervisor"),
+    )
+
+    result = runner.invoke(ai_platform.app, ["submit", "add oauth2", "--repo", str(tmp_path)])
+
+    assert result.exit_code == 0
+    jobs = store.recent(engine)
+    assert len(jobs) == 1
+    assert jobs[0].state == "queued"
+    assert jobs[0].request == "add oauth2"
+    assert spawned == [jobs[0].id]
+    assert f"Job {jobs[0].id}" in result.stdout
+
+
+def test_cli_submit_can_queue_without_starting_a_worker(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    from core.jobs import store, worker
+
+    monkeypatch.setattr(
+        worker, "spawn_detached", lambda *a: pytest.fail("--no-detach must not spawn")
+    )
+
+    result = runner.invoke(
+        ai_platform.app, ["submit", "add oauth2", "--repo", str(tmp_path), "--no-detach"]
+    )
+
+    assert result.exit_code == 0
+    assert store.recent(engine)[0].state == "queued"
+
+
+def test_cli_submit_carries_the_envelope(monkeypatch: pytest.MonkeyPatch, engine, tmp_path) -> None:
+    from core.jobs import store, worker
+
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 1)
+
+    runner.invoke(
+        ai_platform.app,
+        [
+            "submit", "add oauth2", "--repo", str(tmp_path),
+            "--session", "s1", "--dirty-policy", "reject", "--no-detach",
+        ],
+    )
+
+    assert store.recent(engine)[0].envelope == {"session_id": "s1", "dirty_policy": "reject"}
+
+
+def test_cli_status_reads_a_job_submitted_elsewhere(engine, tmp_path) -> None:
+    """Status is answerable from any process — the submitting terminal is
+    long gone by the time anyone asks."""
+    from core.jobs import store
+
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    store.claim(engine, job_id, worker_pid=4242)
+    store.record_progress(engine, job_id, branch="engine/x", base_sha="abc123def456", stage="backend")
+
+    result = runner.invoke(ai_platform.app, ["status", str(job_id)])
+
+    assert result.exit_code == 0
+    assert "running" in result.stdout
+    assert "engine/x" in result.stdout
+    assert "backend" in result.stdout
+    assert "queued" in result.stdout  # the lifecycle table shows how it got here
+
+
+def test_cli_status_on_an_unknown_job_exits_nonzero(engine) -> None:
+    result = runner.invoke(ai_platform.app, ["status", "404"])
+
+    assert result.exit_code == 1
+    assert "No job 404" in result.stdout
+
+
+def test_cli_jobs_lists_what_was_submitted(engine, tmp_path) -> None:
+    from core.jobs import store
+
+    store.submit(engine, project=str(tmp_path), request="first request")
+    store.submit(engine, project=str(tmp_path), request="second request")
+
+    result = runner.invoke(ai_platform.app, ["jobs"])
+
+    assert result.exit_code == 0
+    assert "first request" in result.stdout
+    assert "second request" in result.stdout
+
+
+def test_cli_jobs_reports_nothing_when_the_queue_is_empty(engine) -> None:
+    result = runner.invoke(ai_platform.app, ["jobs"])
+
+    assert result.exit_code == 0
+    assert "No jobs submitted yet" in result.stdout
+
+
+def test_cli_cancel_stops_a_queued_job(engine, tmp_path) -> None:
+    from core.jobs import store
+
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+
+    result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
+
+    assert result.exit_code == 0
+    assert store.get(engine, job_id).state == "cancelled"
+
+
+def test_cli_cancel_refuses_a_running_job(engine, tmp_path) -> None:
+    from core.jobs import store
+
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    store.claim(engine, job_id, worker_pid=1)
+
+    result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
+
+    assert result.exit_code == 1
+    assert "cannot be stopped mid-run" in result.stdout
+    assert store.get(engine, job_id).state == "running"
+
+
+def test_cli_reconciles_abandoned_jobs_on_a_read(engine, tmp_path) -> None:
+    """A restart is exactly when nobody is around to run a repair command, so
+    the read paths do it."""
+    from datetime import datetime, timedelta, timezone
+
+    from core.jobs import store
+
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    store.claim(engine, job_id, worker_pid=1)
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=store.STALE_AFTER_SECONDS + 60)).isoformat()
+    with store.connect(engine) as con:
+        con.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ?", (stale, job_id))
+
+    result = runner.invoke(ai_platform.app, ["jobs"])
+
+    assert result.exit_code == 0
+    assert "marked interrupted" in result.stdout
+    assert store.get(engine, job_id).state == "interrupted"
+
+
+def test_cli_work_runs_a_specific_job(monkeypatch: pytest.MonkeyPatch, engine, tmp_path) -> None:
+    from core.jobs import store, worker
+
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    monkeypatch.setattr(worker, "run_job", lambda root, jid: "succeeded")
+
+    result = runner.invoke(ai_platform.app, ["work", "--job", str(job_id)])
+
+    assert result.exit_code == 0
+    assert "succeeded" in result.stdout
+
+
+def test_cli_work_on_an_empty_queue_says_so(engine) -> None:
+    result = runner.invoke(ai_platform.app, ["work"])
+
+    assert result.exit_code == 0
+    assert "Nothing queued" in result.stdout

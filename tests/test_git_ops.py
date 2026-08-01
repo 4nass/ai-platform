@@ -24,6 +24,7 @@ from core.orchestrator.git_ops import (
     merge_worktree,
     prune_worktrees,
     remove_worktree,
+    restore_hooks,
 )
 
 
@@ -458,3 +459,90 @@ def test_classify_ignored_writes_subtracts_the_baseline(repo: git.Repo) -> None:
     _, violations = classify_ignored_writes(repo, (), baseline)
 
     assert violations == ["new.log"]
+
+
+def test_disable_hooks_saves_the_previous_value_durably(repo: git.Repo) -> None:
+    """A `finally` only runs if the process lives to run it. Killing a worker
+    mid-run otherwise left the target pointing at the neutral directory
+    permanently, silently disabling the user's own hooks in their repo."""
+    with disable_hooks(repo):
+        saved = repo.config_reader().get_value("ai-platform", "savedHooksPath")
+        assert saved == "<unset>"  # nothing was configured before
+
+
+def test_restore_hooks_repairs_a_crashed_run(repo: git.Repo) -> None:
+    import shutil
+    import tempfile
+
+    from core.orchestrator.git_ops import HOOKS_DISABLED_PREFIX
+
+    # simulate a run that neutralized hooks and was killed before its finally
+    neutral = tempfile.mkdtemp(prefix=HOOKS_DISABLED_PREFIX)
+    with repo.config_writer() as writer:
+        writer.set_value("ai-platform", "savedHooksPath", "<unset>")
+        writer.set_value("core", "hooksPath", neutral)
+
+    assert restore_hooks(repo) is True
+
+    with pytest.raises(Exception):
+        repo.config_reader().get_value("core", "hooksPath")
+    shutil.rmtree(neutral, ignore_errors=True)
+
+
+def test_restore_hooks_puts_a_custom_path_back(repo: git.Repo) -> None:
+    """A user who had set their own `core.hooksPath` must get exactly that
+    back, not git's default — which is why the previous value is written to
+    the repo's config rather than only held in memory."""
+    custom = str(Path(repo.working_tree_dir, "my-hooks"))
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", custom)
+
+    with disable_hooks(repo):
+        assert repo.config_reader().get_value("core", "hooksPath") != custom
+
+    assert repo.config_reader().get_value("core", "hooksPath") == custom
+
+
+def test_restore_hooks_after_a_crash_puts_a_custom_path_back(repo: git.Repo) -> None:
+    import shutil
+    import tempfile
+
+    from core.orchestrator.git_ops import HOOKS_DISABLED_PREFIX
+
+    custom = str(Path(repo.working_tree_dir, "my-hooks"))
+    neutral = tempfile.mkdtemp(prefix=HOOKS_DISABLED_PREFIX)
+    with repo.config_writer() as writer:
+        writer.set_value("ai-platform", "savedHooksPath", custom)
+        writer.set_value("core", "hooksPath", neutral)
+
+    assert restore_hooks(repo) is True
+
+    assert repo.config_reader().get_value("core", "hooksPath") == custom
+    shutil.rmtree(neutral, ignore_errors=True)
+
+
+def test_restore_hooks_is_a_no_op_on_an_untouched_repo(repo: git.Repo) -> None:
+    assert restore_hooks(repo) is False
+
+
+def test_restore_hooks_does_not_overwrite_a_deliberate_later_setting(repo: git.Repo) -> None:
+    """If `core.hooksPath` no longer points at an engine directory, someone
+    set it after the crash. Reversing that would undo a deliberate choice."""
+    deliberate = str(Path(repo.working_tree_dir, "chosen-later"))
+    with repo.config_writer() as writer:
+        writer.set_value("ai-platform", "savedHooksPath", "<unset>")
+        writer.set_value("core", "hooksPath", deliberate)
+
+    assert restore_hooks(repo) is False
+
+    assert repo.config_reader().get_value("core", "hooksPath") == deliberate
+    # and the stale saved value is dropped, so a later call can't resurrect it
+    with pytest.raises(Exception):
+        repo.config_reader().get_value("ai-platform", "savedHooksPath")
+
+
+def test_restore_hooks_is_idempotent(repo: git.Repo) -> None:
+    with disable_hooks(repo):
+        pass
+
+    assert restore_hooks(repo) is False

@@ -21,3 +21,7 @@ wheels/
 telemetry.sqlite
 telemetry.sqlite-wal
 telemetry.sqlite-shm
+# Durable job queue (submitted runs, their lifecycle, and crash recovery)
+jobs.sqlite
+jobs.sqlite-wal
+jobs.sqlite-shm

@@ -307,6 +307,216 @@ def quota(
     console.print(table)
 
 
+DIRTY_POLICY_HELP = (
+    "What to do about local modifications in the target: 'head' (default) works on the "
+    "last commit and leaves them out, reporting how many; 'reject' refuses to start; "
+    "'snapshot' would reproduce them inside the run and is not implemented yet."
+)
+
+
+@app.command()
+def submit(
+    request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
+    repo: Path = REPO_OPTION,
+    session: str = typer.Option(
+        None, "--session", help="Groups this job with others from the same conversation."
+    ),
+    dirty_policy: str = typer.Option("head", "--dirty-policy", help=DIRTY_POLICY_HELP),
+    detach: bool = typer.Option(
+        True,
+        "--detach/--no-detach",
+        help="Start a worker for this job immediately. --no-detach only queues it, "
+        "for a separate `ai-platform work` to pick up.",
+    ),
+) -> None:
+    """Queues a request and returns its job id — without waiting for an agent.
+
+    The asynchronous counterpart to `run`. `run` holds the terminal for the
+    length of a run and its state dies with the process; this persists the
+    submission first, so the job survives a disconnect, a closed terminal or a
+    WSL restart, and `ai-platform status` can answer for it from anywhere
+    afterwards.
+    """
+    from core.jobs import store, worker
+
+    target = _target_root(repo)
+    job_id = store.submit(
+        ENGINE_ROOT,
+        project=str(target),
+        request=request,
+        envelope={"session_id": session, "dirty_policy": dirty_policy},
+    )
+    console.print(f"[bold]Job {job_id}[/bold] queued for {target}")
+
+    if detach:
+        pid = worker.spawn_detached(ENGINE_ROOT, job_id)
+        console.print(f"Worker started (pid {pid}).")
+    console.print(f"Follow it with: [bold]ai-platform status {job_id}[/bold]")
+
+
+@app.command()
+def work(
+    job: int = typer.Option(None, "--job", help="Run this specific job instead of draining the queue."),
+    repo: Path = typer.Option(
+        None, "--repo", help="Only take jobs targeting this repo (default: any)."
+    ),
+    limit: int = typer.Option(None, "--limit", help="Stop after this many jobs."),
+) -> None:
+    """Executes queued jobs in the foreground.
+
+    This is what a managed service unit would run (issue #40), and what picks
+    up anything submitted with `--no-detach` or left behind by a restart.
+    """
+    from core.jobs import store, worker
+
+    for stale in worker.reconcile(ENGINE_ROOT):
+        console.print(f"[bold yellow]Job {stale.id} marked interrupted[/bold yellow] — worker gone")
+
+    if job is not None:
+        console.print(f"[bold]Job {job}[/bold]: {worker.run_job(ENGINE_ROOT, job)}")
+        return
+
+    project = str(_target_root(repo)) if repo else None
+    ran = worker.drain(ENGINE_ROOT, project=project, limit=limit)
+    if not ran:
+        console.print("Nothing queued.")
+        return
+    for job_id in ran:
+        console.print(f"[bold]Job {job_id}[/bold]: {store.get(ENGINE_ROOT, job_id).state}")
+
+
+@app.command()
+def jobs(
+    state: str = typer.Option(None, "--state", help="Only show jobs in this state."),
+    limit: int = typer.Option(20, "--limit", help="How many jobs to show."),
+    repo: Path = typer.Option(
+        None, "--repo", help="Only show jobs targeting this repo (default: all)."
+    ),
+) -> None:
+    """Lists submitted jobs and where each one got to."""
+    from rich.table import Table
+
+    from core.jobs import store, worker
+
+    for stale in worker.reconcile(ENGINE_ROOT):
+        console.print(f"[bold yellow]Job {stale.id} marked interrupted[/bold yellow] — worker gone")
+
+    rows = store.recent(
+        ENGINE_ROOT,
+        limit=limit,
+        state=state,
+        project=str(_target_root(repo)) if repo else None,
+    )
+    if not rows:
+        console.print("No jobs submitted yet.")
+        return
+
+    table = Table(title="Jobs")
+    for column in ("id", "state", "submitted", "request", "stage", "branch", "summary"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            str(row.id),
+            f"[{_STATE_STYLE.get(row.state, 'white')}]{row.state}[/]",
+            row.submitted_at[:19].replace("T", " "),
+            row.request[:40],
+            row.stage or "-",
+            row.branch or "-",
+            row.summary or "-",
+        )
+    console.print(table)
+
+
+@app.command()
+def status(job_id: int = typer.Argument(..., help="Job to describe.")) -> None:
+    """Shows one job in full, including how it reached its current state.
+
+    Readable from any process at any time — that is the point of persisting
+    the lifecycle rather than holding it in the submitting terminal.
+    """
+    from rich.table import Table
+
+    from core.jobs import store, worker
+
+    worker.reconcile(ENGINE_ROOT)
+    try:
+        job = store.get(ENGINE_ROOT, job_id)
+    except store.JobError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[bold]Job {job.id}[/bold] "
+        f"[{_STATE_STYLE.get(job.state, 'white')}]{job.state}[/] — {job.request}"
+    )
+    fields = [
+        ("project", job.project),
+        ("submitted", f"{job.submitted_at[:19].replace('T', ' ')} via {job.channel}"),
+        ("base", f"{job.base_ref or '-'} @ {job.base_sha[:12] or '-'}"),
+        ("branch", job.branch or "-"),
+        ("worktree", job.integration_root or "-"),
+        ("stage", job.stage or "-"),
+        ("attempt", str(job.attempt)),
+        ("run_id", str(job.run_id) if job.run_id else "-"),
+        ("worker", f"pid {job.worker_pid} on {job.worker_host}" if job.worker_pid else "-"),
+        ("heartbeat", job.heartbeat_at[:19].replace("T", " ") if job.heartbeat_at else "-"),
+        ("finished", job.finished_at[:19].replace("T", " ") if job.finished_at else "-"),
+        ("detail", job.detail or "-"),
+    ]
+    table = Table(show_header=False)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    for name, value in fields:
+        table.add_row(name, value)
+    console.print(table)
+
+    history_table = Table(title="Lifecycle")
+    for column in ("at", "from", "to", "note"):
+        history_table.add_column(column)
+    for event in store.events(ENGINE_ROOT, job_id):
+        history_table.add_row(
+            event["at"][:19].replace("T", " "),
+            event["from_state"] or "-",
+            event["to_state"],
+            event["note"] or "",
+        )
+    console.print(history_table)
+
+    if job.integration_root:
+        console.print(
+            f"[dim]Its worktree is still on disk — inspect it at {job.integration_root}[/dim]"
+        )
+
+
+@app.command()
+def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:
+    """Cancels a job that hasn't started executing yet."""
+    from core.jobs import store
+
+    try:
+        if store.cancel(ENGINE_ROOT, job_id):
+            console.print(f"[bold]Job {job_id}[/bold] cancelled.")
+        else:
+            console.print(
+                f"Job {job_id} already finished as "
+                f"[bold]{store.get(ENGINE_ROOT, job_id).state}[/bold] — nothing to cancel."
+            )
+    except store.JobError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+
+_STATE_STYLE = {
+    "queued": "cyan",
+    "running": "yellow",
+    "waiting_approval": "magenta",
+    "succeeded": "green",
+    "failed": "red",
+    "cancelled": "dim",
+    "interrupted": "bold yellow",
+}
+
+
 def main() -> None:
     app()
 

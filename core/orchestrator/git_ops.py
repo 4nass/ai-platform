@@ -13,6 +13,14 @@ import git
 
 from core.orchestrator import target_config
 
+HOOKS_DISABLED_PREFIX = "engine-hooks-disabled-"
+SAVED_HOOKS_SECTION = "ai-platform"
+SAVED_HOOKS_OPTION = "savedHooksPath"
+UNSET_SENTINEL = "<unset>"
+"""Distinguishes "the user had no `core.hooksPath`" from "the user had one" in
+a config file that has no way to store None. Restoring the wrong one of those
+either strands a setting or invents one."""
+
 ENGINE_INDEX_DIR = ".ai-platform"
 """The engine's own derived artifacts under a target repo (vector index,
 graph cache). Excluded from `local_modifications` for the same reason
@@ -45,6 +53,20 @@ def local_modifications(repo: git.Repo) -> list[str]:
 def current_commit(repo: git.Repo) -> str:
     """Snapshot of HEAD before branching, used later to diff this run's own changes."""
     return repo.head.commit.hexsha
+
+
+def current_ref(repo: git.Repo) -> str:
+    """The branch a run started from, or `HEAD` on a detached checkout.
+
+    Recorded alongside `base_sha` rather than derived from it: a sha says
+    which commit, a ref says which line of work someone thought they were on,
+    and after a force-push those two stop agreeing. Detached HEAD is reported
+    as such instead of guessed at — there is no branch to name.
+    """
+    try:
+        return repo.active_branch.name
+    except TypeError:
+        return "HEAD"  # detached
 
 
 def _slugify(text: str) -> str:
@@ -235,27 +257,75 @@ def disable_hooks(repo: git.Repo):
     Scoped to the whole write-capable window of a run (DAG dispatch through
     the correction loop), not per-stage: the hooks path is shared config,
     concurrent per-stage toggling would race for no benefit.
+
+    The previous value is written to the repo's own config before the swap,
+    not just held in memory, so `restore_hooks` can undo this after a crash.
+    A `finally` only runs if the process lives to run it: killing a worker
+    mid-run (which is now a first-class case — see core.jobs) otherwise left
+    the target pointing at the neutral directory *permanently*, silently
+    disabling the user's own hooks in their repository. Measured on a real
+    SIGKILL'd run before this was added.
     """
-    # GitPython's get_value(default=...) only returns the default on a
-    # *type-conversion* failure, not a missing option — passing None as the
-    # default does not suppress the NoOptionError a never-configured
-    # core.hooksPath actually raises, so the miss has to be caught here.
-    try:
-        previous = repo.config_reader().get_value("core", "hooksPath")
-    except Exception:
-        previous = None
-    neutral_dir = Path(tempfile.mkdtemp(prefix="engine-hooks-disabled-"))
+    previous = _configured_hooks_path(repo)
+    neutral_dir = Path(tempfile.mkdtemp(prefix=HOOKS_DISABLED_PREFIX))
     with repo.config_writer() as writer:
+        writer.set_value(SAVED_HOOKS_SECTION, SAVED_HOOKS_OPTION, previous or UNSET_SENTINEL)
         writer.set_value("core", "hooksPath", str(neutral_dir))
     try:
         yield
     finally:
-        with repo.config_writer() as writer:
-            if previous is None:
+        restore_hooks(repo)
+        shutil.rmtree(neutral_dir, ignore_errors=True)
+
+
+def _configured_hooks_path(repo: git.Repo) -> str | None:
+    """`core.hooksPath`, or None when it was never set.
+
+    GitPython's `get_value(default=...)` only returns the default on a *type
+    conversion* failure, not a missing option — passing None as the default
+    does not suppress the NoOptionError a never-configured `core.hooksPath`
+    actually raises, so the miss has to be caught here.
+    """
+    try:
+        return str(repo.config_reader().get_value("core", "hooksPath"))
+    except Exception:
+        return None
+
+
+def restore_hooks(repo: git.Repo) -> bool:
+    """Undoes `disable_hooks`, whether or not the run that called it survived.
+
+    Returns True if it changed anything. Idempotent and safe to call on a repo
+    no run ever touched: with nothing saved, there is nothing to put back.
+
+    Only ever reverses the engine's *own* neutralization. If `core.hooksPath`
+    now points somewhere that isn't an engine directory, someone set it
+    deliberately after the crash and it is not this function's to overwrite —
+    the saved value is dropped instead, so a later call can't resurrect a
+    stale path over a deliberate one.
+    """
+    saved = _saved_hooks_path(repo)
+    if saved is None:
+        return False
+
+    current = _configured_hooks_path(repo)
+    engine_owned = current is not None and Path(current).name.startswith(HOOKS_DISABLED_PREFIX)
+
+    with repo.config_writer() as writer:
+        if engine_owned:
+            if saved == UNSET_SENTINEL:
                 writer.remove_option("core", "hooksPath")
             else:
-                writer.set_value("core", "hooksPath", previous)
-        shutil.rmtree(neutral_dir, ignore_errors=True)
+                writer.set_value("core", "hooksPath", saved)
+        writer.remove_option(SAVED_HOOKS_SECTION, SAVED_HOOKS_OPTION)
+    return engine_owned
+
+
+def _saved_hooks_path(repo: git.Repo) -> str | None:
+    try:
+        return str(repo.config_reader().get_value(SAVED_HOOKS_SECTION, SAVED_HOOKS_OPTION))
+    except Exception:
+        return None
 
 
 def diff_since(repo: git.Repo, base_sha: str) -> str:
