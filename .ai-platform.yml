@@ -13,3 +13,20 @@ test_command: "uv run pytest -q"
 # a real (if harmless) failure instead of a silent no-op.
 test_env:
   HF_HUB_OFFLINE: "1"
+
+# Gitignored paths a run may leave behind without it counting as a contract
+# violation. Deliberately specific and per-project: every entry here is a
+# path an agent can write that the reviewer's diff will never show, so a
+# permissive list would gradually reopen the hole issue #2 closed. Absolute
+# paths, `..`, anything under `.git/`, and catch-alls are rejected outright.
+#
+# This list exists because of a real run: a `backend` stage ran pytest,
+# pytest created `.pytest_cache/` (which ships its own `.gitignore`), and
+# the stage was rejected with its work discarded.
+allowed_ephemeral_writes:
+  - ".pytest_cache/**"
+  - "**/__pycache__/**"
+  - "*.py[cod]"
+  - ".coverage"
+  - ".ruff_cache/**"
+  - ".mypy_cache/**"

@@ -29,6 +29,7 @@ from core.orchestrator import (
     review,
     router,
     scheduler,
+    target_config,
     test_runner,
 )
 from core.orchestrator.scheduler import StageResult
@@ -115,6 +116,37 @@ def _print_test_result(result: test_runner.TestResult) -> None:
         console.print(result.output)
 
 
+def _verify(
+    integration_repo: git.Repo, branch: str, config: target_config.TargetConfig
+) -> test_runner.TestResult:
+    """Runs the target's test command in a throwaway checkout of `branch`.
+
+    The test command is the one actor guaranteed to litter — pytest writes
+    `.pytest_cache/`, coverage writes `.coverage`, Python writes
+    `__pycache__/`. Running it in the integration worktree meant those
+    landed there and were then indistinguishable from something the
+    *corrector* had written, which is both a wrong accusation and a real
+    one waiting to be missed. A worktree deleted immediately afterwards
+    keeps that noise out of the branch under review entirely.
+    """
+    if config.test_command is None:
+        return test_runner.run_tests(Path(integration_repo.working_tree_dir), config)
+
+    try:
+        verify_root = git_ops.create_validation_worktree(integration_repo, branch)
+    except Exception as exc:
+        return test_runner.TestResult(
+            passed=False, output=f"could not create the validation worktree: {exc}"
+        )
+    try:
+        return test_runner.run_tests(verify_root, config)
+    finally:
+        try:
+            git_ops.remove_worktree(integration_repo, verify_root)
+        except Exception as exc:
+            console.print(f"[bold yellow]could not remove {verify_root}[/bold yellow]: {exc}")
+
+
 def _run_stage_in_worktree(
     target_root: Path,
     engine_root: Path,
@@ -123,6 +155,7 @@ def _run_stage_in_worktree(
     request: str,
     context: SelectedContext,
     completed_snapshot: list[StageResult],
+    config: target_config.TargetConfig,
     complexity: str = router.DEFAULT_COMPLEXITY,
     recorder: telemetry.RunRecorder | None = None,
 ) -> tuple[StageResult, Path | None, str | None]:
@@ -182,9 +215,19 @@ def _run_stage_in_worktree(
             # all -- gitignored, so invisible to commit_all/the reviewer's diff
             # regardless of role (see #2). Applies even to backend/frontend/
             # tests, which have no declared artifact contract.
-            ignored = git_ops.ignored_writes(worktree_repo)
-            if ignored:
-                bad_files = bad_files + [f"{path} [gitignored]" for path in ignored]
+            # A stage worktree is a fresh checkout, so it starts with no
+            # ignored files at all -- everything found here was written by
+            # this stage. Expected artifacts (the target's declared caches)
+            # are reported, not punished; anything else still is.
+            expected, unexpected = git_ops.classify_ignored_writes(
+                worktree_repo, config.allowed_ephemeral_writes
+            )
+            if expected:
+                console.print(
+                    f"  [dim]{task.id}: {len(expected)} declared ephemeral path(s) ignored[/dim]"
+                )
+            if unexpected:
+                bad_files = bad_files + [f"{path} [gitignored]" for path in unexpected]
             if bad_files:
                 status = "violated"
 
@@ -356,6 +399,13 @@ def run(
         )
 
     base_sha = git_ops.current_commit(repo)
+    # The run's policy, frozen. Read from the base commit rather than from
+    # any working tree, and never re-read: roles without an artifact
+    # contract can write .ai-platform.yml, and re-reading it after they run
+    # let a stage set `test_sandbox: false` and have the engine honour it —
+    # a real, demonstrated bypass of issue #4's sandbox that still reported
+    # the run as `done`. See core.orchestrator.target_config.
+    config = target_config.load_at_commit(repo, base_sha)
     integration_root, branch = git_ops.create_integration_worktree(repo, request)
     # Everything from here on operates on the run's own checkout. `repo` (the
     # target's working tree) is still used for hook neutralization, which is
@@ -368,9 +418,8 @@ def run(
     # target_root baseline that had to subtract the .ai-platform/ index.
     # Kept rather than assumed empty: a target whose .gitignore matches
     # something git *does* track would otherwise look like a violation.
-    baseline_ignored = set(git_ops.ignored_writes(integration_repo))
 
-    with git_ops.disable_hooks(repo):
+    with git_ops.exclusive_run_lock(repo), git_ops.disable_hooks(repo):
         remaining = {t.id: t for t in workflow.tasks}
         completed: list[StageResult] = []
         completed_ids: set[str] = set()
@@ -412,6 +461,7 @@ def run(
                         request,
                         context,
                         snapshot,
+                        config,
                         complexity,
                         recorder,
                     )
@@ -493,7 +543,7 @@ def run(
 
         any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
-        test_result = test_runner.run_tests(integration_root)
+        test_result = _verify(integration_repo, branch, config)
         _print_test_result(test_result)
 
         diff = git_ops.diff_since(integration_repo, base_sha)
@@ -523,6 +573,9 @@ def run(
         if can_correct:
             for attempt in range(1, workflow.max_correction_attempts + 1):
                 correction_attempts = attempt
+                # Per actor, not once per run: earlier attempts and the
+                # merges before them may legitimately have left files here.
+                baseline_ignored = set(git_ops.ignored_writes(integration_repo))
                 console.print(
                     f"[bold yellow]Correction attempt {attempt}/{workflow.max_correction_attempts}[/bold yellow]"
                 )
@@ -552,7 +605,9 @@ def run(
                 # be trusted to reason about. Diffed against baseline_ignored,
                 # not raw -- target_root already has .ai-platform/ from
                 # index_repo() above, unlike a stage's fresh worktree checkout.
-                ignored = [p for p in git_ops.ignored_writes(integration_repo) if p not in baseline_ignored]
+                _, ignored = git_ops.classify_ignored_writes(
+                    integration_repo, config.allowed_ephemeral_writes, baseline_ignored
+                )
                 if ignored:
                     console.print(
                         f"[bold red]correction-{attempt} wrote outside version control[/bold red]: "
@@ -563,7 +618,7 @@ def run(
                 all_files_changed.extend(corrected_files)
                 console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
 
-                test_result = test_runner.run_tests(integration_root)
+                test_result = _verify(integration_repo, branch, config)
                 _print_test_result(test_result)
 
                 diff = git_ops.diff_since(integration_repo, base_sha)

@@ -9,42 +9,51 @@ from pathlib import Path
 import pytest
 
 from core.orchestrator import test_runner
+from core.orchestrator.target_config import TargetConfig
 from core.orchestrator.test_runner import TestResult, format_test_summary
 
 BWRAP_MISSING = shutil.which("bwrap") is None
 
 
-def _declare_test_command(
-    tmp_path: Path, command: str = "uv run pytest -q", *, sandbox: bool | None = False
-) -> None:
-    """Sandbox defaults to explicitly disabled here: most of these tests are
-    about command parsing/pass-fail/timeout reporting, which should behave
-    identically whether or not `bwrap` happens to be installed on whatever
-    machine runs this suite. Sandboxing itself gets its own tests below."""
-    lines = [f"test_command: {command!r}"]
-    if sandbox is not None:
-        lines.append(f"test_sandbox: {'true' if sandbox else 'false'}")
-    (tmp_path / test_runner.CONFIG_PATH).write_text("\n".join(lines) + "\n", encoding="utf-8")
+def _config(command="uv run pytest -q", *, sandbox: bool = False, **kwargs) -> TargetConfig:
+    """The frozen policy the supervisor would have read from the base commit.
+
+    Built directly rather than written to disk: `run_tests` no longer reads
+    `.ai-platform.yml` at all, which is the point of the fix — a stage that
+    rewrites that file mid-run must not change the policy the run is judged
+    under. Sandbox defaults off here so the parsing and pass/fail tests
+    behave the same whether or not `bwrap` is installed on the machine
+    running the suite; sandboxing has its own tests below.
+    """
+    if isinstance(command, str):
+        command = tuple(command.split())
+    return TargetConfig(test_command=command, test_sandbox=sandbox, **kwargs)
+
+
+def _fake_run(captured: dict, *, returncode: int = 0, stdout: str = "", stderr: str = ""):
+    def run(cmd, cwd, capture_output, text, timeout, env=None):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        captured["env"] = env
+        return subprocess.CompletedProcess(cmd, returncode=returncode, stdout=stdout, stderr=stderr)
+
+    return run
 
 
 def test_format_test_summary_passed_with_output() -> None:
-    result = TestResult(passed=True, output="3 passed in 0.01s")
-    assert format_test_summary(result) == "[PASS] 3 passed in 0.01s"
+    assert format_test_summary(TestResult(passed=True, output="3 passed in 0.01s")) == "[PASS] 3 passed in 0.01s"
 
 
 def test_format_test_summary_failed_with_output() -> None:
-    result = TestResult(passed=False, output="1 failed, 2 passed")
-    assert format_test_summary(result) == "[FAIL] 1 failed, 2 passed"
+    assert format_test_summary(TestResult(passed=False, output="1 failed, 2 passed")) == "[FAIL] 1 failed, 2 passed"
 
 
 def test_format_test_summary_without_output() -> None:
-    result = TestResult(passed=True, output="")
-    assert format_test_summary(result) == "[PASS]"
+    assert format_test_summary(TestResult(passed=True, output="")) == "[PASS]"
 
 
 def test_format_test_summary_strips_whitespace() -> None:
-    result = TestResult(passed=False, output="  error  \n")
-    assert format_test_summary(result) == "[FAIL] error"
+    assert format_test_summary(TestResult(passed=False, output="  error  \n")) == "[FAIL] error"
 
 
 def test_format_test_summary_skipped() -> None:
@@ -52,8 +61,8 @@ def test_format_test_summary_skipped() -> None:
     assert format_test_summary(result) == "[SKIPPED] No test_command declared"
 
 
-def test_run_tests_skips_cleanly_when_no_config_declared(tmp_path: Path) -> None:
-    result = test_runner.run_tests(tmp_path)
+def test_run_tests_skips_cleanly_when_no_test_command_declared(tmp_path: Path) -> None:
+    result = test_runner.run_tests(tmp_path, TargetConfig())
 
     assert result.skipped is True
     assert result.passed is True
@@ -61,31 +70,24 @@ def test_run_tests_skips_cleanly_when_no_config_declared(tmp_path: Path) -> None
 
 
 def test_run_tests_reports_pass(monkeypatch, tmp_path: Path) -> None:
-    _declare_test_command(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(test_runner.subprocess, "run", _fake_run(captured, stdout="3 passed\n"))
 
-    def fake_run(cmd, cwd, capture_output, text, timeout):
-        assert cmd == ["uv", "run", "pytest", "-q"]
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="3 passed\n", stderr="")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config())
 
     assert result.passed is True
     assert result.skipped is False
     assert result.sandboxed is False
     assert "3 passed" in result.output
+    assert captured["cmd"] == ["uv", "run", "pytest", "-q"]
 
 
 def test_run_tests_reports_failure_with_combined_output(monkeypatch, tmp_path: Path) -> None:
-    _declare_test_command(tmp_path)
+    monkeypatch.setattr(
+        test_runner.subprocess, "run", _fake_run({}, returncode=1, stdout="1 failed\n", stderr="traceback...")
+    )
 
-    def fake_run(cmd, cwd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="1 failed\n", stderr="traceback...")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config())
 
     assert result.passed is False
     assert "1 failed" in result.output
@@ -93,34 +95,22 @@ def test_run_tests_reports_failure_with_combined_output(monkeypatch, tmp_path: P
 
 
 def test_run_tests_handles_timeout(monkeypatch, tmp_path: Path) -> None:
-    _declare_test_command(tmp_path)
-
-    def fake_run(*args, **kwargs):
+    def raise_timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="pytest", timeout=120)
 
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(test_runner.subprocess, "run", raise_timeout)
 
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config())
 
     assert result.passed is False
     assert "Timeout" in result.output
 
 
-def test_run_tests_reads_a_list_form_command(monkeypatch, tmp_path: Path) -> None:
-    (tmp_path / test_runner.CONFIG_PATH).write_text(
-        "test_command: [npm, test]\ntest_timeout: 30\ntest_sandbox: false\n", encoding="utf-8"
-    )
+def test_run_tests_honours_a_list_command_and_custom_timeout(monkeypatch, tmp_path: Path) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(test_runner.subprocess, "run", _fake_run(captured))
 
-    captured = {}
-
-    def fake_run(cmd, cwd, capture_output, text, timeout):
-        captured["cmd"] = cmd
-        captured["timeout"] = timeout
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config(("npm", "test"), test_timeout=30))
 
     assert result.passed is True
     assert captured["cmd"] == ["npm", "test"]
@@ -128,19 +118,10 @@ def test_run_tests_reads_a_list_form_command(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_run_tests_applies_test_env_when_unsandboxed(monkeypatch, tmp_path: Path) -> None:
-    (tmp_path / test_runner.CONFIG_PATH).write_text(
-        "test_command: pytest\ntest_sandbox: false\ntest_env:\n  HF_HUB_OFFLINE: '1'\n",
-        encoding="utf-8",
-    )
-    captured = {}
+    captured: dict = {}
+    monkeypatch.setattr(test_runner.subprocess, "run", _fake_run(captured))
 
-    def fake_run(cmd, cwd, capture_output, text, timeout, env=None):
-        captured["env"] = env
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    test_runner.run_tests(tmp_path)
+    test_runner.run_tests(tmp_path, _config("pytest", test_env=(("HF_HUB_OFFLINE", "1"),)))
 
     assert captured["env"]["HF_HUB_OFFLINE"] == "1"
     assert "PATH" in captured["env"]  # merged with the parent environment, not replacing it
@@ -150,18 +131,11 @@ def test_run_tests_applies_test_env_when_unsandboxed(monkeypatch, tmp_path: Path
 
 
 def test_run_tests_sandboxes_by_default_when_bwrap_is_available(monkeypatch, tmp_path: Path) -> None:
-    _declare_test_command(tmp_path, sandbox=None)  # no explicit test_sandbox key -- true is the default
     monkeypatch.setattr(test_runner.shutil, "which", lambda name: "/usr/bin/bwrap")
+    captured: dict = {}
+    monkeypatch.setattr(test_runner.subprocess, "run", _fake_run(captured))
 
-    captured = {}
-
-    def fake_run(cmd, cwd, capture_output, text, timeout):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config(sandbox=True))
 
     assert result.sandboxed is True
     assert result.sandbox_warning == ""
@@ -173,18 +147,11 @@ def test_run_tests_falls_back_loudly_when_bwrap_is_missing(monkeypatch, tmp_path
     """Degrading loudly beats silently running unprotected -- same reasoning
     as the router's never-block guarantee: tests still run, but the report
     says plainly that they ran without isolation and why."""
-    _declare_test_command(tmp_path, sandbox=None)
     monkeypatch.setattr(test_runner.shutil, "which", lambda name: None)
+    captured: dict = {}
+    monkeypatch.setattr(test_runner.subprocess, "run", _fake_run(captured))
 
-    captured = {}
-
-    def fake_run(cmd, cwd, capture_output, text, timeout):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config(sandbox=True))
 
     assert result.sandboxed is False
     assert "bwrap" in result.sandbox_warning
@@ -192,18 +159,11 @@ def test_run_tests_falls_back_loudly_when_bwrap_is_missing(monkeypatch, tmp_path
 
 
 def test_run_tests_respects_an_explicit_sandbox_opt_out(monkeypatch, tmp_path: Path) -> None:
-    _declare_test_command(tmp_path, sandbox=False)
     monkeypatch.setattr(test_runner.shutil, "which", lambda name: "/usr/bin/bwrap")
+    captured: dict = {}
+    monkeypatch.setattr(test_runner.subprocess, "run", _fake_run(captured))
 
-    captured = {}
-
-    def fake_run(cmd, cwd, capture_output, text, timeout):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(test_runner.subprocess, "run", fake_run)
-
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, _config(sandbox=False))
 
     assert result.sandboxed is False
     assert result.sandbox_warning == ""  # opted out, not degraded -- no warning needed
@@ -238,15 +198,10 @@ def test_sandbox_blocks_writes_outside_the_repo_for_real(tmp_path: Path) -> None
     is exactly the false pass this test caught on the first attempt."""
     outside = Path.home() / f"ai-platform-sandbox-canary-{tmp_path.name}.txt"
     outside.unlink(missing_ok=True)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / test_runner.CONFIG_PATH).write_text(
-        f"test_command: [\"python3\", \"-c\", \"open('{outside}', 'w').write('pwned')\"]\n",
-        encoding="utf-8",
-    )
+    config = _config(("python3", "-c", f"open({str(outside)!r}, 'w').write('pwned')"), sandbox=True)
 
     try:
-        result = test_runner.run_tests(repo)
+        result = test_runner.run_tests(tmp_path, config)
 
         assert result.sandboxed is True
         assert result.passed is False  # the write raised inside the sandboxed process
@@ -257,22 +212,16 @@ def test_sandbox_blocks_writes_outside_the_repo_for_real(tmp_path: Path) -> None
 
 @pytest.mark.skipif(BWRAP_MISSING, reason="bwrap not installed on this machine")
 def test_sandbox_blocks_network_for_real(tmp_path: Path) -> None:
-    repo = tmp_path
-    (repo / test_runner.CONFIG_PATH).write_text(
-        "test_command:\n"
-        "  - python3\n"
-        "  - -c\n"
-        "  - |\n"
-        "    import socket, sys\n"
-        "    try:\n"
-        "        socket.create_connection(('8.8.8.8', 53), timeout=3)\n"
-        "        sys.exit(1)\n"
-        "    except OSError:\n"
-        "        sys.exit(0)\n",
-        encoding="utf-8",
+    script = (
+        "import socket, sys\n"
+        "try:\n"
+        "    socket.create_connection(('8.8.8.8', 53), timeout=3)\n"
+        "    sys.exit(1)\n"
+        "except OSError:\n"
+        "    sys.exit(0)\n"
     )
 
-    result = test_runner.run_tests(repo)
+    result = test_runner.run_tests(tmp_path, _config(("python3", "-c", script), sandbox=True))
 
     assert result.sandboxed is True
     assert result.passed is True  # exit 0 only on the branch where the connection failed
@@ -280,12 +229,9 @@ def test_sandbox_blocks_network_for_real(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(BWRAP_MISSING, reason="bwrap not installed on this machine")
 def test_sandbox_still_allows_writes_inside_the_repo(tmp_path: Path) -> None:
-    (tmp_path / test_runner.CONFIG_PATH).write_text(
-        "test_command: [\"python3\", \"-c\", \"open('inside.txt', 'w').write('ok')\"]\n",
-        encoding="utf-8",
-    )
+    config = _config(("python3", "-c", "open('inside.txt', 'w').write('ok')"), sandbox=True)
 
-    result = test_runner.run_tests(tmp_path)
+    result = test_runner.run_tests(tmp_path, config)
 
     assert result.passed is True
     assert (tmp_path / "inside.txt").read_text(encoding="utf-8") == "ok"

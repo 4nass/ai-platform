@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import re
 import shutil
 import tempfile
@@ -9,6 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import git
+
+from core.orchestrator import target_config
 
 
 def uncommitted_changes(repo: git.Repo) -> bool:
@@ -107,6 +110,87 @@ def ignored_writes(repo: git.Repo) -> list[str]:
     """
     output = repo.git.status("--porcelain", "--ignored=matching")
     return [line[3:] for line in output.splitlines() if line.startswith("!! ")]
+
+
+def classify_ignored_writes(
+    repo: git.Repo, allowed_patterns: tuple[str, ...], baseline: set[str] | None = None
+) -> tuple[list[str], list[str]]:
+    """Splits gitignored writes into (expected ephemeral, real violations).
+
+    A run that executes the target's test command will legitimately produce
+    tool caches — `.pytest_cache/`, `__pycache__/`, `.coverage`. Found by a
+    real run, where a `backend` stage was rejected for exactly that and its
+    work discarded. Treating every ignored write as hostile is wrong; so is
+    treating them all as fine, which is the hole issue #2 closed. The target
+    declares which ones it expects (`allowed_ephemeral_writes`) and anything
+    else is still a violation.
+
+    `baseline` is the set already present before this actor ran. Taken per
+    actor rather than once per run: a worktree stage starts from a clean
+    checkout and has none, but the corrector runs on a worktree that earlier
+    steps have already used.
+    """
+    baseline = baseline or set()
+    expected: list[str] = []
+    violations: list[str] = []
+    for path in ignored_writes(repo):
+        if path in baseline:
+            continue
+        (expected if target_config.matches_any(path, allowed_patterns) else violations).append(path)
+    return expected, violations
+
+
+def create_validation_worktree(repo: git.Repo, branch: str) -> Path:
+    """A throwaway checkout of `branch`, for running the target's tests.
+
+    The test command is the one actor guaranteed to litter: pytest writes
+    `.pytest_cache/`, coverage writes `.coverage`, Python writes
+    `__pycache__/`. Running it in a worktree that is deleted immediately
+    afterwards means none of that can be mistaken for something the
+    *corrector* wrote, and none of it reaches the branch being reviewed.
+
+    Detached rather than checked out as a branch: `branch` is already checked
+    out in the integration worktree, and git refuses to have one branch live
+    in two worktrees at once.
+    """
+    path = Path(tempfile.mkdtemp(prefix="engine-verify-"))
+    path.rmdir()  # `git worktree add` needs to create this path itself
+    repo.git.worktree("add", "--detach", str(path), branch)
+    return path
+
+
+@contextmanager
+def exclusive_run_lock(repo: git.Repo):
+    """Serializes mutating runs against one repository.
+
+    `disable_hooks` rewrites `core.hooksPath`, which is repository-wide
+    config shared by every worktree — so two concurrent runs would race to
+    restore it and one could leave the other's neutralized path behind, or
+    restore a value the other still needs. Integration worktrees are
+    per-run and safe; this shared config is not, which makes one mutating
+    run per repo the honest boundary until that's addressed properly.
+
+    Fails fast rather than waiting: a second run blocking silently for the
+    length of the first is worse than being told why it can't start.
+    """
+    lock_path = Path(repo.git_dir) / "ai-platform-run.lock"
+    handle = lock_path.open("w")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RuntimeError(
+                f"Another ai-platform run is already modifying {repo.working_tree_dir}. "
+                "Runs share this repository's git config (see git_ops.disable_hooks), so only "
+                "one mutating run at a time is safe. Wait for it to finish, or use --repo to "
+                "point at a different checkout."
+            ) from None
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 @contextmanager

@@ -10,12 +10,14 @@ import git
 import pytest
 
 from core.orchestrator.git_ops import (
+    classify_ignored_writes,
     commit_all,
     create_integration_worktree,
     create_worktree,
     current_commit,
     diff_since,
     disable_hooks,
+    exclusive_run_lock,
     format_changed_files,
     ignored_writes,
     merge_worktree,
@@ -371,3 +373,65 @@ def test_a_shell_hook_that_would_unpickle_attacker_bytes_never_runs_at_all(
         commit_all(repo, "commit with a real hook sitting at .git/hooks/post-commit")
 
     assert not marker.exists()
+
+
+# --- run serialization (shared git config) ---
+
+
+def test_exclusive_run_lock_refuses_a_second_concurrent_run(repo: git.Repo) -> None:
+    """disable_hooks rewrites core.hooksPath, which is repository-wide config
+    shared by every worktree -- so two concurrent runs would race to restore
+    it, and one could leave the other's neutralized path behind."""
+    with exclusive_run_lock(repo):
+        with pytest.raises(RuntimeError, match="already modifying"):
+            with exclusive_run_lock(repo):
+                pass
+
+
+def test_exclusive_run_lock_is_released_afterwards(repo: git.Repo) -> None:
+    with exclusive_run_lock(repo):
+        pass
+
+    with exclusive_run_lock(repo):  # a later run gets it cleanly
+        pass
+
+
+def test_exclusive_run_lock_is_released_even_if_the_body_raises(repo: git.Repo) -> None:
+    with pytest.raises(ValueError):
+        with exclusive_run_lock(repo):
+            raise ValueError("boom")
+
+    with exclusive_run_lock(repo):
+        pass
+
+
+def test_classify_ignored_writes_splits_declared_from_unexpected(repo: git.Repo) -> None:
+    Path(repo.working_tree_dir, ".gitignore").write_text(".pytest_cache/\n*.log\n", encoding="utf-8")
+    repo.index.add([".gitignore"])
+    repo.index.commit("ignore rules")
+
+    cache = Path(repo.working_tree_dir, ".pytest_cache")
+    cache.mkdir()
+    (cache / "CACHEDIR.TAG").write_text("x", encoding="utf-8")
+    Path(repo.working_tree_dir, "exfil.log").write_text("secret", encoding="utf-8")
+
+    expected, violations = classify_ignored_writes(repo, (".pytest_cache/**",))
+
+    assert any(".pytest_cache" in p for p in expected)
+    assert violations == ["exfil.log"]
+
+
+def test_classify_ignored_writes_subtracts_the_baseline(repo: git.Repo) -> None:
+    """Per actor, not once per run: what was already there before this actor
+    ran isn't something it wrote."""
+    Path(repo.working_tree_dir, ".gitignore").write_text("*.log\n", encoding="utf-8")
+    repo.index.add([".gitignore"])
+    repo.index.commit("ignore rules")
+    Path(repo.working_tree_dir, "pre-existing.log").write_text("x", encoding="utf-8")
+
+    baseline = set(ignored_writes(repo))
+    Path(repo.working_tree_dir, "new.log").write_text("y", encoding="utf-8")
+
+    _, violations = classify_ignored_writes(repo, (), baseline)
+
+    assert violations == ["new.log"]

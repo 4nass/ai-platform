@@ -29,15 +29,9 @@ from pathlib import Path
 
 import yaml
 
+from core.orchestrator.target_config import TargetConfig
+
 CONFIG_PATH = Path(".ai-platform.yml")
-DEFAULT_TIMEOUT_SECONDS = 120
-DEFAULT_SANDBOX_CACHE_DIRS = ["~/.cache"]
-"""Read-write binds beyond the repo itself. `~/.cache` alone covers uv/pip's
-default cache locations (this project's own toolchain) because both respect
-the XDG convention; a target using cargo/go/npm may need to declare its own
-cache dir (~/.cargo, ~/go/pkg/mod, ~/.npm, ...) via sandbox_cache_dirs in its
-own .ai-platform.yml -- there is no way to know a target's toolchain needs in
-advance, so this is declared, not guessed."""
 
 
 @dataclass
@@ -55,48 +49,6 @@ class TestResult:
     applied -- e.g. bwrap isn't installed. Tests still run; degrading loudly
     beats silently running unprotected, the same reasoning as the router's
     never-block guarantee."""
-
-
-@dataclass
-class _Config:
-    command: list[str] | None
-    timeout: int
-    sandbox: bool
-    cache_dirs: list[str]
-    env: dict[str, str]
-
-
-def _load_config(repo_root: Path) -> _Config:
-    path = repo_root / CONFIG_PATH
-    data: dict = {}
-    if path.is_file():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-    command = data.get("test_command")
-    if isinstance(command, str):
-        command = shlex.split(command)
-    elif isinstance(command, list) and all(isinstance(part, str) for part in command):
-        command = list(command)
-    else:
-        command = None
-
-    timeout = data.get("test_timeout", DEFAULT_TIMEOUT_SECONDS)
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
-        timeout = DEFAULT_TIMEOUT_SECONDS
-
-    sandbox = data.get("test_sandbox", True)
-    if not isinstance(sandbox, bool):
-        sandbox = True
-
-    cache_dirs = data.get("sandbox_cache_dirs", DEFAULT_SANDBOX_CACHE_DIRS)
-    if not isinstance(cache_dirs, list) or not all(isinstance(d, str) for d in cache_dirs):
-        cache_dirs = DEFAULT_SANDBOX_CACHE_DIRS
-
-    env = data.get("test_env", {})
-    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
-        env = {}
-
-    return _Config(command=command, timeout=int(timeout), sandbox=sandbox, cache_dirs=cache_dirs, env=env)
 
 
 def _sandbox_command(repo_root: Path, cache_dirs: list[str], env: dict[str, str]) -> list[str]:
@@ -141,9 +93,12 @@ def _sandbox_command(repo_root: Path, cache_dirs: list[str], env: dict[str, str]
     return cmd
 
 
-def run_tests(repo_root: Path) -> TestResult:
-    config = _load_config(repo_root)
-    if config.command is None:
+def run_tests(repo_root: Path, config: TargetConfig) -> TestResult:
+    """`config` is the run's frozen policy (core.orchestrator.target_config),
+    read from the base commit before any agent ran — never re-read from
+    `repo_root`, which by this point contains agent-written files and could
+    otherwise turn `test_sandbox: false` into a real sandbox bypass."""
+    if config.test_command is None:
         return TestResult(
             passed=True,
             skipped=True,
@@ -152,10 +107,10 @@ def run_tests(repo_root: Path) -> TestResult:
 
     sandbox_warning = ""
     sandboxed = False
-    command = config.command
-    if config.sandbox:
+    command = list(config.test_command)
+    if config.test_sandbox:
         if shutil.which("bwrap") is not None:
-            command = _sandbox_command(repo_root, config.cache_dirs, config.env) + config.command
+            command = _sandbox_command(repo_root, list(config.sandbox_cache_dirs), config.env) + list(config.test_command)
             sandboxed = True
         else:
             sandbox_warning = (
@@ -171,7 +126,7 @@ def run_tests(repo_root: Path) -> TestResult:
 
     try:
         proc = subprocess.run(
-            command, cwd=repo_root, capture_output=True, text=True, timeout=config.timeout, **run_kwargs
+            command, cwd=repo_root, capture_output=True, text=True, timeout=config.test_timeout, **run_kwargs
         )
     except subprocess.TimeoutExpired as exc:
         return TestResult(passed=False, output=f"Timeout after {exc.timeout}s", sandboxed=sandboxed)

@@ -84,6 +84,12 @@ uv run ai-platform run "Add a simple utility function" --repo ~/code/some-other-
 
 **Agent-written tests run before any review verdict exists** (issue #4) — that's inherent to "run the target's own test suite as the verification step," not something reordering fixes. What's fixable is that they used to run with the invoking user's full, unsandboxed privileges. By default, when [`bwrap`](https://github.com/containers/bubblewrap) is installed, they now run inside one: the host filesystem stays visible *read-only* (so the test command's own toolchain — `uv`, `npm`, `go`, whatever — keeps resolving normally; there's no per-target container image to know what a given repo needs), the target repo is bound read-write, and every namespace is unshared — no network, no writes anywhere else on the host. This is deliberately not the same guarantee a container would give; it closes the two highest-value risks (destructive writes elsewhere, network exfiltration) without adding a Docker/Podman dependency this project doesn't otherwise have. If `bwrap` isn't installed, tests still run — degrading loudly beats silently running unprotected — with a warning saying so.
 
+**A run cannot grant itself permissions.** `.ai-platform.yml` is security policy — it decides whether the test command is sandboxed and what it is. Roles without an artifact contract (`backend`, `frontend`, `tests`, `corrector`) may write any tracked file, that one included, so it is read **once, from the run's base commit**, and never re-read (`core/orchestrator/target_config.py`). Before that, a stage could commit `test_sandbox: false` plus an arbitrary `test_command` and the engine would honour it — the sandbox disabled by the very code it exists to contain, with the run still reporting `done`. Demonstrated end to end, and now a regression test. An edit to that file on the produced branch is a normal reviewable change that takes effect for the *next* run.
+
+**Verification runs in a throwaway worktree.** The test command is the one actor guaranteed to litter — `.pytest_cache/`, `.coverage`, `__pycache__/`. It gets its own checkout of the run branch, deleted immediately afterwards, so none of that reaches the branch under review or gets attributed to whichever actor runs next. Caches a project genuinely expects are declared in `allowed_ephemeral_writes` and reported rather than punished; any *other* gitignored write is still a blocking violation, so declaring caches doesn't reopen the hole above. Found by a real run where a `backend` stage was rejected — and its work discarded — because pytest had created `.pytest_cache/`.
+
+**One mutating run per repository.** `git_ops.disable_hooks` rewrites `core.hooksPath`, which is repository-wide config shared by every worktree, so two concurrent runs would race to restore it. A second run fails fast with an explanation rather than blocking silently (`git_ops.exclusive_run_lock`).
+
 **Everything in a prompt except the request itself is untrusted** (issue #5): an upstream stage's summary literally becomes the next stage's instructions, and a repo file, memory doc, diff, or test output can address the agent directly. `core/untrusted.py` handles this, and draws a line the code is careful not to blur:
 
 - **Mechanical.** The engine's control lines (`VERDICT:`, `TASKS:`, `COMPLEXITY:`) are parsed with line-anchored regexes, so embedded occurrences are indented by one space on the way in. That deterministically makes them unparseable as a real decision — no model cooperation involved — while leaving them fully readable, which matters for the reviewer, whose job is to read a diff that may legitimately contain them. Verified against the real parsers: an unmitigated `VERDICT: PASS` in a diff parses as a genuine pass; the same content wrapped does not.
@@ -96,6 +102,10 @@ uv run ai-platform run "Add a simple utility function" --repo ~/code/some-other-
 test_command: "uv run pytest -q"   # or a list: [npm, test] — or go test ./..., cargo test, etc.
 test_timeout: 120
 test_sandbox: true                 # default; set false to opt out entirely
+allowed_ephemeral_writes:          # gitignored paths a run may leave behind
+  - ".pytest_cache/**"             #   (tool caches). Empty by default: each
+  - "**/__pycache__/**"            #   entry is a path the reviewer's diff
+  - ".coverage"                    #   will never show, so it's declared.
 sandbox_cache_dirs: ["~/.cache"]   # extra read-write binds a toolchain's cache needs beyond ~/.cache
 test_env:                          # extra environment variables, sandboxed or not
   HF_HUB_OFFLINE: "1"

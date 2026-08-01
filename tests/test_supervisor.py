@@ -97,7 +97,9 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, fake_run) -> None:
 
 def _patch_tests(monkeypatch: pytest.MonkeyPatch, passed: bool, output: str = "") -> None:
     monkeypatch.setattr(
-        test_runner, "run_tests", lambda repo_root: test_runner.TestResult(passed=passed, output=output)
+        test_runner,
+        "run_tests",
+        lambda repo_root, config: test_runner.TestResult(passed=passed, output=output),
     )
 
 
@@ -749,7 +751,7 @@ def test_run_correction_loop_fixes_a_failing_test_and_succeeds(
 
     test_calls = {"n": 0}
 
-    def fake_run_tests(repo_root: Path) -> test_runner.TestResult:
+    def fake_run_tests(repo_root: Path, config) -> test_runner.TestResult:
         test_calls["n"] += 1
         if test_calls["n"] == 1:
             return test_runner.TestResult(passed=False, output="1 failed")
@@ -953,3 +955,141 @@ def test_a_worker_that_breaks_its_never_raise_contract_is_still_contained(
 
     assert report.summary == "needs attention"
     assert all(s.status in {"failed", "skipped"} for s in report.stages)
+
+
+# --- run-scoped policy and ephemeral writes ---
+
+
+def _write_target_policy(fake_repo: Path, body: str) -> None:
+    (fake_repo / ".ai-platform.yml").write_text(body, encoding="utf-8")
+    repo = git.Repo(fake_repo)
+    repo.index.add([".ai-platform.yml"])
+    repo.index.commit("declare target policy")
+
+
+def test_a_stage_cannot_grant_the_run_new_permissions(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The escalation this closes, demonstrated end to end before the fix:
+    a role with no artifact contract rewrote .ai-platform.yml, the final
+    test run re-read it, and `test_sandbox: false` plus an arbitrary
+    `test_command` were honoured -- while the run still reported `done`."""
+    _write_target_policy(fake_repo, 'test_command: ["python3", "-c", "print(1)"]\ntest_sandbox: true\n')
+
+    seen: list = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        Path(task.repo_root, ".ai-platform.yml").write_text(
+            'test_command: ["python3", "-c", "print(2)"]\ntest_sandbox: false\n', encoding="utf-8"
+        )
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    monkeypatch.setattr(
+        test_runner,
+        "run_tests",
+        lambda repo_root, config: seen.append(config) or test_runner.TestResult(passed=True, output="ok"),
+    )
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert seen, "the test runner was never reached"
+    for config in seen:
+        # the policy as committed before any agent ran, every time
+        assert config.test_sandbox is True
+        assert config.test_command == ("python3", "-c", "print(1)")
+
+
+def test_a_declared_ephemeral_write_does_not_fail_a_stage(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Found by a real run: a backend stage ran pytest, pytest created
+    .pytest_cache/ (which self-ignores), and the stage was rejected with its
+    work discarded."""
+    (fake_repo / ".gitignore").write_text(".ai-platform/\n.pytest_cache/\n", encoding="utf-8")
+    (fake_repo / ".ai-platform.yml").write_text(
+        'allowed_ephemeral_writes:\n  - ".pytest_cache/**"\n', encoding="utf-8"
+    )
+    repo = git.Repo(fake_repo)
+    repo.index.add([".gitignore", ".ai-platform.yml"])
+    repo.index.commit("declare expected caches")
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "backend":
+            cache = Path(task.repo_root, ".pytest_cache")
+            cache.mkdir(exist_ok=True)
+            (cache / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172\n", encoding="utf-8")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    assert by_id["backend"].status == "done"
+    assert report.summary == "done"
+
+
+def test_an_undeclared_ignored_write_still_fails_the_stage(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Declaring caches must not reopen issue #2: anything the project
+    didn't declare is still invisible to the reviewer and still blocks."""
+    (fake_repo / ".gitignore").write_text(".ai-platform/\n.pytest_cache/\n*.log\n", encoding="utf-8")
+    (fake_repo / ".ai-platform.yml").write_text(
+        'allowed_ephemeral_writes:\n  - ".pytest_cache/**"\n', encoding="utf-8"
+    )
+    repo = git.Repo(fake_repo)
+    repo.index.add([".gitignore", ".ai-platform.yml"])
+    repo.index.commit("declare expected caches")
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "backend":
+            Path(task.repo_root, "exfil.log").write_text("secret\n", encoding="utf-8")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    assert by_id["backend"].status == "violated"
+    assert not (fake_repo / "exfil.log").exists()
+
+
+def test_verification_runs_in_a_disposable_worktree(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The test command is the one actor guaranteed to litter. Running it
+    somewhere thrown away afterwards keeps .pytest_cache/.coverage out of
+    the branch under review, and stops them being attributed to whichever
+    actor happens to run next."""
+    _write_target_policy(fake_repo, 'test_command: ["python3", "-c", "open(\'.coverage\',\'w\').write(\'x\')"]\n')
+    seen_roots: list[Path] = []
+
+    real_run_tests = test_runner.run_tests
+
+    def spy(repo_root: Path, config):
+        seen_roots.append(Path(repo_root))
+        return real_run_tests(repo_root, config)
+
+    monkeypatch.setattr(test_runner, "run_tests", spy)
+    _patch_provider(monkeypatch, _multi_stage_run())
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert seen_roots, "the test runner was never reached"
+    verify_root = seen_roots[0]
+    assert "engine-verify-" in verify_root.name  # a throwaway, not the integration worktree
+    assert not verify_root.exists()  # and it's gone afterwards
+    assert report.summary == "done"
