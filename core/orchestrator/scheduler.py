@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from core import untrusted
 from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
 from core.orchestrator import router
@@ -201,7 +202,17 @@ def build_stage_description(request: str, upstream: list[StageResult]) -> str:
     """The request plus a recap of what earlier stages in the workflow
     already produced — the only way stages communicate (no direct agent-to-
     agent calls). A stage with no files changed (e.g. security, which never
-    edits — see prompts/security.md) still contributes its summary text."""
+    edits — see prompts/security.md) still contributes its summary text.
+
+    An upstream summary is model output, so it is *literally* one agent
+    writing the next agent's prompt (issue #5). Each is wrapped and its
+    control lines defanged (core.untrusted) — mechanical for the control
+    lines, advisory for the rest; see that module on why the distinction
+    matters and what this does not cover.
+
+    The file list stays outside the wrapper on purpose: those paths come
+    from `git_ops.commit_all`, i.e. from git, not from the model.
+    """
     completed = [stage for stage in upstream if stage.status == "done"]
     if not completed:
         return request
@@ -210,5 +221,10 @@ def build_stage_description(request: str, upstream: list[StageResult]) -> str:
     for stage in completed:
         summary = stage.result.summary if stage.result else ""
         files = ", ".join(stage.files_changed) if stage.files_changed else "no files changed"
-        lines.append(f"- {stage.task.id} ({stage.task.agent}): {summary}\n  files: {files}")
+        lines.append(f"- {stage.task.id} ({stage.task.agent}) changed: {files}")
+        if summary:
+            lines.append(
+                untrusted.wrap(summary, source=f"the {stage.task.agent} agent", kind="summary")
+            )
+    lines += ["", untrusted.DATA_NOT_INSTRUCTIONS]
     return "\n".join(lines)

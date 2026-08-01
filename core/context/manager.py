@@ -21,6 +21,7 @@ import git
 import networkx as nx
 import yaml
 
+from core import untrusted
 from core.context import selection
 from core.context.chunking import chunk_repo
 from core.context.embeddings import embed_query, embed_texts
@@ -202,15 +203,28 @@ class SelectedContext:
         return Rendered(text=render(fitted), files=len(fitted), dropped=len(entries) - len(fitted))
 
     def render(self, entries: list[ContextEntry] | None = None) -> str:
-        """Everything, inline — for a provider that can't read the repo."""
+        """Everything, inline — for a provider that can't read the repo.
+
+        This is the rendering that actually embeds repo content in a prompt,
+        so it's the one that carries injection risk from files (issue #5):
+        a README, a memory doc, or a code excerpt can address the model
+        directly. Each is wrapped and its control lines defanged
+        (core.untrusted) — see that module on what that does and doesn't buy.
+        """
         entries = self.entries() if entries is None else entries
         parts: list[str] = []
         if self.memory_docs:
             parts.append("## Project memory")
             for name, content in self.memory_docs.items():
-                parts.append(f"### {name}\n{content}")
+                parts.append(
+                    f"### {name}\n"
+                    + untrusted.wrap(content, source=f"memory/{name}", kind="document")
+                )
         if self.git_diff:
-            parts.append(f"## Current git diff\n```diff\n{self.git_diff}\n```")
+            parts.append(
+                "## Current git diff\n"
+                + untrusted.wrap(self.git_diff, source="the working tree", kind="diff")
+            )
 
         excerpted = [e for e in entries if e.excerpts]
         if excerpted:
@@ -219,14 +233,15 @@ class SelectedContext:
                 for chunk in entry.excerpts:
                     parts.append(
                         f"### {chunk['path']} ({chunk['kind']} {chunk['name']}, "
-                        f"lines {chunk['start_line']}-{chunk['end_line']})\n```\n{chunk['text']}\n```"
+                        f"lines {chunk['start_line']}-{chunk['end_line']})\n"
+                        + untrusted.wrap(chunk["text"], source=chunk["path"], kind="excerpt")
                     )
 
         related = [e.path for e in entries if not e.excerpts]
         if related:
             parts.append("## Related via project graph")
             parts.append("\n".join(f"- {path}" for path in related))
-        return "\n\n".join(parts)
+        return "\n\n".join(self._with_provenance_note(parts))
 
     def render_pointers(self, entries: list[ContextEntry] | None = None) -> str:
         """A ranked map — for a provider that reads files itself.
@@ -252,7 +267,7 @@ class SelectedContext:
         if self.git_diff:
             parts.append(
                 "## Current git diff (uncommitted — you cannot obtain this yourself)\n"
-                f"```diff\n{self.git_diff}\n```"
+                + untrusted.wrap(self.git_diff, source="the working tree", kind="diff")
             )
         if entries:
             lines = [
@@ -273,7 +288,24 @@ class SelectedContext:
                 lines.append(f"{entry.rank:>3}. {entry.path} — {why}")
             parts.append("\n".join(lines))
 
-        return "\n\n".join(parts)
+        return "\n\n".join(self._with_provenance_note(parts))
+
+    def _with_provenance_note(self, parts: list[str]) -> list[str]:
+        """Appends the data-not-instructions note, unless there's no context
+        at all — an empty selection should render as the empty string, not as
+        a warning about content that isn't there.
+
+        Keyed on `self.entries()` rather than on `parts` so the note is
+        present in `render([])` too, whenever entries exist to be added.
+        `render_for` measures fixed overhead as exactly `len(render([]))`, so
+        a note that only appeared once the first entry was added would be
+        charged to that entry's budget instead — silently costing ~380 chars
+        of the selected-file allowance (decisive at a small budget, which is
+        how this surfaced).
+        """
+        if not parts and not self.entries():
+            return parts
+        return parts + [untrusted.DATA_NOT_INSTRUCTIONS]
 
 
 def _best_score_per_file(chunks: list[dict]) -> list[tuple[str, float]]:
