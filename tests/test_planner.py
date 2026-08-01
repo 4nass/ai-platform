@@ -7,13 +7,14 @@ from pathlib import Path
 import pytest
 
 from core.errors import ConfigError
+from core.orchestrator import platform_config as pc
 from core.orchestrator.planner import Plan, Task, load_workflow, plan, prune
 
 
-def _write_workflow(tmp_path: Path, content: str) -> Path:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(exist_ok=True)
-    (config_dir / "workflow.yaml").write_text(content, encoding="utf-8")
+def _write_workflow(tmp_path: Path, content: str, mode: str = "standard") -> Path:
+    preset_dir = tmp_path / "config/presets/workflow"
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    (preset_dir / f"{mode}.yaml").write_text(content, encoding="utf-8")
     return tmp_path
 
 
@@ -130,6 +131,16 @@ tasks:
         load_workflow(repo_root)
 
 
+def test_load_workflow_resolves_a_named_mode(tmp_path: Path) -> None:
+    """The workflow preset is picked by name, same as a profile or a context
+    mode — this is what makes `workflow.mode` in platform.yaml mean anything."""
+    _write_workflow(tmp_path, "tasks:\n  - {id: a, agent: architect, depends_on: []}\n", mode="lean")
+
+    tasks = load_workflow(tmp_path, mode="lean")
+
+    assert [t.id for t in tasks] == ["a"]
+
+
 def test_plan_wraps_load_workflow(tmp_path: Path) -> None:
     repo_root = _write_workflow(
         tmp_path,
@@ -141,99 +152,54 @@ tasks:
 """,
     )
 
-    result = plan(repo_root)
+    result = plan(repo_root, pc.PlatformConfig())
 
     assert result == Plan(tasks=[Task(id="architecture", agent="architect", depends_on=[])])
 
 
-def test_plan_uses_default_max_parallel_when_absent(tmp_path: Path) -> None:
+def test_plan_self_loads_platform_config_when_none_is_given(tmp_path: Path) -> None:
+    """A standalone caller with no run-scoped PlatformConfig to thread through
+    still gets today's shipped defaults."""
     repo_root = _write_workflow(
-        tmp_path,
-        """
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-""",
+        tmp_path, "tasks:\n  - {id: architecture, agent: architect, depends_on: []}\n"
+    )
+    (repo_root / "config/presets/profiles").mkdir(parents=True)
+    (repo_root / "config/presets/profiles/balanced.yaml").write_text("{}\n", encoding="utf-8")
+    (repo_root / "config/presets/context").mkdir(parents=True)
+    (repo_root / "config/presets/context/smart.yaml").write_text(
+        "use_git_diff: true\n", encoding="utf-8"
     )
 
-    assert plan(repo_root).max_parallel == 2
+    result = plan(repo_root)
+
+    assert (result.max_parallel, result.decompose, result.max_correction_attempts) == (2, True, 1)
 
 
-def test_plan_reads_max_parallel_override(tmp_path: Path) -> None:
+# --- max_parallel/decompose/max_correction_attempts come from PlatformConfig,
+# not from the workflow file -- they're operational knobs, not DAG shape.
+# Validating them is platform_config.py's job now (tests/test_platform_config.py);
+# these confirm plan() actually threads what it's given.
+
+
+def test_plan_threads_the_given_platform_config(tmp_path: Path) -> None:
     repo_root = _write_workflow(
         tmp_path,
-        """
-max_parallel: 4
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-""",
+        "tasks:\n  - {id: architecture, agent: architect, depends_on: []}\n",
     )
+    config = pc.PlatformConfig(max_parallel=4, decompose=False, max_correction_attempts=3)
 
-    assert plan(repo_root).max_parallel == 4
+    result = plan(repo_root, config)
 
-
-def test_plan_rejects_non_positive_max_parallel(tmp_path: Path) -> None:
-    repo_root = _write_workflow(
-        tmp_path,
-        """
-max_parallel: 0
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-""",
-    )
-
-    with pytest.raises(ConfigError, match="max_parallel"):
-        plan(repo_root)
+    assert (result.max_parallel, result.decompose, result.max_correction_attempts) == (4, False, 3)
 
 
-def test_plan_uses_default_decompose_when_absent(tmp_path: Path) -> None:
-    repo_root = _write_workflow(
-        tmp_path,
-        """
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-""",
-    )
+def test_plan_resolves_the_workflow_mode_from_platform_config(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "tasks:\n  - {id: a, agent: architect, depends_on: []}\n", mode="lean")
+    config = pc.PlatformConfig(workflow_mode="lean")
 
-    assert plan(repo_root).decompose is True
+    result = plan(tmp_path, config)
 
-
-def test_plan_reads_decompose_override(tmp_path: Path) -> None:
-    repo_root = _write_workflow(
-        tmp_path,
-        """
-decompose: false
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-""",
-    )
-
-    assert plan(repo_root).decompose is False
-
-
-def test_plan_rejects_non_boolean_decompose(tmp_path: Path) -> None:
-    repo_root = _write_workflow(
-        tmp_path,
-        """
-decompose: yes-please
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-""",
-    )
-
-    with pytest.raises(ConfigError, match="decompose"):
-        plan(repo_root)
+    assert [t.id for t in result.tasks] == ["a"]
 
 
 def test_prune_keeps_only_selected_tasks() -> None:

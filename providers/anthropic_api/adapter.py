@@ -19,8 +19,22 @@ from core.errors import ConfigError
 from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt
 
 MODELS_CONFIG_PATH = Path("config/models.yaml")
-TOKEN_BUDGET_CONFIG_PATH = Path("config/token_budget.yaml")
 READS_FILES = False  # no disk access on the way in: it only sees its prompt
+
+TOKEN_BUDGETS = {
+    "architect": 12000,
+    "backend": 10000,
+    "frontend": 10000,
+    "reviewer": 14000,
+    "security": 14000,
+    "tests": 10000,
+    "documentation": 5000,
+}
+"""Output-length cap per role. Adapter-internal plumbing, not part of the
+platform's calibrated policy surface (config/platform.yaml, config/presets/):
+this provider is never selected by a default profile, so it stays a plain
+constant here rather than another file to keep in sync."""
+DEFAULT_TOKEN_BUDGET = 10000
 
 
 class FileChange(BaseModel):
@@ -102,10 +116,9 @@ def _model_id(models_config: dict) -> str:
 
 def run(task: AgentTask) -> ProviderResult:
     models_config = _load_yaml(task.engine_root, MODELS_CONFIG_PATH)
-    token_budget = _load_yaml(task.engine_root, TOKEN_BUDGET_CONFIG_PATH)
 
     model_id = _model_id(models_config)
-    max_tokens = token_budget.get(task.agent, 10000)
+    max_tokens = TOKEN_BUDGETS.get(task.agent, DEFAULT_TOKEN_BUDGET)
     system_prompt = load_role_prompt(task.engine_root, task.agent)
 
     context_note = f"\n\nContext:\n{task.context_render}" if task.context_render else ""

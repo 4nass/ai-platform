@@ -32,7 +32,7 @@ This design provides predictable roles and contracts. Arbitrary plan synthesis i
 | documentation | User and technical documentation | documentation paths |
 | corrector | Repair eligible validation/review failures | bounded by correction policy |
 
-The exact workflow and contracts live in `config/workflow.yaml` and role prompts under `prompts/`.
+The exact workflow and contracts live in `config/presets/workflow/<mode>.yaml` and role prompts under `prompts/`.
 
 ## Scheduling
 

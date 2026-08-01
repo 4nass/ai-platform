@@ -91,7 +91,7 @@ Check CLI version and authentication, then run a read-only route inspection. Dis
 
 ### The wrong model is selected
 
-Check the run complexity, profile order in `config/agents.yaml`, quota ratio, and recent exact-profile outcomes. If all candidates are gated, the first declared profile runs deliberately.
+Check the run complexity, profile order in the active `config/presets/profiles/<name>.yaml` (`ai-platform config` shows which one), quota ratio, and recent exact-profile outcomes. If all candidates are gated, the first declared profile runs deliberately.
 
 ### Target tests are skipped
 

@@ -52,7 +52,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P2 | Attachments and rich artifacts | [#38](https://github.com/4nass/ai-platform/issues/38) | Planned |
 | P2 | Incremental context indexing | [#39](https://github.com/4nass/ai-platform/issues/39) | Planned |
 | P2 | Reliable WSL service mode | [#40](https://github.com/4nass/ai-platform/issues/40) | Planned |
-| P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Planned |
+| P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Delivered; issue remains open |
 | P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Planned |
 
 ## Release rule

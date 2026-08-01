@@ -191,7 +191,7 @@ def test_context_command_reports_the_cost_of_each_injection_mode(
 def test_quota_command_shows_consumption_against_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "core.telemetry.quota.pressure",
-        lambda repo_root, window_hours=None: [
+        lambda repo_root, budgets=None, window_hours=None: [
             {
                 "provider": "codex_cli", "calls": 3, "input_tokens": 1000, "output_tokens": 50,
                 "total_tokens": 1050, "success_rate": 1.0, "avg_duration_ms": 6000,
@@ -212,7 +212,7 @@ def test_quota_command_handles_an_undeclared_budget(monkeypatch: pytest.MonkeyPa
     without a percentage rather than a misleading 0%."""
     monkeypatch.setattr(
         "core.telemetry.quota.pressure",
-        lambda repo_root, window_hours=None: [
+        lambda repo_root, budgets=None, window_hours=None: [
             {
                 "provider": "codex_cli", "calls": 1, "input_tokens": 10, "output_tokens": 1,
                 "total_tokens": 11, "success_rate": None, "avg_duration_ms": None,
@@ -228,12 +228,25 @@ def test_quota_command_handles_an_undeclared_budget(monkeypatch: pytest.MonkeyPa
 
 
 def test_quota_command_with_nothing_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("core.telemetry.quota.pressure", lambda repo_root, window_hours=None: [])
+    monkeypatch.setattr("core.telemetry.quota.pressure", lambda repo_root, budgets=None, window_hours=None: [])
 
     result = runner.invoke(ai_platform.app, ["quota"])
 
     assert result.exit_code == 0
     assert "No provider usage recorded" in result.stdout
+
+
+def test_config_command_shows_the_resolved_platform_policy(tmp_path) -> None:
+    """Against the real shipped config/platform.yaml + presets, since this
+    command's whole point is answering "which preset am I on" -- a fake would
+    just prove the table renders, not that it reflects reality."""
+    result = runner.invoke(ai_platform.app, ["config"])
+
+    assert result.exit_code == 0
+    assert "balanced" in result.stdout  # the default profile
+    assert "standard" in result.stdout  # the default workflow mode
+    assert "smart" in result.stdout  # the default context mode
+    assert "codex_cli" in result.stdout  # a declared quota
 
 
 # --- durable job lifecycle (issue #24) ---

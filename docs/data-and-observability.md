@@ -32,7 +32,7 @@ Telemetry is shared across target repositories because provider subscription pre
 
 ## Quota pressure
 
-`config/quota.yaml` declares token allowances and windows. The current shipped values are 8,000,000 tokens over 5 hours for each CLI provider. The router compares recorded consumption with these declarations.
+`config/platform.yaml`'s `providers.quotas` declares token allowances and windows. The current shipped values are 8,000,000 tokens over 5 hours for each CLI provider. The router compares recorded consumption with these declarations.
 
 This number is an estimate because subscription CLIs do not expose authoritative remaining balance. It is useful for failover but cannot be called a budget guarantee. A provider omitted from the file can still be measured without a percentage.
 

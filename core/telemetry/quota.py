@@ -7,8 +7,9 @@ is not something either CLI will tell us: `codex exec --json` emits only
 thread/turn/item events, and `claude -p --output-format json` reports a price
 with no remaining balance.
 
-So the budget is declared (config/quota.yaml) and the consumption is derived
-from telemetry. That split is the honest one — the limits are facts only the
+Declared where used to live in config/quota.yaml, now in config/platform.yaml
+(core.orchestrator.platform_config) — the consumption is still derived from
+telemetry here. That split is the honest one — the limits are facts only the
 subscriber knows, and inventing them would be worse than asking.
 """
 
@@ -17,11 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from core.telemetry import store
 
-CONFIG_PATH = Path("config/quota.yaml")
 DEFAULT_WINDOW_HOURS = 5.0
 
 
@@ -31,39 +29,19 @@ class Budget:
     tokens: int
 
 
-def load_budgets(engine_root: Path) -> dict[str, Budget]:
-    """Declared budgets per provider. Missing file or missing provider is not
-    an error: pressure is then reported as consumption without a percentage,
-    which is still useful and beats refusing to run over a config gap."""
-    path = engine_root / CONFIG_PATH
-    if not path.is_file():
-        return {}
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    providers = data.get("providers") or {}
-
-    budgets: dict[str, Budget] = {}
-    for name, raw in providers.items():
-        if not isinstance(raw, dict):
-            continue
-        tokens = raw.get("tokens")
-        if not isinstance(tokens, int) or tokens <= 0:
-            continue
-        window = raw.get("window_hours", DEFAULT_WINDOW_HOURS)
-        budgets[name] = Budget(window_hours=float(window), tokens=tokens)
-    return budgets
-
-
-def pressure(engine_root: Path, *, window_hours: float | None = None) -> list[dict]:
+def pressure(
+    engine_root: Path, budgets: dict[str, Budget], *, window_hours: float | None = None
+) -> list[dict]:
     """Per-provider consumption in the window, with its share of budget.
 
-    Both the budgets and the telemetry read here are engine-scoped (shared
-    across every target repo the engine operates on) because quota is a
-    subscription resource, not a per-project one.
+    `budgets` comes from the caller's already-loaded `PlatformConfig.quotas`
+    rather than being self-loaded here — quota is engine-scoped state read
+    once per run, not something worth parsing `platform.yaml` for on every
+    call site that wants pressure.
 
     `used_ratio` is None where no budget is declared — distinct from 0.0,
     which would claim the provider is idle.
     """
-    budgets = load_budgets(engine_root)
     window = window_hours or max(
         (b.window_hours for b in budgets.values()), default=DEFAULT_WINDOW_HOURS
     )

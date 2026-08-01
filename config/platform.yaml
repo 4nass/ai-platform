@@ -1,0 +1,57 @@
+# The only engine-level file meant for hand-editing. Everything else the
+# engine needs to run a role (which model, what DAG, what retrieval floors)
+# lives in config/presets/ -- calibrated policy versioned with the engine,
+# not something you tune to get normal work done. See docs/configuration.md
+# and docs/decisions/ADR-008-platform-config-and-presets.md.
+
+# Which config/presets/profiles/<name>.yaml to use for every role's
+# provider/model/effort choice. balanced is the default, calibrated policy;
+# max always uses each role's most capable declared profile.
+profile: balanced
+
+providers:
+  # Declared subscription budgets, not discovered -- neither CLI reports how
+  # much allowance is left, so pressure is derived from what's actually
+  # recorded against these limits. Getting a number wrong makes the pressure
+  # figure wrong and nothing else; no run is blocked by this file. Leave a
+  # provider out to report its consumption without a percentage.
+  quotas:
+    codex_cli: {tokens: 8000000, window_hours: 5}
+    claude_code: {tokens: 8000000, window_hours: 5}
+
+routing:
+  # Skip a provider whose consumption in the window has passed this share of
+  # its declared quota above.
+  max_quota_ratio: 0.85
+  # Skip a provider whose success rate for *this role* has fallen below this,
+  # but only once there are min_samples calls to say so -- 0.5-over-2 and
+  # 0.5-over-200 are not the same claim.
+  min_success_rate: 0.6
+  min_samples: 5
+  # Rolling window for both the quota and success-rate figures above.
+  window_hours: 24
+
+workflow:
+  # Which config/presets/workflow/<name>.yaml DAG shape to run.
+  mode: standard
+  max_parallel: 2
+  decompose: true
+  max_correction_attempts: 1
+
+context:
+  # Which config/presets/context/<name>.yaml retrieval policy to use:
+  #   smart   - every source on, ranked pointers (the default)
+  #   full    - every source on, full excerpt text inlined
+  #   minimal - vector search only, tight budget
+  mode: smart
+
+# Escape hatch: overrides merged onto the resolved context preset, for a
+# project that needs different relevance floors without editing the shipped
+# preset files. Uncomment and adjust only if you have a specific reason to.
+# advanced:
+#   context:
+#     min_similarity: 0.20
+#     min_similarity_ratio: 0.5
+#     min_lift: 1.2
+#     max_files: 20
+#     max_context_chars: 20000

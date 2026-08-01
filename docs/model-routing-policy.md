@@ -2,7 +2,7 @@
 
 ## Decision
 
-Keep explicit model and effort profiles in `config/agents.yaml`. Do not delegate model selection to an agent.
+Keep explicit model and effort profiles in `config/presets/profiles/<name>.yaml`. Do not delegate model selection to an agent.
 
 The agent understands the task content, but the engine owns cost, availability, permissions, auditability, and provider compatibility. The useful compromise is bounded autonomy: the decomposer chooses only a complexity class, and deterministic configuration maps that class to ordered Claude/Codex profiles.
 
@@ -42,7 +42,7 @@ Each cell lists the preferred profile, followed by its fallback.
 | documentation | Codex Terra / low; Claude Sonnet / low | Codex Terra / low; Claude Sonnet / medium | Codex Sol / medium; Claude Sonnet / high |
 | corrector | Codex Terra / medium; Claude Sonnet / medium | Codex Terra / high; Claude Sonnet / high | Codex Sol / high; Claude Opus / xhigh |
 
-Full model identifiers are kept in `config/agents.yaml`.
+Full model identifiers are kept in `config/presets/profiles/<name>.yaml`.
 
 ## Rationale
 

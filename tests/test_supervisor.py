@@ -34,19 +34,10 @@ corrector:
   provider: claude_code
 """
 
-# decompose: false here -- these fixtures exercise DAG execution mechanics,
-# not decomposition, and none of the fake providers below know how to answer
-# a decomposer call. Decomposition itself is tested separately below with
-# its own workflow.yaml (decompose defaults to true when the key is absent).
-#
-# max_correction_attempts: 0 -- these fixtures exercise the DAG/test/review
-# gate itself; the correction loop that can follow a test/review failure is
-# tested separately below (test_run_correction_loop_*), which overrides this
-# to a positive value on its own copy of the workflow.
-WORKFLOW_YAML = """max_parallel: 2
-decompose: false
-max_correction_attempts: 0
-tasks:
+# The DAG shape only -- the preset file no longer carries max_parallel/
+# decompose/max_correction_attempts, those are config/platform.yaml's job now
+# (see PLATFORM_YAML below).
+WORKFLOW_YAML = """tasks:
   - id: architecture
     agent: architect
     depends_on: []
@@ -67,6 +58,25 @@ tasks:
     depends_on: [security]
 """
 
+# decompose: false here -- these fixtures exercise DAG execution mechanics,
+# not decomposition, and none of the fake providers below know how to answer
+# a decomposer call. Decomposition itself is tested separately below via
+# _enable_decompose, which overrides this on its own copy of platform.yaml.
+#
+# max_correction_attempts: 0 -- these fixtures exercise the DAG/test/review
+# gate itself; the correction loop that can follow a test/review failure is
+# tested separately below (test_run_correction_loop_*), which overrides this
+# to a positive value via _enable_correction.
+PLATFORM_YAML = """profile: balanced
+workflow:
+  mode: standard
+  max_parallel: 2
+  decompose: false
+  max_correction_attempts: 0
+context:
+  mode: smart
+"""
+
 CONTEXT_YAML = "use_git_diff: true\nuse_graph: false\nuse_vector_db: true\nuse_memory: true\nmax_files: 5\n"
 
 
@@ -78,16 +88,27 @@ def fake_repo(tmp_path: Path) -> Path:
         cw.set_value("user", "email", "test@example.com")
 
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "context.yaml").write_text(CONTEXT_YAML, encoding="utf-8")
-    (tmp_path / "config" / "agents.yaml").write_text(AGENTS_YAML, encoding="utf-8")
-    (tmp_path / "config" / "workflow.yaml").write_text(WORKFLOW_YAML, encoding="utf-8")
+    (tmp_path / "config" / "platform.yaml").write_text(PLATFORM_YAML, encoding="utf-8")
+    (tmp_path / "config/presets/profiles").mkdir(parents=True)
+    (tmp_path / "config/presets/profiles/balanced.yaml").write_text(AGENTS_YAML, encoding="utf-8")
+    (tmp_path / "config/presets/workflow").mkdir(parents=True)
+    (tmp_path / "config/presets/workflow/standard.yaml").write_text(WORKFLOW_YAML, encoding="utf-8")
+    (tmp_path / "config/presets/context").mkdir(parents=True)
+    (tmp_path / "config/presets/context/smart.yaml").write_text(CONTEXT_YAML, encoding="utf-8")
     (tmp_path / "src.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
     # mirrors the real repo's .gitignore: the embedded vector store/graph
     # cache under .ai-platform/ is generated, not something a stage's commit
     # should ever sweep up (see core.context.manager.VECTOR_STORAGE_PATH)
     (tmp_path / ".gitignore").write_text(".ai-platform/\n", encoding="utf-8")
 
-    repo.index.add([".gitignore", "config/context.yaml", "config/agents.yaml", "config/workflow.yaml", "src.py"])
+    repo.index.add([
+        ".gitignore",
+        "config/platform.yaml",
+        "config/presets/profiles/balanced.yaml",
+        "config/presets/workflow/standard.yaml",
+        "config/presets/context/smart.yaml",
+        "src.py",
+    ])
     repo.index.commit("initial commit")
     return tmp_path
 
@@ -264,7 +285,7 @@ def _prepare_dirty_target(repo_root: Path) -> str:
       it reaches the prompt depends only on which tree was read -- not on
       what an embedding model happened to score.
     """
-    (repo_root / "config" / "context.yaml").write_text(
+    (repo_root / "config/presets/context/smart.yaml").write_text(
         CONTEXT_YAML + "injection_mode: full\n", encoding="utf-8"
     )
     (repo_root / "memory").mkdir(exist_ok=True)
@@ -275,7 +296,7 @@ def _prepare_dirty_target(repo_root: Path) -> str:
         f"def foo():\n    return '{COMMITTED_MARKER}'\n", encoding="utf-8"
     )
     repo = git.Repo(repo_root)
-    repo.index.add(["config/context.yaml", "memory/business_rules.md", "src.py"])
+    repo.index.add(["config/presets/context/smart.yaml", "memory/business_rules.md", "src.py"])
     base_sha = repo.index.commit("committed state").hexsha
 
     (repo_root / "memory" / "business_rules.md").write_text(
@@ -785,10 +806,10 @@ def test_run_stops_early_when_the_first_stage_fails_with_no_disk_writes(
 
 
 def _enable_decompose(repo_root: Path) -> None:
-    workflow_yaml = WORKFLOW_YAML.replace("decompose: false", "decompose: true")
-    (repo_root / "config" / "workflow.yaml").write_text(workflow_yaml, encoding="utf-8")
+    platform_yaml = PLATFORM_YAML.replace("decompose: false", "decompose: true")
+    (repo_root / "config" / "platform.yaml").write_text(platform_yaml, encoding="utf-8")
     repo = git.Repo(repo_root)
-    repo.index.add(["config/workflow.yaml"])
+    repo.index.add(["config/platform.yaml"])
     repo.index.commit("enable decomposition")
 
 
@@ -1061,10 +1082,12 @@ def test_run_falls_back_to_the_full_plan_when_decomposition_is_unparseable(
 
 
 def _enable_correction(repo_root: Path, max_attempts: int = 1) -> None:
-    workflow_yaml = WORKFLOW_YAML.replace("max_correction_attempts: 0", f"max_correction_attempts: {max_attempts}")
-    (repo_root / "config" / "workflow.yaml").write_text(workflow_yaml, encoding="utf-8")
+    platform_yaml = PLATFORM_YAML.replace(
+        "max_correction_attempts: 0", f"max_correction_attempts: {max_attempts}"
+    )
+    (repo_root / "config" / "platform.yaml").write_text(platform_yaml, encoding="utf-8")
     repo = git.Repo(repo_root)
-    repo.index.add(["config/workflow.yaml"])
+    repo.index.add(["config/platform.yaml"])
     repo.index.commit("enable correction")
 
 
@@ -1208,9 +1231,9 @@ def test_an_unknown_agent_fails_one_stage_instead_of_crashing_the_run(
     ConfigError out of the worker, through future.result(), killing the whole
     run and stranding that stage's worktree."""
     workflow = WORKFLOW_YAML.replace("agent: backend", "agent: not_a_configured_role")
-    (fake_repo / "config" / "workflow.yaml").write_text(workflow, encoding="utf-8")
+    (fake_repo / "config/presets/workflow/standard.yaml").write_text(workflow, encoding="utf-8")
     repo = git.Repo(fake_repo)
-    repo.index.add(["config/workflow.yaml"])
+    repo.index.add(["config/presets/workflow/standard.yaml"])
     repo.index.commit("point a task at an undefined role")
 
     _patch_provider(monkeypatch, _multi_stage_run())

@@ -25,7 +25,7 @@ Preflight and actionable Claude authentication errors are tracked by [#8](https:
 
 ## Explicit semantic policy
 
-`config/agents.yaml` orders profiles for every role. A profile is:
+`config/presets/profiles/<name>.yaml` (selected by `profile:` in `config/platform.yaml`) orders profiles for every role. A profile is:
 
 ```yaml
 provider: codex_cli

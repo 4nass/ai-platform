@@ -1,6 +1,6 @@
-max_parallel: 2
-decompose: true
-max_correction_attempts: 1
+# The DAG shape only. max_parallel/decompose/max_correction_attempts are
+# operational knobs, not architecture -- they live in config/platform.yaml,
+# not here.
 
 tasks:
   - id: architecture

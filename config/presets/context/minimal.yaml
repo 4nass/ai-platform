@@ -1,0 +1,21 @@
+# Vector search only -- no graph expansion, no project memory, no git diff.
+# For a quick or narrowly-scoped request where the wider retrieval sources
+# would mostly add noise and tokens rather than relevant files.
+#
+# Same relevance floors as smart/full.yaml (not recalibrated); the budget is
+# tighter as a starting point, not a measured constant -- revisit against
+# real usage the same way smart.yaml's own floors were.
+
+use_git_diff: false
+use_graph: false
+use_vector_db: true
+use_memory: false
+
+injection_mode: pointers
+
+min_similarity: 0.20
+min_similarity_ratio: 0.5
+min_lift: 1.2
+
+max_files: 8
+max_context_chars: 6000

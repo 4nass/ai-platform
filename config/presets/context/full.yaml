@@ -1,0 +1,18 @@
+# Same sources and calibrated floors as smart.yaml -- the only difference is
+# how much of the selection is inlined into the prompt. Meant for a provider
+# without disk access, or a request where reading full excerpt text up front
+# is worth the extra tokens.
+
+use_git_diff: true
+use_graph: true
+use_vector_db: true
+use_memory: true
+
+injection_mode: full
+
+min_similarity: 0.20
+min_similarity_ratio: 0.5
+min_lift: 1.2
+
+max_files: 20
+max_context_chars: 20000

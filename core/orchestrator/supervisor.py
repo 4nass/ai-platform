@@ -34,6 +34,7 @@ from core.orchestrator import (
     target_config,
     test_runner,
 )
+from core.orchestrator import platform_config as platform_config_module
 from core.orchestrator.scheduler import StageResult
 from core.telemetry import store as telemetry
 from providers.base import ProviderResult, display_name
@@ -180,6 +181,7 @@ def _run_stage_in_worktree(
     context: SelectedContext,
     completed_snapshot: list[StageResult],
     config: target_config.TargetConfig,
+    platform_config: platform_config_module.PlatformConfig,
     complexity: str = router.DEFAULT_COMPLEXITY,
     recorder: telemetry.RunRecorder | None = None,
 ) -> tuple[StageResult, Path | None, str | None]:
@@ -214,7 +216,9 @@ def _run_stage_in_worktree(
         return StageResult(task=task, status="failed", result=failure), None, None
 
     try:
-        provider_name = scheduler.resolve_provider(engine_root, task.agent, complexity)
+        provider_name = scheduler.resolve_provider(
+            engine_root, task.agent, complexity, platform_config=platform_config
+        )
         console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
 
         description = scheduler.build_stage_description(request, completed_snapshot)
@@ -227,6 +231,7 @@ def _run_stage_in_worktree(
             stage_id=task.id,
             engine_root=engine_root,
             complexity=complexity,
+            platform_config=platform_config,
         )
 
         worktree_repo = git.Repo(worktree_path)
@@ -416,7 +421,14 @@ def run(
 
     console.rule("Engine")
 
-    workflow = planner.plan(engine_root)
+    # Loaded once, here, and threaded through the rest of the run rather than
+    # re-read per module (router.py/planner.py/manager.py each used to do
+    # their own independent read) -- one config snapshot per run, so an
+    # unknown-preset typo surfaces once, early, instead of five calls deep
+    # into whichever module happened to read it first, and a run stays
+    # internally consistent even if config/platform.yaml changes mid-run.
+    platform_config = platform_config_module.load(engine_root)
+    workflow = planner.plan(engine_root, platform_config)
     console.print(f"[bold]Plan generated[/bold]: {len(workflow.tasks)} tasks (up to {workflow.max_parallel} in parallel)")
 
     # Nothing above this line touches the target. Everything below it does —
@@ -459,7 +471,10 @@ def run(
         # `commit_all` sweeping `.ai-platform/` onto the branch in a target
         # that doesn't gitignore it.
         context_manager = ContextManager(
-            integration_root, engine_root=engine_root, storage_root=target_root
+            integration_root,
+            engine_root=engine_root,
+            storage_root=target_root,
+            platform_config=platform_config,
         )
         context_manager.index_repo()
         context = context_manager.select_context(request)
@@ -486,7 +501,6 @@ def run(
         # be reconstructed from a past row: they're what makes runs comparable
         # across engine versions and across config changes.
         recorder = None
-        routing = router.load_thresholds(engine_root)
         if not dry_run:
             recorder = telemetry.RunRecorder(
                 engine_root,
@@ -495,6 +509,7 @@ def run(
                 session_id=session_id,
                 engine_commit=git_ops.current_commit(repo),
                 metadata={
+                    "profile": platform_config.profile,
                     "use_graph": context_manager.config.use_graph,
                     "use_vector_db": context_manager.config.use_vector_db,
                     "use_git_diff": context_manager.config.use_git_diff,
@@ -510,10 +525,10 @@ def run(
                     # The thresholds routing was judged against. Same reason as the
                     # context floors: comparing two runs' provider choices means
                     # nothing without knowing the bar each was held to.
-                    "max_quota_ratio": routing.max_quota_ratio,
-                    "min_success_rate": routing.min_success_rate,
-                    "min_samples": routing.min_samples,
-                    "routing_window_hours": routing.window_hours,
+                    "max_quota_ratio": platform_config.routing.max_quota_ratio,
+                    "min_success_rate": platform_config.routing.min_success_rate,
+                    "min_samples": platform_config.routing.min_samples,
+                    "routing_window_hours": platform_config.routing.window_hours,
                     "decompose": workflow.decompose,
                     "max_parallel": workflow.max_parallel,
                     "max_correction_attempts": workflow.max_correction_attempts,
@@ -540,6 +555,7 @@ def run(
                 recorder=recorder,
                 engine_root=engine_root,
                 complexity="routine",
+                platform_config=platform_config,
             )
             chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
             classified = (
@@ -627,6 +643,7 @@ def run(
                         context,
                         snapshot,
                         config,
+                        platform_config,
                         complexity,
                         recorder,
                     )
@@ -717,7 +734,13 @@ def run(
         report_progress(stage="review")
         diff = git_ops.diff_since(integration_repo, base_sha)
         review_result = scheduler.run_task(
-            integration_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
+            integration_root,
+            "reviewer",
+            review.build_description(request, diff),
+            recorder=recorder,
+            engine_root=engine_root,
+            complexity=complexity,
+            platform_config=platform_config,
         )
         review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
         review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
@@ -763,6 +786,7 @@ def run(
                     stage_id=f"correction-{attempt}",
                     engine_root=engine_root,
                     complexity=complexity,
+                    platform_config=platform_config,
                 )
                 corrected_files = git_ops.commit_all(
                     integration_repo, f"correction {attempt}: {correction_result.summary or request}"
@@ -799,6 +823,7 @@ def run(
                     recorder=recorder,
                     engine_root=engine_root,
                     complexity=complexity,
+                    platform_config=platform_config,
                 )
                 review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
                 review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]

@@ -15,11 +15,11 @@ This directory is the source of truth for the platform's technical design, opera
 | Area | Document | Code/config source of truth |
 |---|---|---|
 | Runtime and dependencies | [Technology stack](technology-stack.md) | `pyproject.toml`, `uv.lock` |
-| Context selection and project graph | [Context engineering](context-engineering.md) | `core/context/`, `core/graph/`, `config/context.yaml` |
-| Planning, agents, DAG, correction | [Workflow and agents](workflow-and-agents.md) | `core/orchestrator/`, `config/workflow.yaml`, `prompts/` |
+| Context selection and project graph | [Context engineering](context-engineering.md) | `core/context/`, `core/graph/`, `config/presets/context/` |
+| Planning, agents, DAG, correction | [Workflow and agents](workflow-and-agents.md) | `core/orchestrator/`, `config/presets/workflow/`, `prompts/` |
 | Branches, worktrees, dirty trees | [Git and worktree isolation](git-and-worktrees.md) | `core/orchestrator/git_ops.py`, `supervisor.py` |
-| Providers, models, effort | [Providers and routing](providers-and-routing.md) | `providers/`, `config/agents.yaml`, `config/routing.yaml` |
-| Detailed routing policy | [Model and effort routing policy](model-routing-policy.md) | `config/agents.yaml` |
+| Providers, models, effort | [Providers and routing](providers-and-routing.md) | `providers/`, `config/presets/profiles/`, `config/platform.yaml` |
+| Detailed routing policy | [Model and effort routing policy](model-routing-policy.md) | `config/presets/profiles/` |
 | Tests and target policy | [Validation and sandboxing](validation.md) | `.ai-platform.yml`, `target_config.py`, `test_runner.py` |
 | Telemetry, jobs, tokens, quotas | [Data, telemetry, and budgets](data-and-observability.md) | `core/telemetry/`, `core/jobs/`, SQLite files |
 | Configuration | [Configuration reference](configuration.md) | `config/*.yaml`, `.ai-platform.yml` |

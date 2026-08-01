@@ -22,10 +22,23 @@ no_provider: {}
 """
 
 
+def _write_profile(repo_root: Path, body: str, name: str = "balanced") -> None:
+    """`router.route`'s self-load path goes through `PlatformConfig.load()`,
+    which validates all three preset axes at once, so a test that only cares
+    about profiles still needs a minimal workflow and context preset on disk."""
+    (repo_root / "config/presets/profiles").mkdir(parents=True, exist_ok=True)
+    (repo_root / "config/presets/profiles" / f"{name}.yaml").write_text(body, encoding="utf-8")
+    (repo_root / "config/presets/workflow").mkdir(parents=True, exist_ok=True)
+    (repo_root / "config/presets/workflow/standard.yaml").write_text("tasks: []\n", encoding="utf-8")
+    (repo_root / "config/presets/context").mkdir(parents=True, exist_ok=True)
+    (repo_root / "config/presets/context/smart.yaml").write_text(
+        "use_git_diff: true\n", encoding="utf-8"
+    )
+
+
 @pytest.fixture
 def repo_root(tmp_path: Path) -> Path:
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "agents.yaml").write_text(AGENTS_YAML, encoding="utf-8")
+    _write_profile(tmp_path, AGENTS_YAML)
     return tmp_path
 
 
@@ -44,10 +57,7 @@ def test_resolve_provider_missing_provider_key_raises(repo_root: Path) -> None:
 
 
 def test_resolve_provider_unknown_provider_name_raises(tmp_path: Path) -> None:
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "agents.yaml").write_text(
-        "backend:\n  provider: not_a_real_provider\n", encoding="utf-8"
-    )
+    _write_profile(tmp_path, "backend:\n  provider: not_a_real_provider\n")
 
     with pytest.raises(ConfigError, match="Unknown provider"):
         scheduler.resolve_provider(tmp_path, "backend")
@@ -92,10 +102,8 @@ def test_run_task_dispatches_to_the_resolved_provider(monkeypatch: pytest.Monkey
 def test_run_task_propagates_the_selected_execution_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "agents.yaml").write_text(
-        "backend:\n  profiles: [{provider: codex_cli, model: gpt-x, reasoning_effort: low}]\n",
-        encoding="utf-8",
+    _write_profile(
+        tmp_path, "backend:\n  profiles: [{provider: codex_cli, model: gpt-x, reasoning_effort: low}]\n"
     )
     captured: dict = {}
     monkeypatch.setitem(scheduler.PROVIDERS, "codex_cli", _fake_provider(captured))
@@ -113,15 +121,14 @@ def test_run_task_propagates_the_selected_execution_profile(
 def test_run_task_propagates_complexity_profile_and_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "agents.yaml").write_text(
+    _write_profile(
+        tmp_path,
         """backend:
   profiles: [{provider: codex_cli, model: gpt-5.6-terra, effort: medium}]
   profiles_by_complexity:
     critical:
       - {provider: codex_cli, model: gpt-5.6-sol, effort: xhigh}
 """,
-        encoding="utf-8",
     )
     captured: dict = {}
     monkeypatch.setitem(scheduler.PROVIDERS, "codex_cli", _fake_provider(captured))

@@ -8,23 +8,38 @@ import git
 import pytest
 
 from core.context import manager as manager_module
-from core.context.manager import FULL, POINTERS, ContextManager, SelectedContext, load_config
+from core.context.manager import FULL, POINTERS, ContextManager, SelectedContext, load_preset
 from core.context import selection
 from core.context.selection import Decision
 from core.errors import ConfigError
 from core.graph.builder import RelatedFile
 
 
-def test_load_config_overrides_and_defaults(tmp_path: Path) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "context.yaml").write_text("use_git_diff: false\nmax_files: 3\n", encoding="utf-8")
+def _write_context_preset(engine_root: Path, body: str, mode: str = "smart") -> None:
+    preset_dir = engine_root / "config/presets/context"
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    (preset_dir / f"{mode}.yaml").write_text(body, encoding="utf-8")
 
-    config = load_config(tmp_path)
+
+def test_load_preset_overrides_and_defaults(tmp_path: Path) -> None:
+    _write_context_preset(tmp_path, "use_git_diff: false\nmax_files: 3\n")
+
+    config = load_preset(tmp_path, "smart")
 
     assert config.use_git_diff is False
     assert config.max_files == 3
     assert config.use_vector_db is True  # not overridden, keeps its default
+
+
+def test_load_preset_applies_advanced_overrides_on_top(tmp_path: Path) -> None:
+    """The escape hatch: config/platform.yaml's `advanced.context` merges onto
+    the resolved preset without editing the shipped file."""
+    _write_context_preset(tmp_path, "use_git_diff: false\nmax_files: 3\n")
+
+    config = load_preset(tmp_path, "smart", advanced={"max_files": 99})
+
+    assert config.max_files == 99
+    assert config.use_git_diff is False  # untouched by the override
 
 
 def test_selected_context_render_combines_all_sections() -> None:
@@ -170,23 +185,19 @@ def test_render_for_a_provider_that_reads_files_honors_the_injection_mode() -> N
 # --- injection_mode config ---
 
 
-def test_load_config_defaults_to_pointers(tmp_path: Path) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "context.yaml").write_text("max_files: 3\n", encoding="utf-8")
+def test_load_preset_defaults_to_pointers(tmp_path: Path) -> None:
+    _write_context_preset(tmp_path, "max_files: 3\n")
 
-    assert load_config(tmp_path).injection_mode == POINTERS
+    assert load_preset(tmp_path, "smart").injection_mode == POINTERS
 
 
-def test_load_config_rejects_an_unknown_injection_mode(tmp_path: Path) -> None:
+def test_load_preset_rejects_an_unknown_injection_mode(tmp_path: Path) -> None:
     """Silently falling back would make a run's recorded injection_mode a lie,
     which is worse than failing at startup."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "context.yaml").write_text("injection_mode: everything\n", encoding="utf-8")
+    _write_context_preset(tmp_path, "injection_mode: everything\n")
 
     with pytest.raises(ConfigError, match="Unknown injection_mode"):
-        load_config(tmp_path)
+        load_preset(tmp_path, "smart")
 
 
 def _chunk(path: str, name: str = "foo", start: int = 1, end: int = 2, text: str = "") -> dict:
@@ -241,6 +252,17 @@ def test_entries_group_every_matching_chunk_under_its_file() -> None:
     assert [(c["start_line"], c["end_line"]) for c in entry.excerpts] == [(1, 5), (20, 30)]
 
 
+def _stub_non_context_presets(repo_root: Path) -> None:
+    """`ContextManager`'s self-load path goes through `PlatformConfig.load()`,
+    which validates all three preset axes at once (see platform_config.py) —
+    so even a fixture that only cares about context needs a minimal profile
+    and workflow preset on disk for that load to succeed."""
+    (repo_root / "config/presets/profiles").mkdir(parents=True, exist_ok=True)
+    (repo_root / "config/presets/profiles/balanced.yaml").write_text("{}\n", encoding="utf-8")
+    (repo_root / "config/presets/workflow").mkdir(parents=True, exist_ok=True)
+    (repo_root / "config/presets/workflow/standard.yaml").write_text("tasks: []\n", encoding="utf-8")
+
+
 @pytest.fixture
 def fake_repo(tmp_path: Path) -> Path:
     repo = git.Repo.init(tmp_path)
@@ -248,16 +270,22 @@ def fake_repo(tmp_path: Path) -> Path:
         cw.set_value("user", "name", "Test")
         cw.set_value("user", "email", "test@example.com")
 
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "context.yaml").write_text(
+    _stub_non_context_presets(tmp_path)
+    _write_context_preset(
+        tmp_path,
         "use_git_diff: true\nuse_graph: false\nuse_vector_db: true\nuse_memory: true\nmax_files: 5\n",
-        encoding="utf-8",
     )
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "architecture.md").write_text("We use a layered architecture.", encoding="utf-8")
     (tmp_path / "auth.py").write_text("def authenticate(user):\n    return True\n", encoding="utf-8")
 
-    repo.index.add(["config/context.yaml", "memory/architecture.md", "auth.py"])
+    repo.index.add([
+        "config/presets/profiles/balanced.yaml",
+        "config/presets/workflow/standard.yaml",
+        "config/presets/context/smart.yaml",
+        "memory/architecture.md",
+        "auth.py",
+    ])
     repo.index.commit("initial commit")
     return tmp_path
 
@@ -309,14 +337,14 @@ def test_context_manager_keeps_the_index_out_of_the_tree_it_reads(fake_repo: Pat
 
 
 def test_context_manager_loads_thresholds_from_engine_root_not_repo_root(tmp_path: Path) -> None:
-    """config/context.yaml is engine policy: it must be read from the engine
+    """The context preset is engine policy: it must be read from the engine
     install even when repo_root points at a target with no config/ of its
     own (an external --repo target has no reason to carry ai-platform's own
     config directory)."""
     engine_root = tmp_path / "engine"
     target_root = tmp_path / "target"
-    (engine_root / "config").mkdir(parents=True)
-    (engine_root / "config" / "context.yaml").write_text("max_files: 42\n", encoding="utf-8")
+    _stub_non_context_presets(engine_root)
+    _write_context_preset(engine_root, "max_files: 42\n")
     git.Repo.init(target_root)
 
     manager = ContextManager(target_root, engine_root=engine_root)
@@ -330,13 +358,13 @@ def test_select_context_expands_with_the_graph_when_enabled(
     # min_similarity 0 keeps this test about graph integration rather than
     # about what the embedding model happens to score today; the gates
     # themselves are covered in tests/test_selection.py.
-    (fake_repo / "config" / "context.yaml").write_text(
+    _write_context_preset(
+        fake_repo,
         "use_git_diff: true\nuse_graph: true\nuse_vector_db: true\nuse_memory: true\n"
         "max_files: 5\nmin_similarity: 0.0\nmin_similarity_ratio: 0.0\n",
-        encoding="utf-8",
     )
     repo = git.Repo(fake_repo)
-    repo.index.add(["config/context.yaml"])
+    repo.index.add(["config/presets/context/smart.yaml"])
     repo.index.commit("enable graph")
 
     monkeypatch.setattr(
@@ -452,10 +480,10 @@ def test_render_reports_nothing_dropped_when_everything_fits() -> None:
 def test_select_context_keeps_nothing_when_nothing_clears_the_floor(fake_repo: Path) -> None:
     """The acceptance case, end to end: an unanswerable request fills no
     context rather than shipping the least-bad noise."""
-    (fake_repo / "config" / "context.yaml").write_text(
+    _write_context_preset(
+        fake_repo,
         "use_git_diff: false\nuse_graph: false\nuse_vector_db: true\nuse_memory: false\n"
         "max_files: 5\nmin_similarity: 0.99\n",
-        encoding="utf-8",
     )
     manager = ContextManager(fake_repo)
     manager.index_repo()
@@ -472,13 +500,13 @@ def test_select_context_skips_the_graph_when_the_search_found_nothing(fake_repo:
     """Seeding the graph on noise produces related noise — the difference
     between a nonsense request selecting nothing and it selecting twenty
     files."""
-    (fake_repo / "config" / "context.yaml").write_text(
+    _write_context_preset(
+        fake_repo,
         "use_git_diff: false\nuse_graph: true\nuse_vector_db: true\nuse_memory: false\n"
         "max_files: 5\nmin_similarity: 0.99\n",
-        encoding="utf-8",
     )
     repo = git.Repo(fake_repo)
-    repo.index.add(["config/context.yaml"])
+    repo.index.add(["config/presets/context/smart.yaml"])
     repo.index.commit("tighten the floor")
 
     calls: list[dict] = []

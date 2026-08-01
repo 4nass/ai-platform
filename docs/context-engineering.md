@@ -49,7 +49,7 @@ The shipped context policy enables Git diff, graph, vector, and memory sources. 
 - maximum selected files: 20;
 - maximum rendered context: 20,000 characters.
 
-Exact values live in `config/context.yaml`.
+Exact values live in `config/presets/context/<mode>.yaml`, selected by `context.mode` in `config/platform.yaml` (`smart`/`full`/`minimal`); see [Configuration reference](configuration.md).
 
 If no candidate clears the relevance floor, the platform injects no selected files. The provider may still inspect the authorized worktree.
 

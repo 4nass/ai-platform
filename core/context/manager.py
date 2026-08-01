@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import git
 import networkx as nx
@@ -31,7 +32,9 @@ from core.errors import ConfigError
 from core.graph import builder as graph_builder
 from core.memory.loader import load_memory_docs
 
-CONFIG_PATH = Path("config/context.yaml")
+if TYPE_CHECKING:
+    from core.orchestrator.platform_config import PlatformConfig
+
 VECTOR_STORAGE_PATH = Path(".ai-platform/vector/qdrant_db")
 """Under the target repo, not the engine install: this indexes the target's
 own source, so a second `--repo` target must not share (or collide with) the
@@ -323,13 +326,21 @@ def _best_score_per_file(chunks: list[dict]) -> list[tuple[str, float]]:
     return list(best.items())
 
 
-def load_config(engine_root: Path) -> ContextConfig:
-    path = engine_root / CONFIG_PATH
+def load_preset(engine_root: Path, mode: str, advanced: dict | None = None) -> ContextConfig:
+    """The named `config/presets/context/<mode>.yaml` retrieval policy, with
+    `advanced` (from `PlatformConfig.context_advanced`) merged over it — the
+    escape hatch for a project that needs different relevance floors without
+    editing a shipped preset file.
+    """
+    from core.orchestrator import platform_config as pc
+
+    path = pc.context_preset_path(engine_root, mode)
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    data = {**data, **(advanced or {})}
     config = ContextConfig(**{k: v for k, v in data.items() if k in ContextConfig.__dataclass_fields__})
     if config.injection_mode not in INJECTION_MODES:
         raise ConfigError(
-            f"Unknown injection_mode {config.injection_mode!r} in {CONFIG_PATH}. "
+            f"Unknown injection_mode {config.injection_mode!r} in context preset {mode!r} ({path}). "
             f"Valid modes: {', '.join(INJECTION_MODES)}"
         )
     return config
@@ -342,11 +353,12 @@ class ContextManager:
         *,
         engine_root: Path | None = None,
         storage_root: Path | None = None,
+        platform_config: "PlatformConfig | None" = None,
     ):
         """`repo_root` is the tree whose content is indexed and searched.
-        `engine_root` is where config/context.yaml's thresholds live — the
-        engine install, which defaults to `repo_root` so self-targeting
-        (still the common case) and existing callers/tests need no change.
+        `engine_root` is where the context preset lives — the engine install,
+        which defaults to `repo_root` so self-targeting (still the common
+        case) and existing callers/tests need no change.
 
         `storage_root` is where the derived index is kept, and defaults to
         `repo_root` for the same reason. A run separates the two: content is
@@ -360,11 +372,22 @@ class ContextManager:
         and project memory were all read straight off the user's working
         tree, so an uncommitted edit could still reach the model describing
         code that does not exist in what the agent is editing.
+
+        `platform_config` defaults to a fresh load when not given (a
+        standalone caller/test); `supervisor.run()` loads one instance and
+        passes it so the context mode agrees with everything else the run
+        reads.
         """
+        from core.orchestrator import platform_config as pc
+
         self.repo_root = repo_root
         self.engine_root = engine_root if engine_root is not None else repo_root
         self.storage_root = storage_root if storage_root is not None else repo_root
-        self.config = load_config(self.engine_root)
+        if platform_config is None:
+            platform_config = pc.load(self.engine_root)
+        self.config = load_preset(
+            self.engine_root, platform_config.context_mode, platform_config.context_advanced
+        )
         self._store: VectorStore | None = None
         self._graph: nx.MultiDiGraph | None = None
 

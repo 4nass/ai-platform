@@ -13,6 +13,7 @@ ADRs preserve durable technical decisions, their context, and trade-offs. Compon
 | [ADR-005](ADR-005-separate-telemetry-and-job-stores.md) | Separate SQLite telemetry and job stores | Accepted |
 | [ADR-006](ADR-006-openclaw-as-gateway.md) | OpenClaw as interaction gateway | Proposed |
 | [ADR-007](ADR-007-preview-environments.md) | Immutable per-run preview environments | Proposed |
+| [ADR-008](ADR-008-platform-config-and-presets.md) | Two-tier configuration — platform.yaml plus internal presets | Accepted |
 
 The older CLI dry-run decision remains in [memory/adr/ADR-001](../../memory/adr/ADR-001-cli-dry-run-flag.md). It predates this documentation structure and is retained for history.
 

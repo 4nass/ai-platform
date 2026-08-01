@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from core import untrusted
 from core.context import selection
@@ -25,6 +25,9 @@ from providers.base import AgentTask, ProviderResult, reads_files
 from providers.claude_code import adapter as claude_code
 from providers.codex_cli import adapter as codex_cli
 from providers.openai_api import adapter as openai_api
+
+if TYPE_CHECKING:
+    from core.orchestrator.platform_config import PlatformConfig
 
 PROVIDERS = {
     "claude_code": claude_code,
@@ -43,21 +46,33 @@ class StageResult:
 
 
 def resolve_provider(
-    engine_root: Path, agent: str, complexity: str = router.DEFAULT_COMPLEXITY
+    engine_root: Path,
+    agent: str,
+    complexity: str = router.DEFAULT_COMPLEXITY,
+    *,
+    platform_config: "PlatformConfig | None" = None,
 ) -> str:
     """The provider this role should use right now, per the router.
 
     Was a static config lookup; it is now a decision. Callers that only need
     the name keep this signature — `route_agent` returns the reasoning too.
     """
-    return route_agent(engine_root, agent, complexity).provider
+    return route_agent(engine_root, agent, complexity, platform_config=platform_config).provider
 
 
 def route_agent(
-    engine_root: Path, agent: str, complexity: str = router.DEFAULT_COMPLEXITY
+    engine_root: Path,
+    agent: str,
+    complexity: str = router.DEFAULT_COMPLEXITY,
+    *,
+    platform_config: "PlatformConfig | None" = None,
 ) -> router.Decision:
     return router.route(
-        engine_root, agent, known_providers=set(PROVIDERS), complexity=complexity
+        engine_root,
+        agent,
+        known_providers=set(PROVIDERS),
+        platform_config=platform_config,
+        complexity=complexity,
     )
 
 
@@ -71,6 +86,7 @@ def run_task(
     stage_id: str | None = None,
     engine_root: Path | None = None,
     complexity: str = router.DEFAULT_COMPLEXITY,
+    platform_config: "PlatformConfig | None" = None,
 ) -> ProviderResult:
     """Runs one task through its configured provider, recording what it cost.
 
@@ -93,9 +109,13 @@ def run_task(
     engine-scoped, not per-worktree, so pointing them at a throwaway worktree
     would have every stage cold-start from an empty, momentary copy instead
     of the engine's real, persistent one.
+
+    `platform_config` defaults to a fresh load when not given; `supervisor.run()`
+    loads one instance and passes it to every call so a whole run is judged
+    against the same policy snapshot.
     """
     engine_root = engine_root or repo_root
-    decision = route_agent(engine_root, agent, complexity)
+    decision = route_agent(engine_root, agent, complexity, platform_config=platform_config)
     provider_name = decision.provider
     provider = PROVIDERS[provider_name]
 

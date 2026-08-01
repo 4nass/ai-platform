@@ -65,7 +65,7 @@ def run(
         "'snapshot' would reproduce them inside the run and is not implemented yet.",
     ),
 ) -> None:
-    """Indexes the repo, selects relevant context, and runs the workflow DAG (see config/workflow.yaml)."""
+    """Indexes the repo, selects relevant context, and runs the workflow DAG (see `ai-platform config`)."""
     from core.orchestrator import supervisor
 
     try:
@@ -221,18 +221,21 @@ def route(
 
     import yaml
 
-    from core.orchestrator import router as routing
+    from core.orchestrator import platform_config as pc
     from core.orchestrator import scheduler
+
+    platform = pc.load(ENGINE_ROOT)
 
     if role:
         roles = [role]
     else:
-        config = yaml.safe_load((ENGINE_ROOT / routing.AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
+        profile_path = pc.profile_preset_path(ENGINE_ROOT, platform.profile)
+        config = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
         roles = sorted(config)
 
     for name in roles:
         try:
-            decision = scheduler.route_agent(ENGINE_ROOT, name, complexity)
+            decision = scheduler.route_agent(ENGINE_ROOT, name, complexity, platform_config=platform)
         except Exception as exc:
             console.print(f"[bold red]{name}:[/bold red] {exc}")
             continue
@@ -272,13 +275,14 @@ def quota(
     """Shows how much of each subscription's budget recent runs have consumed.
 
     Neither CLI reports a remaining balance, so this measures what was
-    actually recorded against the limits declared in config/quota.yaml.
+    actually recorded against the limits declared in config/platform.yaml.
     """
     from rich.table import Table
 
+    from core.orchestrator import platform_config as pc
     from core.telemetry import quota as quota_store
 
-    rows = quota_store.pressure(ENGINE_ROOT, window_hours=window)
+    rows = quota_store.pressure(ENGINE_ROOT, pc.load(ENGINE_ROOT).quotas, window_hours=window)
     if not rows:
         console.print("No provider usage recorded yet, and no budgets declared.")
         return
@@ -305,6 +309,45 @@ def quota(
         )
 
     console.print(table)
+
+
+@app.command(name="config")
+def show_config() -> None:
+    """Shows the resolved platform policy — which preset is active and its
+    numbers — without running anything or spending a token.
+
+    The counterpart to `route`/`context`/`quota`: those explain one decision
+    each; this answers "which preset am I on" for the whole run at once.
+    """
+    from rich.table import Table
+
+    from core.orchestrator import platform_config as pc
+
+    config = pc.load(ENGINE_ROOT)
+
+    table = Table(title="Resolved platform config", show_header=False)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("profile", config.profile)
+    table.add_row("workflow.mode", config.workflow_mode)
+    table.add_row("workflow.max_parallel", str(config.max_parallel))
+    table.add_row("workflow.decompose", str(config.decompose))
+    table.add_row("workflow.max_correction_attempts", str(config.max_correction_attempts))
+    table.add_row("context.mode", config.context_mode)
+    if config.context_advanced:
+        table.add_row("context.advanced", ", ".join(f"{k}={v}" for k, v in config.context_advanced.items()))
+    table.add_row("routing.max_quota_ratio", f"{config.routing.max_quota_ratio:.0%}")
+    table.add_row("routing.min_success_rate", f"{config.routing.min_success_rate:.0%}")
+    table.add_row("routing.min_samples", str(config.routing.min_samples))
+    table.add_row("routing.window_hours", f"{config.routing.window_hours:g}")
+    for name, budget in sorted(config.quotas.items()):
+        # Not f"quota[{name}]": Rich's table cells render markup by default,
+        # and a bracketed provider name is indistinguishable from a style tag
+        # -- it gets parsed and silently stripped rather than shown.
+        table.add_row(f"quota: {name}", f"{budget.tokens:,} tokens / {budget.window_hours:g}h")
+
+    console.print(table)
+    console.print(f"[dim]{pc.PLATFORM_CONFIG_PATH} at {ENGINE_ROOT}[/dim]")
 
 
 DIRTY_POLICY_HELP = (

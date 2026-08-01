@@ -58,7 +58,7 @@ Automated tests should prove:
 
 ## Routing policy checks
 
-After changing `config/agents.yaml`, inspect all role/class combinations:
+After changing a profile preset (`config/presets/profiles/<name>.yaml`), inspect all role/class combinations:
 
 ```bash
 for role in decomposer architect backend frontend reviewer security tests documentation corrector; do

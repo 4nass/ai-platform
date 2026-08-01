@@ -11,10 +11,9 @@ from providers.anthropic_api import adapter
 from providers.base import AgentTask
 
 
-def _write_configs(tmp_path: Path, models_yaml: str, token_budget_yaml: str = "backend: 1000\n") -> None:
+def _write_configs(tmp_path: Path, models_yaml: str) -> None:
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "models.yaml").write_text(models_yaml, encoding="utf-8")
-    (tmp_path / "config" / "token_budget.yaml").write_text(token_budget_yaml, encoding="utf-8")
 
 
 def test_load_yaml_empty_file_defaults_to_empty_dict(tmp_path: Path) -> None:
@@ -98,6 +97,56 @@ def test_run_returns_failure_instead_of_raising_on_escape(
 
     assert result.success is False
     assert "outside the repo" in result.summary
+
+
+def test_run_uses_the_roles_declared_token_budget(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The budget is an adapter-internal constant now (config/token_budget.yaml
+    is gone) -- confirm it still reaches the API call per role."""
+    _write_configs(tmp_path, "models:\n  claude:\n    model: claude-sonnet-5\n")
+    plan = adapter.CodeChangePlan(summary="done", files=[])
+    captured: dict = {}
+
+    class FakeResponse:
+        parsed_output = plan
+
+    class FakeMessages:
+        def parse(self, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    monkeypatch.setattr(adapter.anthropic, "Anthropic", lambda: FakeClient())
+
+    adapter.run(AgentTask(agent="documentation", description="x", repo_root=tmp_path))
+
+    assert captured["max_tokens"] == adapter.TOKEN_BUDGETS["documentation"]
+
+
+def test_run_falls_back_to_the_default_budget_for_an_unlisted_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_configs(tmp_path, "models:\n  claude:\n    model: claude-sonnet-5\n")
+    plan = adapter.CodeChangePlan(summary="done", files=[])
+    captured: dict = {}
+
+    class FakeResponse:
+        parsed_output = plan
+
+    class FakeMessages:
+        def parse(self, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    monkeypatch.setattr(adapter.anthropic, "Anthropic", lambda: FakeClient())
+
+    adapter.run(AgentTask(agent="corrector", description="x", repo_root=tmp_path))
+
+    assert captured["max_tokens"] == adapter.DEFAULT_TOKEN_BUDGET
 
 
 def test_model_id_extracts_configured_model() -> None:

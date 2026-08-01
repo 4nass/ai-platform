@@ -1,4 +1,7 @@
-# Ordered execution profiles for every role.
+# Ordered execution profiles for every role. Verbatim rename of the former
+# config/agents.yaml -- calibrated for a Pro subscription: Codex preferred at
+# every complexity, Claude Sonnet as the routine/complex fallback, Claude Opus
+# reserved for critical fallback.
 #
 # The first profile clearing quota and failure gates runs; the second is a
 # fallback, not a second opinion. The base list is the "complex" policy.

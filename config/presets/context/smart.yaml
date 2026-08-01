@@ -1,3 +1,6 @@
+# Verbatim rename of the former config/context.yaml. Every source on,
+# pointer-mode injection for providers that can read the repo themselves.
+
 use_git_diff: true
 use_graph: true
 use_vector_db: true

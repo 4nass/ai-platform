@@ -1,25 +1,34 @@
 """Planner: builds the task DAG for a run.
 
-The DAG's dependency structure is a static template declared in
-config/workflow.yaml, the same "declared, not inferred" pattern already used
-for config/agents.yaml — task ids, roles and edges are never invented by an
-LLM. What *can* vary per request is which subset of that pre-validated DAG
-actually runs: core.orchestrator.decomposer (an LLM call) picks a subset of
-task ids, and `prune()` here narrows the plan down to it. Pruning a subgraph
-of an already-cycle-free, already-reference-checked DAG is safe by
-construction — no need to re-validate.
+The DAG's dependency structure is a static template declared in the selected
+workflow preset (config/presets/workflow/<mode>.yaml, see
+core.orchestrator.platform_config), the same "declared, not inferred" pattern
+already used for provider profiles — task ids, roles and edges are never
+invented by an LLM. What *can* vary per request is which subset of that
+pre-validated DAG actually runs: core.orchestrator.decomposer (an LLM call)
+picks a subset of task ids, and `prune()` here narrows the plan down to it.
+Pruning a subgraph of an already-cycle-free, already-reference-checked DAG is
+safe by construction — no need to re-validate.
+
+`max_parallel`/`decompose`/`max_correction_attempts` are not part of the
+preset: they're operational knobs a user tunes in config/platform.yaml, not
+DAG shape, so `plan()` takes them as explicit arguments rather than parsing
+them out of the workflow file.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from core.errors import ConfigError
 
-WORKFLOW_CONFIG_PATH = Path("config/workflow.yaml")
+if TYPE_CHECKING:
+    from core.orchestrator.platform_config import PlatformConfig
+
 DEFAULT_MAX_PARALLEL = 2
 DEFAULT_DECOMPOSE = True
 DEFAULT_MAX_CORRECTION_ATTEMPTS = 1
@@ -68,7 +77,7 @@ def _parse_tasks(data: dict) -> list[Task]:
 
 def _topological_order(tasks: list[Task]) -> list[Task]:
     """Kahn's algorithm, ties broken by declaration order — deterministic
-    execution order for a given config/workflow.yaml."""
+    execution order for a given workflow preset."""
     declaration_order = [t.id for t in tasks]
     remaining = {t.id: t for t in tasks}
     ordered: list[Task] = []
@@ -87,46 +96,35 @@ def _topological_order(tasks: list[Task]) -> list[Task]:
     return ordered
 
 
-def _read_workflow_data(engine_root: Path) -> dict:
-    path = engine_root / WORKFLOW_CONFIG_PATH
+def _read_workflow_data(engine_root: Path, mode: str) -> dict:
+    from core.orchestrator import platform_config as pc
+
+    path = pc.workflow_preset_path(engine_root, mode)
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
-def _parse_max_parallel(data: dict) -> int:
-    value = data.get("max_parallel", DEFAULT_MAX_PARALLEL)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ConfigError(f"'max_parallel' must be a positive integer, got: {value!r}")
-    return value
-
-
-def _parse_decompose(data: dict) -> bool:
-    value = data.get("decompose", DEFAULT_DECOMPOSE)
-    if not isinstance(value, bool):
-        raise ConfigError(f"'decompose' must be a boolean, got: {value!r}")
-    return value
-
-
-def _parse_max_correction_attempts(data: dict) -> int:
-    value = data.get("max_correction_attempts", DEFAULT_MAX_CORRECTION_ATTEMPTS)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ConfigError(f"'max_correction_attempts' must be a non-negative integer, got: {value!r}")
-    return value
-
-
-def load_workflow(engine_root: Path) -> list[Task]:
-    data = _read_workflow_data(engine_root)
+def load_workflow(engine_root: Path, mode: str = "standard") -> list[Task]:
+    data = _read_workflow_data(engine_root, mode)
     tasks = _parse_tasks(data)
     return _topological_order(tasks)
 
 
-def plan(engine_root: Path) -> Plan:
-    data = _read_workflow_data(engine_root)
+def plan(engine_root: Path, platform_config: "PlatformConfig | None" = None) -> Plan:
+    """`platform_config` defaults to a fresh load when not given (a standalone
+    caller/test), but `supervisor.run()` loads one instance and passes it so
+    the workflow mode and scalars agree with everything else the run reads."""
+    from core.orchestrator import platform_config as pc
+
+    if platform_config is None:
+        platform_config = pc.load(engine_root)
+
+    data = _read_workflow_data(engine_root, platform_config.workflow_mode)
     tasks = _topological_order(_parse_tasks(data))
     return Plan(
         tasks=tasks,
-        max_parallel=_parse_max_parallel(data),
-        decompose=_parse_decompose(data),
-        max_correction_attempts=_parse_max_correction_attempts(data),
+        max_parallel=platform_config.max_parallel,
+        decompose=platform_config.decompose,
+        max_correction_attempts=platform_config.max_correction_attempts,
     )
 
 

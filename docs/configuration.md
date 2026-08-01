@@ -4,19 +4,55 @@
 
 | File | Scope | Purpose |
 |---|---|---|
-| `config/agents.yaml` | engine | Ordered provider/model/effort profiles per role and complexity |
-| `config/routing.yaml` | engine | Measurable quota and recent-success routing gates |
-| `config/quota.yaml` | engine | Declared subscription token windows |
-| `config/context.yaml` | engine | Retrieval sources, thresholds, injection mode, and budgets |
-| `config/workflow.yaml` | engine | Fixed DAG, parallelism, decomposition, and correction bound |
+| `config/platform.yaml` | engine | The five knobs a user actually tunes: profile, quotas, routing gates, workflow mode/parallelism/correction bound, context mode |
+| `config/presets/profiles/<name>.yaml` | engine | Ordered provider/model/effort profiles per role and complexity — calibrated policy, versioned with the engine |
+| `config/presets/workflow/<name>.yaml` | engine | DAG shape (task ids, roles, dependencies) |
+| `config/presets/context/<name>.yaml` | engine | Retrieval sources, relevance floors, injection mode, budget |
 | `prompts/<role>.md` | engine | Role instructions and structured output contract |
 | `.ai-platform.yml` | target | Tests, timeout, sandbox, and allowed ephemeral writes |
 
-Engine policy governs orchestration. Target policy governs how a particular repository is validated. The target policy is frozen from the base revision for a run.
+Engine policy governs orchestration. Target policy governs how a particular repository is validated. The target policy is frozen from the base revision for a run; `platform.yaml` and the presets it selects are loaded once per run and threaded through, so the whole run is judged against one consistent snapshot (`core/orchestrator/platform_config.py`, [ADR-008](decisions/ADR-008-platform-config-and-presets.md)).
 
-## Agent profiles
+Run `ai-platform config` to see the resolved policy — which preset is active and its numbers — without spending a token.
 
-`config/agents.yaml` maps every role to an ordered list:
+## `config/platform.yaml`
+
+```yaml
+profile: balanced        # balanced | max -- selects config/presets/profiles/<name>.yaml
+
+providers:
+  quotas:
+    codex_cli: {tokens: 8000000, window_hours: 5}
+    claude_code: {tokens: 8000000, window_hours: 5}
+
+routing:
+  max_quota_ratio: 0.85
+  min_success_rate: 0.6
+  min_samples: 5
+  window_hours: 24
+
+workflow:
+  mode: standard          # selects config/presets/workflow/<name>.yaml
+  max_parallel: 2
+  decompose: true
+  max_correction_attempts: 1
+
+context:
+  mode: smart             # smart | full | minimal -- selects config/presets/context/<name>.yaml
+
+# advanced:                # escape hatch, merged onto the resolved context preset
+#   context: {min_similarity: 0.20, min_lift: 1.2, max_files: 20, max_context_chars: 20000}
+```
+
+Missing entirely, every field falls back to the value shown above — the same behavior as if the file were present with these exact contents. `profile`/`workflow.mode`/`context.mode` are validated against what preset files actually exist on disk at load time, so a typo is one `ConfigError`, before any worktree or branch is created, listing the names that are actually available.
+
+Quota declarations are estimates: neither provider CLI reports a remaining balance, so pressure is derived from recorded telemetry against these limits. Getting a number wrong makes the pressure figure wrong and nothing else — no run is blocked by this file. Leave a provider out to report its consumption without a percentage.
+
+The routing gates may skip a candidate but never rewrite the preset's declared order. If every candidate is gated, the first profile still runs, with a visible forced-fallback reason.
+
+## Profile presets (`config/presets/profiles/*.yaml`)
+
+Same shape as before, just resolved by name instead of a fixed path:
 
 ```yaml
 architect:
@@ -38,36 +74,22 @@ architect:
         effort: xhigh
 ```
 
-`profiles` is the `complex` policy and required fallback. Overrides accept only `routine`, `complex`, and `critical`. New policy uses `profiles` and provider-neutral `effort`; legacy `provider`, `providers`, and `reasoning_effort` remain readable for compatibility. Ambiguous duplicate fields fail validation.
+`profiles` is the `complex` policy and required fallback. Overrides accept only `routine`, `complex`, and `critical`. `profiles` and provider-neutral `effort` are the current form; legacy `provider`, `providers`, and `reasoning_effort` remain readable. Ambiguous duplicate fields, unsupported provider/effort pairs, and empty profile lists are configuration errors. See [Model routing policy](model-routing-policy.md).
 
-Unsupported provider/effort pairs and empty profile lists are configuration errors. See [Model routing policy](model-routing-policy.md).
+Two presets ship: `balanced` (the default, calibrated policy) and `max` (every role's already-declared "critical" tier promoted to the unconditional base profile — no new tuning). Adding a preset is a data change: drop a new `<name>.yaml` file in the directory and point `profile:` at it — no code change needed, since preset names are discovered from what's on disk, not a hardcoded list.
 
-## Routing and quota
-
-The shipped routing gates are:
+## Workflow presets (`config/presets/workflow/*.yaml`)
 
 ```yaml
-max_quota_ratio: 0.85
-min_success_rate: 0.6
-min_samples: 5
-window_hours: 24
+tasks:
+  - id: architecture
+    agent: architect
+    depends_on: []
 ```
 
-They may skip candidates but do not rewrite semantic profile order. If every candidate is gated, the first profile still runs with a visible forced-fallback reason.
+DAG shape only — `max_parallel`, `decompose`, and `max_correction_attempts` live in `config/platform.yaml`, not here, since they're operational knobs rather than architecture. Task IDs and roles must exist in the bounded workflow; the decomposer can prune tasks but cannot invent new ones. One preset ships: `standard`.
 
-Quota declarations are estimates:
-
-```yaml
-providers:
-  claude_code:
-    window_hours: 5
-    tokens: 8000000
-  codex_cli:
-    window_hours: 5
-    tokens: 8000000
-```
-
-## Context
+## Context presets (`config/presets/context/*.yaml`)
 
 ```yaml
 use_git_diff: true
@@ -82,21 +104,9 @@ max_files: 20
 max_context_chars: 20000
 ```
 
-CLI providers use ranked path pointers by default because they can read the worktree. Providers without disk access receive full rendered excerpts.
+CLI providers use ranked path pointers by default because they can read the worktree; providers without disk access always receive full rendered excerpts regardless of `injection_mode`. Three presets ship: `smart` (default, every source on, pointers), `full` (every source on, excerpt text inlined), `minimal` (vector search only, tight budget). The three presets share the same calibrated relevance floors — only the retrieval toggles and budget differ; recalibrating the numbers themselves needs real measurement, not a config edit.
 
-## Workflow
-
-```yaml
-max_parallel: 2
-decompose: true
-max_correction_attempts: 1
-tasks:
-  - id: architecture
-    agent: architect
-    depends_on: []
-```
-
-Task IDs and roles must exist in the bounded workflow. The decomposer can prune tasks but cannot invent new roles.
+`config/platform.yaml`'s optional `advanced.context` block overrides individual fields of the resolved preset without editing the shipped file — for a project that needs different floors but doesn't want to author a whole new preset.
 
 ## Target validation
 
@@ -119,4 +129,4 @@ Subscription adapters rely on `codex login` and `claude auth login`. API adapter
 
 ## Change discipline
 
-A configuration change is a behavior change. Validate parsing, inspect every affected role/complexity route, run the test suite, and update the corresponding document. Consolidating overlapping budget and routing files is tracked by [#41](https://github.com/4nass/ai-platform/issues/41).
+A configuration change is a behavior change. Validate parsing, inspect every affected role/complexity route (`ai-platform route <role>`), run the test suite, and update the corresponding document. Consolidation of the previous six-file layout into `platform.yaml` plus presets shipped in [ADR-008](decisions/ADR-008-platform-config-and-presets.md), closing issue [#41](https://github.com/4nass/ai-platform/issues/41).

@@ -3,9 +3,11 @@
 Retrieval proposes, an arbiter decides, every decision leaves a reason — the
 same shape as core.context.selection, applied to providers instead of files.
 
-The authority is deliberately limited. The preference order in
-config/agents.yaml governs; this module overrides it only on two things it can
-measure — quota pressure and repeated failure on a large enough sample. It does
+The authority is deliberately limited. The preference order declared in the
+selected profile preset (config/presets/profiles/<profile>.yaml, see
+core.orchestrator.platform_config) governs; this module overrides it only on
+two things it can measure — quota pressure and repeated failure on a large
+enough sample. It does
 not arbitrate on marginal quality, because the histories here are a handful of
 calls deep and a policy inferred from that would be superstition wearing a
 percentage sign.
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -26,8 +29,13 @@ from core.errors import ConfigError
 from core.telemetry import quota as quota_store
 from core.telemetry import store as telemetry
 
-AGENTS_CONFIG_PATH = Path("config/agents.yaml")
-ROUTING_CONFIG_PATH = Path("config/routing.yaml")
+if TYPE_CHECKING:
+    # core.orchestrator.platform_config imports Thresholds from this module
+    # at its own top level; importing it back here would be circular, so the
+    # real import is deferred into route() itself, and this one is type-check
+    # only (core.orchestrator.py's own `from __future__ import annotations`
+    # already makes annotations lazy strings at runtime).
+    from core.orchestrator.platform_config import PlatformConfig
 
 PREFERRED = "preferred"
 NO_HISTORY = "no_history"
@@ -82,16 +90,6 @@ class Decision:
     complexity: str = DEFAULT_COMPLEXITY
 
 
-def load_thresholds(engine_root: Path) -> Thresholds:
-    path = engine_root / ROUTING_CONFIG_PATH
-    if not path.is_file():
-        return Thresholds()
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return Thresholds(
-        **{k: v for k, v in data.items() if k in Thresholds.__dataclass_fields__}
-    )
-
-
 @dataclass(frozen=True)
 class ExecutionProfile:
     provider: str
@@ -142,15 +140,24 @@ def _effort(item: dict, agent: str) -> str | None:
 
 
 def eligible_profiles(
-    engine_root: Path, agent: str, complexity: str = DEFAULT_COMPLEXITY
+    engine_root: Path,
+    agent: str,
+    complexity: str = DEFAULT_COMPLEXITY,
+    *,
+    profile: str = "balanced",
 ) -> list[ExecutionProfile]:
-    """The declared preference order for a role and task complexity.
+    """The declared preference order for a role and task complexity, from the
+    named `config/presets/profiles/<profile>.yaml` (see
+    core.orchestrator.platform_config).
 
     `profiles_by_complexity` may override the base `profiles` list. Bare
     `providers: [a, b]` and legacy `provider: a` entries remain supported.
     """
+    from core.orchestrator import platform_config
+
     _validate_complexity(complexity)
-    config = yaml.safe_load((engine_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
+    path = platform_config.profile_preset_path(engine_root, profile)
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     if agent not in config:
         known = ", ".join(sorted(config)) or "(none configured)"
@@ -168,7 +175,7 @@ def eligible_profiles(
         }]
     if not declared:
         raise ConfigError(
-            f"Agent role '{agent}' declares no providers in {AGENTS_CONFIG_PATH}. "
+            f"Agent role '{agent}' declares no providers in profile {profile!r} ({path}). "
             "Set `profiles: [{provider: name, ...}]` or `providers: [name, ...]`."
         )
     if not isinstance(declared, list):
@@ -207,7 +214,7 @@ def route(
     agent: str,
     known_providers: set[str],
     *,
-    thresholds: Thresholds | None = None,
+    platform_config: "PlatformConfig | None" = None,
     complexity: str = DEFAULT_COMPLEXITY,
 ) -> Decision:
     """Picks a provider for this role and explains the choice.
@@ -217,13 +224,22 @@ def route(
     all engine-scoped, not per-project, so they stay fixed no matter which
     repo a task is currently operating on.
 
+    `platform_config` defaults to a fresh load when not given, so a standalone
+    caller (the `route`/`quota` CLI commands, most tests) needs nothing extra.
+    `supervisor.run()` loads one instance and passes it to every call for a
+    run, so the whole run is judged against the same snapshot of policy.
+
     Never returns without a provider. If every candidate is gated, the declared
     first choice runs anyway and the reason says so: a tool driven from a phone
     must not refuse to work because a config threshold was crossed. Degrading
     loudly beats failing.
     """
-    thresholds = thresholds or load_thresholds(engine_root)
-    declared = eligible_profiles(engine_root, agent, complexity)
+    from core.orchestrator import platform_config as pc
+
+    if platform_config is None:
+        platform_config = pc.load(engine_root)
+    thresholds = platform_config.routing
+    declared = eligible_profiles(engine_root, agent, complexity, profile=platform_config.profile)
 
     unknown = [p.provider for p in declared if p.provider not in known_providers]
     if unknown:
@@ -234,7 +250,9 @@ def route(
 
     pressure = {
         row["provider"]: row
-        for row in quota_store.pressure(engine_root, window_hours=thresholds.window_hours)
+        for row in quota_store.pressure(
+            engine_root, platform_config.quotas, window_hours=thresholds.window_hours
+        )
     }
     candidates: list[Candidate] = []
     chosen: ExecutionProfile | None = None
