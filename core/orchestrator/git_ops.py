@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import git
@@ -63,6 +65,70 @@ def commit_all(repo: git.Repo, summary: str) -> list[str]:
     if changed:
         repo.git.commit("-m", f"engine: {summary}")
     return changed
+
+
+def ignored_writes(repo: git.Repo) -> list[str]:
+    """Paths present that `.gitignore` hides from git — and therefore from
+    `commit_all`, `contracts.violations()`, and the reviewer's diff, every one
+    of which derives from the tracked-file view (see #2).
+
+    A task worktree starts with none of these: `git worktree add` only
+    checks out tracked files, so anything an ignored-path scan finds there
+    afterward was written by whatever ran inside it, unconditionally — no
+    baseline noise to filter first. Applies to every role, including ones
+    with no declared artifact contract (backend/frontend/tests): this isn't
+    about *where within its scope* a role wrote, it's about a write git will
+    never see at all.
+
+    Doesn't see `.git/` itself — git never reports on its own metadata
+    directory regardless of ignore rules. That's a different risk, covered
+    by `disable_hooks` below rather than by anything `git status` can show.
+    """
+    output = repo.git.status("--porcelain", "--ignored=matching")
+    return [line[3:] for line in output.splitlines() if line.startswith("!! ")]
+
+
+@contextmanager
+def disable_hooks(repo: git.Repo):
+    """Points `core.hooksPath` at an empty, throwaway directory for the
+    duration of the block, restoring whatever was configured before on exit.
+
+    Hooks are not per-worktree: every worktree of a repo shares the main
+    repo's `.git/hooks` unless `core.hooksPath` says otherwise (verified —
+    a hook written from inside a task worktree survives that worktree's
+    removal and fires on the very next git operation anywhere in the repo,
+    e.g. the next stage's own commit or merge). That reach is exactly what
+    `ignored_writes` above cannot see (`.git/` is invisible to `git status`)
+    and what worktree removal cannot undo (the hook was never inside the
+    worktree's own directory to begin with). Neutralizing where git looks
+    closes it regardless of whether a write there is ever detected —
+    detection after the fact would already be too late, since a planted
+    hook can fire on this same run's remaining git operations.
+
+    Scoped to the whole write-capable window of a run (DAG dispatch through
+    the correction loop), not per-stage: the hooks path is shared config,
+    concurrent per-stage toggling would race for no benefit.
+    """
+    # GitPython's get_value(default=...) only returns the default on a
+    # *type-conversion* failure, not a missing option — passing None as the
+    # default does not suppress the NoOptionError a never-configured
+    # core.hooksPath actually raises, so the miss has to be caught here.
+    try:
+        previous = repo.config_reader().get_value("core", "hooksPath")
+    except Exception:
+        previous = None
+    neutral_dir = Path(tempfile.mkdtemp(prefix="engine-hooks-disabled-"))
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", str(neutral_dir))
+    try:
+        yield
+    finally:
+        with repo.config_writer() as writer:
+            if previous is None:
+                writer.remove_option("core", "hooksPath")
+            else:
+                writer.set_value("core", "hooksPath", previous)
+        shutil.rmtree(neutral_dir, ignore_errors=True)
 
 
 def diff_since(repo: git.Repo, base_sha: str) -> str:

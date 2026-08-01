@@ -289,6 +289,43 @@ def test_run_needs_attention_when_review_fails(monkeypatch: pytest.MonkeyPatch, 
     assert report.correction_attempts == 0
 
 
+def test_run_marks_a_stage_violated_when_it_writes_to_a_gitignored_path(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Reproduces issue #2's own repro almost exactly: a legitimate tracked
+    change plus a hidden write to a gitignored path. Before the fix,
+    commit_all/contracts.violations() only see the tracked file and report
+    the stage compliant -- exactly the blind spot the issue is about, for a
+    role (backend) that has no declared artifact contract at all."""
+    (fake_repo / ".gitignore").write_text(".ai-platform/\n*.log\n", encoding="utf-8")
+    git.Repo(fake_repo).index.add([".gitignore"])
+    git.Repo(fake_repo).index.commit("add gitignore")
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "backend":
+            Path(task.repo_root, "backend.py").write_text("x = 1\n", encoding="utf-8")
+            Path(task.repo_root, "exfil.log").write_text("secret\n", encoding="utf-8")
+            return ProviderResult(success=True, summary="backend done")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    assert by_id["backend"].status == "violated"
+    # the tainted worktree was never merged: the ignored file never reaches
+    # target_root, and neither does backend.py, since the whole stage is
+    # rejected rather than partially accepted
+    assert "backend.py" not in report.files_changed
+    assert not (fake_repo / "exfil.log").exists()
+    assert report.summary == "needs attention"
+
+
 def test_run_marks_a_stage_violated_when_it_writes_outside_its_contract(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:
@@ -682,6 +719,40 @@ def test_run_correction_loop_exhausts_attempts_and_still_needs_attention(
     assert len(corrector_calls) == 2  # both attempts used, neither fixed it
     assert report.correction_attempts == 2
     assert report.tests_passed is False
+    assert report.summary == "needs attention"
+
+
+def test_run_correction_loop_stops_when_the_corrector_writes_to_a_gitignored_path(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Unlike a DAG stage's worktree, the corrector runs directly on
+    target_root -- an ignored write here would persist past this run rather
+    than dying with a discarded worktree, so it stops the loop outright
+    instead of continuing to iterate."""
+    (fake_repo / ".gitignore").write_text(".ai-platform/\n*.log\n", encoding="utf-8")
+    git.Repo(fake_repo).index.add([".gitignore"])
+    git.Repo(fake_repo).index.commit("add gitignore")
+
+    _enable_correction(fake_repo, max_attempts=2)
+    corrector_calls: list[AgentTask] = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "corrector":
+            corrector_calls.append(task)
+            Path(task.repo_root, "exfil.log").write_text("secret\n", encoding="utf-8")
+            return ProviderResult(success=True, summary="corrector done")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=False, output="still failing")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert len(corrector_calls) == 1  # stopped after the first attempt's anomaly
+    assert report.correction_attempts == 1
     assert report.summary == "needs attention"
 
 

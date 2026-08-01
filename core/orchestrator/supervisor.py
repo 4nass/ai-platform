@@ -162,16 +162,21 @@ def _run_stage_in_worktree(
     bad_files: list[str] = []
     if result.success:
         bad_files = contracts.violations(task.agent, changed)
+        # Distinct from a contract violation (which is about *where within
+        # its scope* a role wrote): this is a write git will never see at
+        # all -- gitignored, so invisible to commit_all/the reviewer's diff
+        # regardless of role (see #2). Applies even to backend/frontend/
+        # tests, which have no declared artifact contract.
+        ignored = git_ops.ignored_writes(worktree_repo)
+        if ignored:
+            bad_files = bad_files + [f"{path} [gitignored]" for path in ignored]
         if bad_files:
             status = "violated"
 
     if status == "failed":
         console.print(f"[bold red]{task.id} failed[/bold red]: {result.summary}")
     elif status == "violated":
-        console.print(
-            f"[bold red]{task.id} violated its contract[/bold red]: touched "
-            f"{', '.join(bad_files)} — outside its declared scope"
-        )
+        console.print(f"[bold red]{task.id} violated its contract[/bold red]: touched {', '.join(bad_files)}")
 
     return StageResult(task=task, status=status, result=result, files_changed=changed), worktree_path, task_branch
 
@@ -203,6 +208,12 @@ def run(
 
     context_manager = ContextManager(target_root, engine_root=engine_root)
     context_manager.index_repo()
+    # Baseline for the correction loop's ignored_writes check below: unlike a
+    # DAG stage's worktree (a fresh checkout that starts with none of these),
+    # target_root already legitimately has .ai-platform/ at this point --
+    # index_repo() just wrote it. Without subtracting this, the corrector's
+    # very own context index would be reported as something *it* wrote.
+    baseline_ignored = set(git_ops.ignored_writes(repo))
     context = context_manager.select_context(request)
     kept_files = len(context.context_paths())
     if kept_files:
@@ -308,182 +319,199 @@ def run(
     base_sha = git_ops.current_commit(repo)
     branch = git_ops.create_branch(repo, request)
 
-    remaining = {t.id: t for t in workflow.tasks}
-    completed: list[StageResult] = []
-    completed_ids: set[str] = set()
-    blocked_ids: set[str] = set()
-    stage_reports: list[StageReport] = []
-    all_files_changed: list[str] = []
+    with git_ops.disable_hooks(repo):
+        remaining = {t.id: t for t in workflow.tasks}
+        completed: list[StageResult] = []
+        completed_ids: set[str] = set()
+        blocked_ids: set[str] = set()
+        stage_reports: list[StageReport] = []
+        all_files_changed: list[str] = []
 
-    with ThreadPoolExecutor(max_workers=workflow.max_parallel) as executor:
-        in_flight: dict[Future, planner.Task] = {}
+        with ThreadPoolExecutor(max_workers=workflow.max_parallel) as executor:
+            in_flight: dict[Future, planner.Task] = {}
 
-        def _dispatch_ready() -> None:
-            for task_id in list(remaining):
-                task = remaining[task_id]
-                pending_deps = [d for d in task.depends_on if d not in completed_ids and d not in blocked_ids]
-                if pending_deps:
-                    continue  # still waiting on something not yet resolved
+            def _dispatch_ready() -> None:
+                for task_id in list(remaining):
+                    task = remaining[task_id]
+                    pending_deps = [d for d in task.depends_on if d not in completed_ids and d not in blocked_ids]
+                    if pending_deps:
+                        continue  # still waiting on something not yet resolved
 
-                blocked_deps = [d for d in task.depends_on if d in blocked_ids]
-                if blocked_deps:
-                    console.print(
-                        f"[bold yellow]{task.id}[/bold yellow]: skipped (upstream dependency didn't complete)"
-                    )
-                    stage_reports.append(StageReport(id=task.id, agent=task.agent, status="skipped", summary=""))
-                    blocked_ids.add(task.id)
-                    del remaining[task_id]
-                    continue
-
-                if len(in_flight) >= workflow.max_parallel:
-                    continue  # ready, but no free worker slot right now -- retried next pass
-
-                del remaining[task_id]
-                snapshot = list(completed)
-                future = executor.submit(
-                    _run_stage_in_worktree,
-                    target_root,
-                    engine_root,
-                    branch,
-                    task,
-                    request,
-                    context,
-                    snapshot,
-                    complexity,
-                    recorder,
-                )
-                in_flight[future] = task
-
-        _dispatch_ready()
-        while in_flight:
-            done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
-            for future in done:
-                task = in_flight.pop(future)
-                stage_result, worktree_path, task_branch = future.result()
-
-                if stage_result.status == "done":
-                    merged = git_ops.merge_worktree(repo, task_branch)
-                    if merged:
-                        git_ops.remove_worktree(repo, worktree_path)
-                        repo.git.branch("-D", task_branch)
+                    blocked_deps = [d for d in task.depends_on if d in blocked_ids]
+                    if blocked_deps:
                         console.print(
-                            f"[bold]{task.id}[/bold]: {git_ops.format_changed_files(stage_result.files_changed)}"
+                            f"[bold yellow]{task.id}[/bold yellow]: skipped (upstream dependency didn't complete)"
                         )
-                        completed.append(stage_result)
-                        completed_ids.add(task.id)
-                        all_files_changed.extend(stage_result.files_changed)
-                    else:
-                        stage_result.status = "conflict"
+                        stage_reports.append(StageReport(id=task.id, agent=task.agent, status="skipped", summary=""))
                         blocked_ids.add(task.id)
-                        console.print(
-                            f"[bold red]{task.id}: merge conflict[/bold red] — resolve manually in "
-                            f"{worktree_path} (branch {task_branch})"
-                        )
-                else:
-                    blocked_ids.add(task.id)
-                    if worktree_path is not None:
-                        git_ops.remove_worktree(repo, worktree_path)
-                        # The branch outlives the worktree on purpose (see
-                        # git_ops.remove_worktree) — but a branch nobody is
-                        # told about is a leak, not a safety net.
-                        if stage_result.files_changed:
-                            console.print(
-                                f"  partial work from {task.id} kept on branch {task_branch}"
-                            )
+                        del remaining[task_id]
+                        continue
 
-                stage_reports.append(
-                    StageReport(
-                        id=task.id,
-                        agent=task.agent,
-                        status=stage_result.status,
-                        summary=stage_result.result.summary if stage_result.result else "",
-                        files_changed=stage_result.files_changed,
+                    if len(in_flight) >= workflow.max_parallel:
+                        continue  # ready, but no free worker slot right now -- retried next pass
+
+                    del remaining[task_id]
+                    snapshot = list(completed)
+                    future = executor.submit(
+                        _run_stage_in_worktree,
+                        target_root,
+                        engine_root,
+                        branch,
+                        task,
+                        request,
+                        context,
+                        snapshot,
+                        complexity,
+                        recorder,
                     )
-                )
+                    in_flight[future] = task
 
             _dispatch_ready()
+            while in_flight:
+                done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+                for future in done:
+                    task = in_flight.pop(future)
+                    stage_result, worktree_path, task_branch = future.result()
 
-    any_stage_incomplete = any(s.status != "done" for s in stage_reports)
+                    if stage_result.status == "done":
+                        merged = git_ops.merge_worktree(repo, task_branch)
+                        if merged:
+                            git_ops.remove_worktree(repo, worktree_path)
+                            repo.git.branch("-D", task_branch)
+                            console.print(
+                                f"[bold]{task.id}[/bold]: {git_ops.format_changed_files(stage_result.files_changed)}"
+                            )
+                            completed.append(stage_result)
+                            completed_ids.add(task.id)
+                            all_files_changed.extend(stage_result.files_changed)
+                        else:
+                            stage_result.status = "conflict"
+                            blocked_ids.add(task.id)
+                            console.print(
+                                f"[bold red]{task.id}: merge conflict[/bold red] — resolve manually in "
+                                f"{worktree_path} (branch {task_branch})"
+                            )
+                    else:
+                        blocked_ids.add(task.id)
+                        if worktree_path is not None:
+                            git_ops.remove_worktree(repo, worktree_path)
+                            # The branch outlives the worktree on purpose (see
+                            # git_ops.remove_worktree) — but a branch nobody is
+                            # told about is a leak, not a safety net.
+                            if stage_result.files_changed:
+                                console.print(
+                                    f"  partial work from {task.id} kept on branch {task_branch}"
+                                )
 
-    test_result = test_runner.run_tests(target_root)
-    console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
-    if test_result.output:
-        console.print(test_result.output)
+                    stage_reports.append(
+                        StageReport(
+                            id=task.id,
+                            agent=task.agent,
+                            status=stage_result.status,
+                            summary=stage_result.result.summary if stage_result.result else "",
+                            files_changed=stage_result.files_changed,
+                        )
+                    )
 
-    diff = git_ops.diff_since(repo, base_sha)
-    review_result = scheduler.run_task(
-        target_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
-    )
-    review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
-    review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
-    console.print(f"[bold]Review:[/bold] {review_label}")
-    if review_result.summary:
-        console.print(review_result.summary)
+                _dispatch_ready()
 
-    overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
+        any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
-    # Bounded test/review -> corrector -> re-check loop (see
-    # core.orchestrator.correction and planner.Plan.max_correction_attempts).
-    # Deliberately scoped to test/review failure only: a DAG stage that
-    # itself failed, was skipped, or hit a merge conflict isn't something a
-    # single corrector pass can retroactively complete, so those runs go
-    # straight to "needs attention" as before.
-    correction_attempts = 0
-    can_correct = (
-        not any_stage_incomplete
-        and not overall_ok
-        and any(s.status == "done" and s.files_changed for s in stage_reports)
-    )
-    if can_correct:
-        for attempt in range(1, workflow.max_correction_attempts + 1):
-            correction_attempts = attempt
-            console.print(
-                f"[bold yellow]Correction attempt {attempt}/{workflow.max_correction_attempts}[/bold yellow]"
-            )
-            correction_description = correction.build_description(
-                request,
-                test_output=test_result.output if not test_result.passed else "",
-                review_summary=review_result.summary if review_passed is False else "",
-            )
-            correction_result = scheduler.run_task(
-                target_root,
-                "corrector",
-                correction_description,
-                context,
-                recorder=recorder,
-                stage_id=f"correction-{attempt}",
-                engine_root=engine_root,
-                complexity=complexity,
-            )
-            corrected_files = git_ops.commit_all(
-                repo, f"correction {attempt}: {correction_result.summary or request}"
-            )
-            all_files_changed.extend(corrected_files)
-            console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
+        test_result = test_runner.run_tests(target_root)
+        console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
+        if test_result.output:
+            console.print(test_result.output)
 
-            test_result = test_runner.run_tests(target_root)
-            console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
-            if test_result.output:
-                console.print(test_result.output)
+        diff = git_ops.diff_since(repo, base_sha)
+        review_result = scheduler.run_task(
+            target_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
+        )
+        review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
+        review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
+        console.print(f"[bold]Review:[/bold] {review_label}")
+        if review_result.summary:
+            console.print(review_result.summary)
 
-            diff = git_ops.diff_since(repo, base_sha)
-            review_result = scheduler.run_task(
-                target_root,
-                "reviewer",
-                review.build_description(request, diff),
-                recorder=recorder,
-                engine_root=engine_root,
-                complexity=complexity,
-            )
-            review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
-            review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
-            console.print(f"[bold]Review:[/bold] {review_label}")
-            if review_result.summary:
-                console.print(review_result.summary)
+        overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
 
-            overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
-            if overall_ok:
-                break
+        # Bounded test/review -> corrector -> re-check loop (see
+        # core.orchestrator.correction and planner.Plan.max_correction_attempts).
+        # Deliberately scoped to test/review failure only: a DAG stage that
+        # itself failed, was skipped, or hit a merge conflict isn't something a
+        # single corrector pass can retroactively complete, so those runs go
+        # straight to "needs attention" as before.
+        correction_attempts = 0
+        can_correct = (
+            not any_stage_incomplete
+            and not overall_ok
+            and any(s.status == "done" and s.files_changed for s in stage_reports)
+        )
+        if can_correct:
+            for attempt in range(1, workflow.max_correction_attempts + 1):
+                correction_attempts = attempt
+                console.print(
+                    f"[bold yellow]Correction attempt {attempt}/{workflow.max_correction_attempts}[/bold yellow]"
+                )
+                correction_description = correction.build_description(
+                    request,
+                    test_output=test_result.output if not test_result.passed else "",
+                    review_summary=review_result.summary if review_passed is False else "",
+                )
+                correction_result = scheduler.run_task(
+                    target_root,
+                    "corrector",
+                    correction_description,
+                    context,
+                    recorder=recorder,
+                    stage_id=f"correction-{attempt}",
+                    engine_root=engine_root,
+                    complexity=complexity,
+                )
+                corrected_files = git_ops.commit_all(
+                    repo, f"correction {attempt}: {correction_result.summary or request}"
+                )
+                # The corrector runs directly on target_root, not a throwaway
+                # worktree -- an ignored write here persists past this run, unlike
+                # a DAG stage's (discarded with its worktree either way). Treated
+                # as reason to stop outright rather than keep iterating: an
+                # anomaly here isn't something another correction attempt should
+                # be trusted to reason about. Diffed against baseline_ignored,
+                # not raw -- target_root already has .ai-platform/ from
+                # index_repo() above, unlike a stage's fresh worktree checkout.
+                ignored = [p for p in git_ops.ignored_writes(repo) if p not in baseline_ignored]
+                if ignored:
+                    console.print(
+                        f"[bold red]correction-{attempt} wrote outside version control[/bold red]: "
+                        f"{', '.join(ignored)} — stopping the correction loop rather than trusting it"
+                    )
+                    overall_ok = False
+                    break
+                all_files_changed.extend(corrected_files)
+                console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
+
+                test_result = test_runner.run_tests(target_root)
+                console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
+                if test_result.output:
+                    console.print(test_result.output)
+
+                diff = git_ops.diff_since(repo, base_sha)
+                review_result = scheduler.run_task(
+                    target_root,
+                    "reviewer",
+                    review.build_description(request, diff),
+                    recorder=recorder,
+                    engine_root=engine_root,
+                    complexity=complexity,
+                )
+                review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
+                review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
+                console.print(f"[bold]Review:[/bold] {review_label}")
+                if review_result.summary:
+                    console.print(review_result.summary)
+
+                overall_ok = not any_stage_incomplete and test_result.passed and review_passed is True
+                if overall_ok:
+                    break
 
     summary = "done" if overall_ok else "needs attention"
 

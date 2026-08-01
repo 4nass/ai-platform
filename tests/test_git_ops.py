@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -14,8 +15,10 @@ from core.orchestrator.git_ops import (
     create_worktree,
     current_commit,
     diff_since,
+    disable_hooks,
     ensure_clean_worktree,
     format_changed_files,
+    ignored_writes,
     merge_worktree,
     prune_worktrees,
     remove_worktree,
@@ -199,3 +202,127 @@ def test_task_branch_names_stay_readable_when_uniquified(repo: git.Repo) -> None
 
     assert second.startswith("engine-task/add-a-thing-tests")
     remove_worktree(repo, path_two)
+
+
+# --- ignored_writes / disable_hooks (issue #2) ---
+
+
+def test_ignored_writes_empty_on_a_clean_repo(repo: git.Repo) -> None:
+    assert ignored_writes(repo) == []
+
+
+def test_ignored_writes_reports_gitignored_files(repo: git.Repo) -> None:
+    Path(repo.working_tree_dir, ".gitignore").write_text("*.log\n", encoding="utf-8")
+    repo.index.add([".gitignore"])
+    repo.index.commit("add gitignore")
+
+    Path(repo.working_tree_dir, "exfil.log").write_text("secret\n", encoding="utf-8")
+
+    assert ignored_writes(repo) == ["exfil.log"]
+
+
+def test_ignored_writes_does_not_flag_ordinary_tracked_changes(repo: git.Repo) -> None:
+    Path(repo.working_tree_dir, "README.md").write_text("changed\n", encoding="utf-8")
+    Path(repo.working_tree_dir, "new_tracked.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert ignored_writes(repo) == []
+
+
+def _plant_real_hook(repo: git.Repo, name: str, script: str) -> Path:
+    """Writes to the *conventional* hooks path (.git/hooks/<name>) -- what an
+    agent that doesn't know about disable_hooks would actually target. Not
+    wherever core.hooksPath currently resolves to: a hook planted there would
+    trivially fire regardless of the fix, since that's already the directory
+    git is configured to look in."""
+    real_hooks = Path(repo.git_dir) / "hooks"
+    real_hooks.mkdir(parents=True, exist_ok=True)
+    hook_path = real_hooks / name
+    hook_path.write_text(script, encoding="utf-8")
+    os.chmod(hook_path, 0o755)
+    return hook_path
+
+
+def test_disable_hooks_neutralizes_a_hook_at_the_real_conventional_path(
+    repo: git.Repo, tmp_path: Path
+) -> None:
+    """The concrete scenario from issue #2: an agent plants a hook at the
+    conventional .git/hooks/pre-commit path, then a later git operation in
+    this same run (here, the next commit) would fire it under the old,
+    unprotected behavior."""
+    marker = tmp_path.parent / f"hook-marker-{tmp_path.name}"
+    marker.unlink(missing_ok=True)
+    _plant_real_hook(repo, "pre-commit", f"#!/bin/sh\ntouch {marker}\n")
+
+    with disable_hooks(repo):
+        Path(repo.working_tree_dir, "f.py").write_text("x = 1\n", encoding="utf-8")
+        commit_all(repo, "commit while a real .git/hooks/pre-commit exists")
+
+    assert not marker.exists()
+
+
+def test_disable_hooks_is_not_permanent_the_real_hook_still_fires_once_lifted(
+    repo: git.Repo, tmp_path: Path
+) -> None:
+    """Guards against a fix that's *too* effective: this must not silently
+    disable a user's own legitimate hooks outside the run's write-capable
+    window -- only redirect them for its duration."""
+    marker = tmp_path.parent / f"hook-marker-lifted-{tmp_path.name}"
+    marker.unlink(missing_ok=True)
+    _plant_real_hook(repo, "post-commit", f"#!/bin/sh\ntouch {marker}\n")
+
+    with disable_hooks(repo):
+        pass
+
+    Path(repo.working_tree_dir, "f.py").write_text("x = 1\n", encoding="utf-8")
+    commit_all(repo, "commit after protection is lifted")
+
+    assert marker.exists()
+
+
+def test_disable_hooks_restores_the_previous_value_on_exit(repo: git.Repo, tmp_path: Path) -> None:
+    custom_hooks = tmp_path / "custom-hooks"
+    custom_hooks.mkdir()
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", str(custom_hooks))
+
+    with disable_hooks(repo):
+        assert repo.config_reader().get_value("core", "hooksPath") != str(custom_hooks)
+
+    assert repo.config_reader().get_value("core", "hooksPath") == str(custom_hooks)
+
+
+def test_disable_hooks_unsets_cleanly_when_nothing_was_configured_before(repo: git.Repo) -> None:
+    with disable_hooks(repo):
+        pass
+
+    with pytest.raises(Exception):
+        repo.config_reader().get_value("core", "hooksPath")
+
+
+def test_disable_hooks_restores_even_if_the_block_raises(repo: git.Repo) -> None:
+    with pytest.raises(ValueError):
+        with disable_hooks(repo):
+            raise ValueError("boom")
+
+    with pytest.raises(Exception):
+        repo.config_reader().get_value("core", "hooksPath")
+
+
+def test_a_shell_hook_that_would_unpickle_attacker_bytes_never_runs_at_all(
+    repo: git.Repo, tmp_path: Path
+) -> None:
+    """Not a git_ops fix by itself (see core.graph.builder, issue #3) --
+    included here because disable_hooks defends the same class of reach (a
+    write that survives to influence a later git operation) one level up:
+    it doesn't matter *what* a hook at the real path would have done --
+    unpickle a payload, exfiltrate data, anything -- if git never executes
+    it in the first place."""
+    marker = tmp_path.parent / f"pickle-marker-{tmp_path.name}"
+    marker.unlink(missing_ok=True)
+    _plant_real_hook(repo, "post-commit", f"#!/bin/sh\ntouch {marker}\n")
+
+    with disable_hooks(repo):
+        Path(repo.working_tree_dir, "g.py").write_text("y = 1\n", encoding="utf-8")
+        commit_all(repo, "commit with a real hook sitting at .git/hooks/post-commit")
+
+    assert not marker.exists()
