@@ -327,3 +327,89 @@ def test_reconcile_survives_a_target_that_no_longer_exists(fake_repo: Path) -> N
 
     assert [j.id for j in worker.reconcile(fake_repo)] == [job_id]
     assert store.get(fake_repo, job_id).state == store.INTERRUPTED
+
+
+# --- resuming an interrupted job (crash recovery's second half) ---
+
+
+def _interrupted_job(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> int:
+    """A job left exactly as a killed worker leaves one.
+
+    Assembled from the same pieces `run_job` uses — claim, run, record progress
+    — but stopping short of a verdict, because that is the distinction: an
+    interrupted job never reached one. Going through `run_job` instead would
+    land it in `failed`, which is a run the engine completed and judged, and
+    has nothing to resume.
+    """
+    from core.orchestrator import supervisor
+
+    _patch_provider(monkeypatch, _multi_stage_run(fail_agents=frozenset({"tests"})))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    job_id = _queue(fake_repo, fake_repo)
+    store.claim(fake_repo, job_id, worker_pid=os.getpid())
+    supervisor.run(
+        fake_repo,
+        fake_repo,
+        "add oauth2",
+        progress=lambda **fields: store.record_progress(fake_repo, job_id, **fields),
+    )
+    store.transition(fake_repo, job_id, store.INTERRUPTED, note="worker presumed gone")
+    return job_id
+
+
+def test_a_resumed_job_continues_its_own_worktree_instead_of_a_new_one(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The end-to-end property: a job that stops mid-DAG and is resumed lands
+    its remaining stages on the branch it already had, keeping what it merged
+    before the crash."""
+    job_id = _interrupted_job(monkeypatch, fake_repo)
+
+    interrupted = store.get(fake_repo, job_id)
+    assert interrupted.branch and Path(interrupted.integration_root).exists()
+
+    called: list[str] = []
+
+    def fake_run(task):
+        called.append(task.agent)
+        return _multi_stage_run()(task)
+
+    _patch_provider(monkeypatch, fake_run)
+    store.resume(fake_repo, job_id)
+
+    assert worker.run_job(fake_repo, job_id) == store.SUCCEEDED
+
+    finished = store.get(fake_repo, job_id)
+    assert finished.branch == interrupted.branch  # same deliverable, continued
+    assert "architect" not in called  # already merged, not paid for twice
+    assert "tests" in called
+
+
+def test_a_job_with_no_worktree_yet_resumes_by_starting_over(fake_repo: Path) -> None:
+    """Interrupted before it created anything — there is nothing to continue,
+    and saying so beats refusing to run at all."""
+    job_id = _queue(fake_repo, fake_repo)
+
+    assert worker._resume_state(store.get(fake_repo, job_id)) is None
+
+
+def test_a_job_whose_worktree_is_gone_resumes_by_starting_over(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    job_id = _interrupted_job(monkeypatch, fake_repo)
+
+    job = store.get(fake_repo, job_id)
+    git_ops.remove_worktree(git.Repo(fake_repo), Path(job.integration_root))
+
+    assert worker._resume_state(store.get(fake_repo, job_id)) is None
+
+
+def test_a_job_that_merged_stages_offers_them_back(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    job_id = _interrupted_job(monkeypatch, fake_repo)
+
+    resume = worker._resume_state(store.get(fake_repo, job_id))
+
+    assert resume is not None
+    assert resume.branch == store.get(fake_repo, job_id).branch

@@ -530,6 +530,69 @@ def status(job_id: int = typer.Argument(..., help="Job to describe.")) -> None:
             f"[dim]Its worktree is still on disk — inspect it at {job.integration_root}[/dim]"
         )
 
+    if job.state == store.INTERRUPTED:
+        done = _completed_stages(job)
+        kept = f"keeping {', '.join(done)}" if done else "nothing merged yet, so from the start"
+        console.print(
+            f"Resume it with [bold]ai-platform resume {job.id}[/bold] — {kept}."
+        )
+
+
+@app.command()
+def resume(
+    job_id: int = typer.Argument(..., help="Interrupted job to pick back up."),
+    detach: bool = typer.Option(
+        True,
+        "--detach/--no-detach",
+        help="Start a worker immediately. --no-detach only re-queues it, "
+        "for a separate `ai-platform work` to pick up.",
+    ),
+) -> None:
+    """Continues an interrupted run instead of starting it over.
+
+    A worker that dies leaves its branch, its integration worktree and every
+    stage it merged intact — this puts the same job back in the queue so a new
+    worker carries on from there. Stages already on the branch are not run
+    again; verification and review are, since the tree they judged has moved.
+    """
+    from core.jobs import store, worker
+
+    try:
+        job = store.get(ENGINE_ROOT, job_id)
+        store.resume(ENGINE_ROOT, job_id)
+    except store.JobError as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Job {job_id}[/bold] re-queued — {job.request}")
+    done = _completed_stages(job)
+    if done:
+        console.print(f"Skipping {len(done)} stage(s) already merged: {', '.join(done)}")
+    else:
+        console.print(
+            "[dim]No merged stage to keep — this will run the workflow from the start.[/dim]"
+        )
+
+    if detach:
+        pid = worker.spawn_detached(ENGINE_ROOT, job_id)
+        console.print(f"Worker started (pid {pid}).")
+    console.print(f"Follow it with: [bold]ai-platform status {job_id}[/bold]")
+
+
+def _completed_stages(job) -> list[str]:
+    """Stage ids an interrupted job has already merged onto its branch.
+
+    Empty whenever there is nothing recoverable — no worktree, no checkpoint,
+    or one this engine version cannot read — which is exactly when a resume
+    will start over, so the caller can say so before spending anything.
+    """
+    from core.orchestrator import checkpoint
+
+    if not job.integration_root:
+        return []
+    state = checkpoint.load(Path(job.integration_root))
+    return sorted(state.completed_ids) if state else []
+
 
 @app.command()
 def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:

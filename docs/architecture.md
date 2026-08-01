@@ -91,6 +91,9 @@ target root/
     vector/               semantic index
     graph.json            dependency graph cache
   external worktrees      integration, stage, and validation checkouts
+                          the integration one carries the run's stage
+                          checkpoint in its own git dir (core/orchestrator/
+                          checkpoint.py), so `resume` knows what already merged
 ```
 
 Some target-local artifacts mean the original checkout is not perfectly read-only. See [Known limitations](known-limitations.md).

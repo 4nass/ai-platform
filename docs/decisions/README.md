@@ -14,6 +14,7 @@ ADRs preserve durable technical decisions, their context, and trade-offs. Compon
 | [ADR-006](ADR-006-openclaw-as-gateway.md) | OpenClaw as interaction gateway | Proposed |
 | [ADR-007](ADR-007-preview-environments.md) | Immutable per-run preview environments | Proposed |
 | [ADR-008](ADR-008-platform-config-and-presets.md) | Two-tier configuration — platform.yaml plus internal presets | Accepted |
+| [ADR-009](ADR-009-resumable-runs-and-git-owned-checkpoints.md) | Resumable runs, checkpointed in git rather than in the queue | Accepted |
 
 The older CLI dry-run decision remains in [memory/adr/ADR-001](../../memory/adr/ADR-001-cli-dry-run-flag.md). It predates this documentation structure and is retained for history.
 

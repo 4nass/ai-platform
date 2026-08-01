@@ -59,13 +59,16 @@ Delivered:
 - a background heartbeat thread and stale-worker reconciliation, run on every read path (`jobs`, `status`, `work`) rather than requiring an operator to trigger it;
 - an append-only `job_events` table recording every transition, which is what answers "why is this interrupted" once the process that interrupted it is gone;
 - cancellation for jobs that have not started executing (a `running` job cannot yet be stopped mid-run — that is [#29](https://github.com/4nass/ai-platform/issues/29));
+- resumption of an interrupted job onto its own branch, keeping every stage it merged (`interrupted` is the one terminal state that can be left, and only to `queued`, and only via `resume`);
 - progress fields for run id, base ref/sha, branch, integration worktree, stage, and attempt, written as the run reaches them via a `progress` callback into `supervisor.run`;
 - a job whose target repository is locked by another run returns to `queued` rather than failing — one mutating run per repo is a scheduling conflict, not a defect in the job;
 - terminal state and full event history queryable after a process restart.
 
-Interrupted, not resumed: a job whose worker dies is reconciled to `interrupted`, keeping everything above so its already-committed work is inspectable, but the remaining DAG stages are not retried automatically — that needs per-stage checkpointing that does not exist yet.
+Interrupted, then resumable: a job whose worker dies is reconciled to `interrupted`, keeping everything above, and `ai-platform resume <id>` puts the same job back in the queue to continue on its own branch. `core/orchestrator/checkpoint.py` records each stage as it merges — in the integration worktree's own git directory, where `git add -A` cannot sweep it onto the branch and where it dies with the worktree a successful run removes. A resumed run adopts that worktree, restores the base commit, complexity and pruned task set, and skips what is already merged; verification and review are re-run, since they are one provider call each against a tree that has moved. The checkpoint is written *after* a merge, never before, so it can only under-claim: a crash in that gap costs one repeated stage, where the reverse would silently drop work off the branch.
 
-Verifying this against a real SIGKILL'd worker surfaced a genuine defect, since fixed: `disable_hooks` restores the target's `core.hooksPath` in a `finally`, which does not run on a hard kill, leaving the user's own git hooks silently disabled indefinitely. The previous value is now saved in the repo's own config before the swap, and reconciliation repairs it.
+Resuming is never automatic. A worker that re-queued crashed jobs by itself would retry, in a loop, exactly the runs most likely to kill the next worker too.
+
+Verifying this against a real SIGKILL'd worker surfaced a genuine defect, since fixed: `disable_hooks` restores the target's `core.hooksPath` in a `finally`, which does not run on a hard kill, leaving the user's own git hooks silently disabled indefinitely. The previous value is now saved in the repo's own config before the swap, reconciliation repairs it, and — because reconciliation only runs on the jobs path, and because reading a leaked value as "what the user had" made the next clean run restore the *neutralization* and drop the saved key — `disable_hooks` also repairs one on entry. Without that second half the leak was permanent and unrepairable after one further run, which was measured.
 
 ## Retention and privacy
 

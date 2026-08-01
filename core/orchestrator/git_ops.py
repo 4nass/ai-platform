@@ -266,7 +266,31 @@ def disable_hooks(repo: git.Repo):
     disabling the user's own hooks in their repository. Measured on a real
     SIGKILL'd run before this was added.
     """
+    # Repair what a previous run left behind *before* reading the current
+    # value, rather than trusting reconciliation to have done it. Two reasons,
+    # both measured on a real crashed-then-clean pair:
+    #
+    # - Reconciliation only runs on the jobs path (core.jobs.worker). A
+    #   synchronous `ai-platform run` that gets killed has nothing that ever
+    #   learns it died, so its leak had no repair path at all.
+    # - Worse, the leak compounded. `core.hooksPath` after a crash *is* this
+    #   engine's own neutral directory, so reading it as "previous" made the
+    #   next run save the neutralization as the value to restore — and a clean
+    #   exit then put it back and dropped the saved key, leaving the repo
+    #   pointing at a directory that no longer exists with nothing left to
+    #   repair it from. A recoverable leak became permanent damage, and the
+    #   run that did it was working perfectly.
+    restore_hooks(repo)
     previous = _configured_hooks_path(repo)
+    if previous is not None and _is_engine_owned(previous):
+        # Still ours even after the repair: this repo was damaged by a run
+        # from before the above existed, and the value the user actually had
+        # is gone. Unset is the honest answer — it is what git assumes by
+        # default — and leaving the stale path in place would keep their hooks
+        # disabled forever.
+        shutil.rmtree(previous, ignore_errors=True)
+        previous = None
+
     neutral_dir = Path(tempfile.mkdtemp(prefix=HOOKS_DISABLED_PREFIX))
     with repo.config_writer() as writer:
         writer.set_value(SAVED_HOOKS_SECTION, SAVED_HOOKS_OPTION, previous or UNSET_SENTINEL)
@@ -292,6 +316,15 @@ def _configured_hooks_path(repo: git.Repo) -> str | None:
         return None
 
 
+def _is_engine_owned(hooks_path: str) -> bool:
+    """Whether a `core.hooksPath` is one of this engine's neutral directories.
+
+    Recognised by name rather than by remembering which one this process
+    created: the process that created it is gone in every case that matters.
+    """
+    return Path(hooks_path).name.startswith(HOOKS_DISABLED_PREFIX)
+
+
 def restore_hooks(repo: git.Repo) -> bool:
     """Undoes `disable_hooks`, whether or not the run that called it survived.
 
@@ -307,9 +340,14 @@ def restore_hooks(repo: git.Repo) -> bool:
     saved = _saved_hooks_path(repo)
     if saved is None:
         return False
+    if saved != UNSET_SENTINEL and _is_engine_owned(saved):
+        # A leak that a pre-fix run recorded as the value to put back. Doing
+        # so would reinstate the neutralization; nothing here knows what the
+        # user actually had, so unset is the only honest restore.
+        saved = UNSET_SENTINEL
 
     current = _configured_hooks_path(repo)
-    engine_owned = current is not None and Path(current).name.startswith(HOOKS_DISABLED_PREFIX)
+    engine_owned = current is not None and _is_engine_owned(current)
 
     with repo.config_writer() as writer:
         if engine_owned:
@@ -370,6 +408,30 @@ def create_worktree(repo: git.Repo, base_branch: str, task_id: str) -> tuple[Pat
     worktree_path.rmdir()  # `git worktree add` needs to create this path itself
     repo.git.worktree("add", str(worktree_path), "-b", task_branch, base_branch)
     return worktree_path, task_branch
+
+
+def stage_worktrees(repo: git.Repo, base_branch: str) -> list[tuple[Path, str]]:
+    """Task worktrees still registered under a run's branch namespace.
+
+    What a killed run leaves behind: a stage that was mid-flight never got to
+    commit, so its worktree is neither merged nor removed, and `worktree prune`
+    will not reclaim it — the directory is still there, which is precisely why
+    prune leaves it alone. A resumed run re-runs that stage in a fresh
+    worktree, so this exists to *name* the old one rather than to delete it:
+    the checkout may hold uncommitted agent work, and guessing that it doesn't
+    is not this function's call to make.
+    """
+    prefix = base_branch.replace("engine/", "engine-task/", 1) + "-"
+    found: list[tuple[Path, str]] = []
+    path: Path | None = None
+    for line in repo.git.worktree("list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree ") :])
+        elif line.startswith("branch ") and path is not None:
+            name = line[len("branch refs/heads/") :]
+            if name.startswith(prefix):
+                found.append((path, name))
+    return found
 
 
 def merge_worktree(repo: git.Repo, task_branch: str) -> bool:

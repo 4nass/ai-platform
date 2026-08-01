@@ -31,8 +31,9 @@ This page records gaps that affect design or operations. Issue priority remains 
 - **Base race:** worktree creation must consistently use the base SHA captured at admission, not a later moving HEAD.
 - **Target writes:** context index and graph storage under `.ai-platform/` can write to the original target checkout.
 - **Lock scope:** `flock` serializes runs only on the same machine.
-- **Git hooks:** repository-wide `core.hooksPath` changes can affect a concurrent user commit.
-- **Crash finalization, partial:** a job worker that dies is reconciled to `interrupted` (heartbeat staleness, `core/jobs/`), and the crash-induced `core.hooksPath` leak found while verifying that path is repaired on the next reconciliation. Still open: mid-DAG resumption needs per-stage checkpointing that does not exist, so an interrupted run's remaining stages are not retried automatically.
+- **Git hooks:** repository-wide `core.hooksPath` changes can affect a concurrent user commit. A crashed run's leak no longer survives — `disable_hooks` repairs one on entry, so the synchronous `run` path is covered too and the leak cannot compound — but a per-command hook policy would remove the shared-config window entirely.
+- **Crash recovery, resumable but not automatic:** a job worker that dies is reconciled to `interrupted` and `ai-platform resume <id>` continues it, skipping the stages already merged (`core/orchestrator/checkpoint.py`). Resuming is always a deliberate act: nothing re-queues a crashed job by itself, since a worker that did would retry, in a loop, exactly the runs most likely to kill the next worker too. A stage that was mid-flight when the worker died leaves a task worktree that is reported on resume but never deleted — it may hold uncommitted agent work.
+- **Interrupted stage granularity:** the checkpoint records merged stages, so a crash costs at most the stage in flight. Finer-grained resumption (mid-stage, or restoring the verification/review verdict) is deliberately not attempted — those are one provider call each against a tree that has since moved.
 - **Validation parsing:** malformed `test_command` should fail clearly rather than become an apparent absence.
 - **Dry-run accounting:** decomposition may spend provider quota without making that obvious.
 - **Model fidelity:** effective model reporting depends on what provider CLIs expose.

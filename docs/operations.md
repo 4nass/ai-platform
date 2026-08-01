@@ -83,6 +83,16 @@ Quota is a local estimate from recorded tokens versus declared rolling-window al
 
 `submit` persists the request and starts a detached worker; `status <id>` and `jobs` are readable from any process, including after the submitting terminal is closed. A job whose worker dies is reconciled to `interrupted` on the next `jobs`/`status`/`work` call, keeping its branch, base revision, and integration-worktree path. `work [--job ID]` runs one job or drains the whole queue in the foreground — the entry point a managed service unit would call once [#40](https://github.com/4nass/ai-platform/issues/40) exists.
 
+`resume <id>` continues an interrupted job rather than starting it over:
+
+```bash
+uv run ai-platform resume 7
+```
+
+It re-queues the same job — same request, same target, same branch — and starts a worker. Stages already merged onto its branch are not run again; `status` and `resume` both say which those are before anything is spent. Verification and review are re-run, since the tree they judged has changed. Only `interrupted` jobs qualify: a `failed` one ran to a verdict, and what that needs is a new request describing the fix.
+
+A stage that was mid-flight when the worker died leaves a `engine-task/...` worktree behind. Resume names it rather than deleting it — it may hold uncommitted agent work — so inspect it and remove it with `git worktree remove` when you're done.
+
 ## Troubleshooting
 
 ### A provider cannot start
@@ -107,7 +117,7 @@ Failure, conflict, interruption, or cleanup error may intentionally retain it. C
 
 ### A run appears stuck
 
-For the synchronous path, inspect the provider subprocess and terminal output. For the jobs path, run `ai-platform status <id>` — reconciliation runs on that read and marks an abandoned run `interrupted` once its heartbeat is stale (default 180s with no beat), rather than leaving the row saying `running` forever.
+For the synchronous path, inspect the provider subprocess and terminal output. For the jobs path, run `ai-platform status <id>` — reconciliation runs on that read and marks an abandoned run `interrupted` once its heartbeat is stale (default 180s with no beat), rather than leaving the row saying `running` forever. From there, `ai-platform resume <id>` continues it.
 
 ### WSL-specific problems
 

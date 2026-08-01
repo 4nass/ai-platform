@@ -10,7 +10,7 @@ Its long-term role is the engineering platform behind a personal gateway reachab
 
 ### Current product
 
-The current product is a command-line engine that runs against a local Git repository. It supports synchronous *and* durable asynchronous execution (`run` vs. `submit`/`status`/`jobs`/`cancel`/`work`, `core/jobs/`), Claude Code and Codex CLI providers, context retrieval, worktree isolation, target tests, review/correction, and telemetry. The job queue survives a disconnect or restart and reconciles an abandoned run to `interrupted`; it has no authentication, project allowlist, or hard budget in front of it yet, so it is not a safe surface for an untrusted remote caller.
+The current product is a command-line engine that runs against a local Git repository. It supports synchronous *and* durable asynchronous execution (`run` vs. `submit`/`status`/`jobs`/`cancel`/`work`, `core/jobs/`), Claude Code and Codex CLI providers, context retrieval, worktree isolation, target tests, review/correction, and telemetry. The job queue survives a disconnect or restart, reconciles an abandoned run to `interrupted`, and can resume one onto its own branch without re-running what it already merged; it has no authentication, project allowlist, or hard budget in front of it yet, so it is not a safe surface for an untrusted remote caller.
 
 ### Target product
 

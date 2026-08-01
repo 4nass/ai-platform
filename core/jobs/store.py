@@ -61,7 +61,13 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     SUCCEEDED: frozenset(),
     FAILED: frozenset(),
     CANCELLED: frozenset(),
-    INTERRUPTED: frozenset(),
+    # The one terminal state that can be left, and only deliberately (see
+    # `resume`). An interrupted job is finished in the sense that nothing is
+    # working on it, but unlike the other three its work is still on a branch
+    # and still completable, so refusing to reopen it would mean throwing away
+    # every stage it merged. Nothing reopens it on its own: reconciliation only
+    # ever moves jobs *into* this state.
+    INTERRUPTED: frozenset({QUEUED}),
 }
 
 STALE_AFTER_SECONDS = 180.0
@@ -329,6 +335,11 @@ def transition(
             # stale the moment it started.
             assignments += ["started_at = COALESCE(started_at, ?)", "heartbeat_at = ?"]
             params += [now, now]
+        if to_state == QUEUED:
+            # A job back in the queue has not finished and has no worker.
+            # Leaving either behind would show a resumable job as one that
+            # already ended, owned by a pid that is gone.
+            assignments += ["finished_at = NULL", "worker_pid = NULL"]
         if to_state in TERMINAL_STATES:
             assignments += ["finished_at = ?", "heartbeat_at = NULL"]
             params.append(now)
@@ -433,12 +444,12 @@ def reconcile(engine_root: Path, *, stale_after_seconds: float = STALE_AFTER_SEC
     them and get reused, whereas a stale heartbeat means the same thing
     everywhere.
 
-    Interrupted, not failed, and not resumed. The distinction is the point —
-    the run's branch and integration worktree still exist, and this run
-    reached whatever stage the row records, so its work is inspectable rather
-    than lost. Resuming mid-DAG without re-running completed stages needs
-    per-stage checkpointing that doesn't exist yet; marking is what can be
-    done honestly today.
+    Interrupted, not failed: the run's branch and integration worktree still
+    exist, and its merged stages are still on that branch, so its work is
+    recoverable rather than lost. Marking is still all this does — picking the
+    run back up is `resume`, which is deliberate and never automatic. A worker
+    that re-queued crashed jobs by itself would retry, in a loop, exactly the
+    runs most likely to crash the next worker too.
     """
     changed: list[Job] = []
     for job in recent(engine_root, limit=1000, state=RUNNING):
@@ -452,6 +463,32 @@ def reconcile(engine_root: Path, *, stale_after_seconds: float = STALE_AFTER_SEC
         )
         changed.append(get(engine_root, job.id))
     return changed
+
+
+def resume(engine_root: Path, job_id: int) -> bool:
+    """Puts an interrupted job back in the queue, keeping its identity.
+
+    The same job rather than a new one: its request, its target, its branch and
+    the integration worktree holding its merged stages are all still the ones
+    being worked on, and a fresh submission would abandon every part of that
+    while claiming to be a retry. `ai-platform status` then shows one job whose
+    history reads interrupted -> queued -> running, which is what actually
+    happened.
+
+    Only `interrupted`. A `failed` job is one the engine ran to completion and
+    judged; re-queueing it would re-run a workflow that already reached a
+    verdict. What it needs is a new request describing the fix, not another
+    pass at the same one.
+    """
+    job = get(engine_root, job_id)
+    if job.state != INTERRUPTED:
+        raise JobError(
+            f"Job {job_id} is {job.state}, not {INTERRUPTED} — only a job whose worker "
+            "died mid-run has work left to pick up. Submit a new request instead."
+        )
+    return transition(
+        engine_root, job_id, QUEUED, note=f"resumed from {job.branch or 'no branch'}"
+    )
 
 
 def cancel(engine_root: Path, job_id: int) -> bool:

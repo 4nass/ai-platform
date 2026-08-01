@@ -546,3 +546,126 @@ def test_restore_hooks_is_idempotent(repo: git.Repo) -> None:
         pass
 
     assert restore_hooks(repo) is False
+
+
+def _crash_mid_run(repo: git.Repo) -> None:
+    """A run that neutralized hooks and never reached its `finally`."""
+    disable_hooks(repo).__enter__()
+
+
+def _hooks_path(repo: git.Repo) -> str | None:
+    try:
+        return str(repo.config_reader().get_value("core", "hooksPath"))
+    except Exception:
+        return None
+
+
+def test_a_crashed_run_does_not_poison_the_next_one(repo: git.Repo) -> None:
+    """The leak used to *compound*, which is what made it permanent.
+
+    After a crash `core.hooksPath` is the engine's own neutral directory, so
+    the next run read that as "what the user had", saved it, restored it on a
+    perfectly clean exit and dropped the saved key — leaving the repo pointing
+    at a deleted directory with nothing left to repair it from. Measured on a
+    real crashed-then-clean pair before `disable_hooks` repaired on entry.
+    """
+    custom = str(Path(repo.working_tree_dir, "my-hooks"))
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", custom)
+
+    _crash_mid_run(repo)
+    with disable_hooks(repo):  # an ordinary, healthy later run
+        pass
+
+    assert _hooks_path(repo) == custom
+
+
+def test_repeated_crashes_still_restore_the_users_own_path(repo: git.Repo) -> None:
+    custom = str(Path(repo.working_tree_dir, "my-hooks"))
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", custom)
+
+    _crash_mid_run(repo)
+    _crash_mid_run(repo)
+    with disable_hooks(repo):
+        pass
+
+    assert _hooks_path(repo) == custom
+
+
+def test_a_crash_with_nothing_configured_before_ends_unset(repo: git.Repo) -> None:
+    _crash_mid_run(repo)
+    with disable_hooks(repo):
+        pass
+
+    assert _hooks_path(repo) is None
+
+
+def test_a_repo_already_damaged_by_the_old_behaviour_is_healed(repo: git.Repo) -> None:
+    """`core.hooksPath` left pointing at an engine directory with no saved
+    value — the end state of the bug above. Nothing can say what the user
+    had, so unset is the only honest answer, and it is what git assumes by
+    default. Leaving the stale path would keep their hooks disabled forever.
+    """
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", "/tmp/engine-hooks-disabled-gone")
+
+    with disable_hooks(repo):
+        pass
+
+    assert _hooks_path(repo) is None
+
+
+def test_a_saved_engine_path_is_never_restored_over_the_user(repo: git.Repo) -> None:
+    """Two crashes under the old code left an engine directory recorded as the
+    value to put back. Restoring it would reinstate the neutralization."""
+    with repo.config_writer() as writer:
+        writer.set_value("ai-platform", "savedHooksPath", "/tmp/engine-hooks-disabled-older")
+        writer.set_value("core", "hooksPath", "/tmp/engine-hooks-disabled-newer")
+
+    assert restore_hooks(repo) is True
+
+    assert _hooks_path(repo) is None
+
+
+def test_a_deliberate_setting_made_after_a_crash_survives_the_next_run(repo: git.Repo) -> None:
+    _crash_mid_run(repo)
+    deliberate = str(Path(repo.working_tree_dir, "chosen-later"))
+    with repo.config_writer() as writer:
+        writer.set_value("core", "hooksPath", deliberate)
+
+    with disable_hooks(repo):
+        pass
+
+    assert _hooks_path(repo) == deliberate
+
+
+def test_stage_worktrees_finds_what_an_interrupted_run_left(repo: git.Repo) -> None:
+    """`worktree prune` will not reclaim these — the directory still exists,
+    which is exactly why prune leaves it alone."""
+    from core.orchestrator.git_ops import create_integration_worktree, create_worktree, stage_worktrees
+
+    integration, branch = create_integration_worktree(repo, "add oauth")
+    stage_path, stage_branch = create_worktree(git.Repo(integration), branch, "backend")
+
+    found = stage_worktrees(repo, branch)
+
+    assert found == [(stage_path, stage_branch)]
+
+
+def test_stage_worktrees_ignores_other_runs(repo: git.Repo) -> None:
+    from core.orchestrator.git_ops import create_integration_worktree, create_worktree, stage_worktrees
+
+    mine, my_branch = create_integration_worktree(repo, "add oauth")
+    theirs, their_branch = create_integration_worktree(repo, "something else")
+    create_worktree(git.Repo(theirs), their_branch, "backend")
+
+    assert stage_worktrees(repo, my_branch) == []
+
+
+def test_stage_worktrees_is_empty_for_a_run_that_cleaned_up(repo: git.Repo) -> None:
+    from core.orchestrator.git_ops import create_integration_worktree, stage_worktrees
+
+    _, branch = create_integration_worktree(repo, "add oauth")
+
+    assert stage_worktrees(repo, branch) == []

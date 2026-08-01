@@ -117,6 +117,7 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
                 session_id=job.envelope.get("session_id"),
                 dirty_policy=job.envelope.get("dirty_policy", supervisor.DIRTY_HEAD),
                 progress=progress,
+                resume=_resume_state(job),
             )
     except BaseException as exc:
         if _is_repo_busy(exc):
@@ -145,6 +146,34 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
     )
     _record_outcome(engine_root, job_id, report)
     return state
+
+
+def _resume_state(job: store.Job):
+    """The interrupted run this job should continue, if there is one.
+
+    Read off the row and the disk rather than carried as a flag: a job only has
+    an `integration_root` because an earlier attempt created one, so a queued
+    job that already owns a worktree with a readable checkpoint *is* a resumed
+    one by construction. A flag would be a second source of truth, and the one
+    that can disagree with the disk is the one that decides whether real merged
+    work gets abandoned.
+
+    Answering None means "start over", which is right for every way this can
+    come back empty: a job interrupted before it created a worktree, one whose
+    worktree the user has since deleted, or a checkpoint truncated by the very
+    crash being recovered from.
+    """
+    from core.orchestrator import checkpoint, supervisor
+
+    if not job.integration_root or not job.branch:
+        return None
+    if checkpoint.load(Path(job.integration_root)) is None:
+        return None
+    # The branch comes from the row, not the checkpoint, so the supervisor
+    # cross-checks two independent records before adding to a branch.
+    return supervisor.Resume(
+        branch=job.branch, integration_root=Path(job.integration_root)
+    )
 
 
 def _record_outcome(engine_root, job_id: int, report) -> None:

@@ -42,7 +42,13 @@ uv run ai-platform status 1
 uv run ai-platform jobs
 ```
 
-The job survives a closed terminal, a disconnect or a WSL restart, and `status` answers for it from any process. A run whose worker dies is marked `interrupted` rather than `failed`, keeping its `base_sha`, branch, stage and integration-worktree path — so work already committed stays inspectable instead of orphaned. `ai-platform work` drains the queue in the foreground, which is what a managed service unit would call.
+The job survives a closed terminal, a disconnect or a WSL restart, and `status` answers for it from any process. A run whose worker dies is marked `interrupted` rather than `failed`, keeping its `base_sha`, branch, stage and integration-worktree path — so work already committed stays inspectable instead of orphaned:
+
+```bash
+uv run ai-platform resume 1
+```
+
+`resume` continues that job on its own branch, skipping the stages it already merged rather than paying for them twice; `status` says which those are first. `ai-platform work` drains the queue in the foreground, which is what a managed service unit would call.
 
 Useful read-only commands:
 

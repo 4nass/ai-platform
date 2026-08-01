@@ -26,6 +26,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | Bounded review/correction loop | Delivered | Only eligible validation/review failures |
 | SQLite telemetry and cost estimates | Delivered | Analytical history, not a hard budget |
 | Durable jobs, detached worker, and crash recovery | Delivered | `core/jobs/`; heartbeat + reconciliation mark abandoned runs `interrupted`, not `failed` |
+| Resuming an interrupted run | Delivered | `ai-platform resume <id>`; per-stage checkpoint, merged stages are not re-run |
 | Dirty-tree snapshot mode | Known limitation | Declared policy is not fully implemented |
 | Cross-machine run locking | Known limitation | Current lock is intra-machine only |
 | Truly read-only target checkout | Known limitation | Target-local context artifacts may still be written |

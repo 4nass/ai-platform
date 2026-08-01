@@ -56,6 +56,7 @@ Upstream provider prose is data, not executable control. The platform still need
 - Failed stages cause their dependents to be skipped.
 - Independent stages may continue.
 - Merge conflict retains artifacts and requires attention.
+- A worker killed mid-run keeps every stage it merged; `ai-platform resume` continues from there rather than re-running them.
 - A DAG failure does not enter the generic corrector.
 - Target-test or final-review failure may enter correction.
 - Correction attempts are limited by `max_correction_attempts` (currently 1).

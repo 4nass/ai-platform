@@ -108,9 +108,14 @@ def test_an_illegal_transition_raises_rather_than_being_recorded(engine: Path) -
     assert store.get(engine, job_id).state == store.SUCCEEDED
 
 
-def test_terminal_states_are_absorbing(engine: Path) -> None:
-    for terminal in sorted(store.TERMINAL_STATES):
+def test_terminal_states_are_absorbing_except_interrupted(engine: Path) -> None:
+    """Interrupted is the one finished state with work left to do: its branch
+    and merged stages are still there, so it can be reopened — to `queued` and
+    nowhere else, and only by `resume`, never by a worker on its own."""
+    for terminal in sorted(store.TERMINAL_STATES - {store.INTERRUPTED}):
         assert store.TRANSITIONS[terminal] == frozenset()
+
+    assert store.TRANSITIONS[store.INTERRUPTED] == frozenset({store.QUEUED})
 
 
 def test_an_unknown_state_is_refused(engine: Path) -> None:
@@ -332,3 +337,96 @@ def test_purge_drops_old_terminal_jobs_but_never_active_ones(engine: Path) -> No
 
     assert [j.id for j in store.recent(engine)] == [still_queued]
     assert store.events(engine, old) == []
+
+
+# --- resuming an interrupted job (the other half of crash recovery) ---
+
+
+def _interrupt(engine: Path, **progress) -> int:
+    job_id = _submit(engine)
+    store.transition(engine, job_id, store.RUNNING, **progress)
+    store.transition(engine, job_id, store.INTERRUPTED, note="worker presumed gone")
+    return job_id
+
+
+def test_resume_puts_an_interrupted_job_back_in_the_queue(engine: Path) -> None:
+    job_id = _interrupt(engine, branch="engine/add-oauth2")
+
+    assert store.resume(engine, job_id) is True
+
+    assert store.get(engine, job_id).state == store.QUEUED
+
+
+def test_resume_keeps_the_job_rather_than_starting_a_new_one(engine: Path) -> None:
+    """Its request, its target, its branch and the worktree holding its merged
+    stages are all still the ones being worked on. A fresh submission would
+    abandon every part of that while calling itself a retry."""
+    job_id = _interrupt(engine, branch="engine/add-oauth2", integration_root="/tmp/wt")
+
+    store.resume(engine, job_id)
+
+    job = store.get(engine, job_id)
+    assert job.id == job_id
+    assert job.request == "add oauth2"
+    assert job.branch == "engine/add-oauth2"
+    assert job.integration_root == "/tmp/wt"
+
+
+def test_a_resumed_job_no_longer_claims_to_have_finished(engine: Path) -> None:
+    """Leaving `finished_at` and `worker_pid` behind would show a job that is
+    queued and waiting as one that already ended, owned by a dead pid."""
+    job_id = _submit(engine)
+    store.claim(engine, job_id, worker_pid=4242)
+    store.transition(engine, job_id, store.INTERRUPTED)
+    assert store.get(engine, job_id).finished_at
+
+    store.resume(engine, job_id)
+
+    job = store.get(engine, job_id)
+    assert job.finished_at is None
+    assert job.worker_pid is None
+
+
+def test_resume_refuses_a_job_that_ran_to_a_verdict(engine: Path) -> None:
+    """A failed run reached a conclusion; re-queueing it would re-run a
+    workflow that has already been judged."""
+    job_id = _submit(engine)
+    store.transition(engine, job_id, store.RUNNING)
+    store.transition(engine, job_id, store.FAILED)
+
+    with pytest.raises(store.JobError, match="not interrupted"):
+        store.resume(engine, job_id)
+
+    assert store.get(engine, job_id).state == store.FAILED
+
+
+def test_resume_refuses_a_queued_job(engine: Path) -> None:
+    with pytest.raises(store.JobError, match="not interrupted"):
+        store.resume(engine, _submit(engine))
+
+
+def test_a_resumed_job_keeps_its_whole_history(engine: Path) -> None:
+    job_id = _interrupt(engine, branch="engine/add-oauth2")
+
+    store.resume(engine, job_id)
+    store.claim(engine, job_id, worker_pid=1)
+
+    states = [event["to_state"] for event in store.events(engine, job_id)]
+    assert states == [
+        store.QUEUED,
+        store.RUNNING,
+        store.INTERRUPTED,
+        store.QUEUED,
+        store.RUNNING,
+    ]
+
+
+def test_an_interrupted_job_cannot_be_reopened_into_anything_but_the_queue(
+    engine: Path,
+) -> None:
+    """Nothing reopens it on its own — reconciliation only ever moves jobs
+    *into* interrupted, and `resume` is the single way back out."""
+    job_id = _interrupt(engine)
+
+    with pytest.raises(store.JobError, match="cannot go from interrupted to succeeded"):
+        store.transition(engine, job_id, store.SUCCEEDED)

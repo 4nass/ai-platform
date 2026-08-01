@@ -10,7 +10,7 @@ import git
 import pytest
 
 from core.errors import ConfigError
-from core.orchestrator import git_ops, scheduler, supervisor, test_runner
+from core.orchestrator import checkpoint, git_ops, scheduler, supervisor, test_runner
 from core.telemetry import store as telemetry
 from providers.base import AgentTask, ProviderResult
 
@@ -1456,3 +1456,298 @@ def test_verification_runs_in_a_disposable_worktree(
     assert "engine-verify-" in verify_root.name  # a throwaway, not the integration worktree
     assert not verify_root.exists()  # and it's gone afterwards
     assert report.summary == "done"
+
+
+# --- crash recovery: checkpointing and resume (issue #24's remaining half) ---
+
+
+class _Progress:
+    """Captures the progress fields a job store would persist, so a test can
+    resume from exactly the information a crashed worker would have left."""
+
+    def __init__(self) -> None:
+        self.fields: dict = {}
+        self.roots: list[str] = []
+
+    def __call__(self, **fields) -> None:
+        self.fields.update(fields)
+        if "integration_root" in fields:
+            # Kept as a history, not just the latest: a successful run clears
+            # this field on purpose (the branch is the deliverable, the
+            # directory is gone), and a test still needs to know where it was.
+            self.roots.append(fields["integration_root"])
+
+    @property
+    def integration_root(self) -> Path:
+        return Path(self.roots[0])
+
+    @property
+    def branch(self) -> str:
+        return self.fields["branch"]
+
+
+def _interrupted_run(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> _Progress:
+    """A run that lands three stages and then stops, leaving its worktree.
+
+    `tests` failing is how a run is made to stop mid-DAG in-process — a real
+    interruption is a killed process, which pytest cannot do to itself. What
+    matters for resume is identical either way: three stages merged onto the
+    branch, a checkpoint naming them, and a worktree still on disk.
+    """
+    _patch_provider(monkeypatch, _multi_stage_run(fail_agents=frozenset({"tests"})))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    progress = _Progress()
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", progress=progress)
+
+    assert report.summary == "needs attention"
+    assert progress.integration_root.exists()
+    return progress
+
+
+def test_a_run_checkpoints_each_stage_as_it_merges(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The record has to be on disk *while* the run is in flight — that is the
+    whole point. Asserting it only at the end would pass even if it were
+    written once, at the end, which is exactly when a crash has already made
+    it useless."""
+    progress = _Progress()
+    seen: dict[str, set[str]] = {}
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        state = checkpoint.load(progress.integration_root)
+        seen[task.agent] = state.completed_ids if state else set()
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", progress=progress)
+
+    assert report.summary == "done"
+    # architecture saw an empty checkpoint; everything after it saw architecture
+    assert seen["architect"] == set()
+    assert "architecture" in seen["tests"]
+    assert {"architecture", "backend", "frontend"} <= seen["security"]
+
+
+def test_resuming_does_not_re_run_stages_already_merged(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    progress = _interrupted_run(monkeypatch, fake_repo)
+    called: list[str] = []
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        called.append(task.agent)
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(
+        fake_repo,
+        fake_repo,
+        "add oauth2",
+        resume=supervisor.Resume(
+            branch=progress.branch, integration_root=progress.integration_root
+        ),
+    )
+
+    assert report.summary == "done"
+    # the three stages already on the branch cost nothing a second time
+    assert "architect" not in called
+    assert "backend" not in called
+    assert "frontend" not in called
+    # and the ones that never completed do run
+    assert {"tests", "security", "documentation"} <= set(called)
+
+
+def test_a_resumed_run_still_reports_the_stages_it_skipped(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A report listing only the stages this attempt ran would describe half a
+    run — and `files_changed` is what the caller is handed as the deliverable."""
+    progress = _interrupted_run(monkeypatch, fake_repo)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(
+        fake_repo,
+        fake_repo,
+        "add oauth2",
+        resume=supervisor.Resume(
+            branch=progress.branch, integration_root=progress.integration_root
+        ),
+    )
+
+    by_id = {s.id: s for s in report.stages}
+    assert set(by_id) == {"architecture", "backend", "frontend", "tests", "security", "documentation"}
+    assert all(s.status == "done" for s in report.stages)
+    assert by_id["backend"].files_changed == ["backend.py"]
+    assert "backend.py" in report.files_changed
+
+
+def test_resuming_continues_the_same_branch_rather_than_starting_another(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    progress = _interrupted_run(monkeypatch, fake_repo)
+    branches_before = {head.name for head in git.Repo(fake_repo).heads}
+
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(
+        fake_repo,
+        fake_repo,
+        "add oauth2",
+        resume=supervisor.Resume(
+            branch=progress.branch, integration_root=progress.integration_root
+        ),
+    )
+
+    assert report.branch == progress.branch
+    new_engine_branches = {
+        name
+        for name in {head.name for head in git.Repo(fake_repo).heads} - branches_before
+        if name.startswith("engine/")
+    }
+    assert not new_engine_branches
+
+
+def test_resuming_reviews_against_the_original_base_commit(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The target's own HEAD can move between the crash and the resume. Taking
+    `base_sha` from there would diff the review against a commit this run never
+    branched from, describing changes it never made."""
+    progress = _interrupted_run(monkeypatch, fake_repo)
+    original_base = progress.fields["base_sha"]
+
+    target = git.Repo(fake_repo)
+    (fake_repo / "unrelated.py").write_text("z = 3\n", encoding="utf-8")
+    target.index.add(["unrelated.py"])
+    target.index.commit("someone else's work, after the crash")
+    assert target.head.commit.hexsha != original_base
+
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    resumed = _Progress()
+
+    supervisor.run(
+        fake_repo,
+        fake_repo,
+        "add oauth2",
+        progress=resumed,
+        resume=supervisor.Resume(
+            branch=progress.branch, integration_root=progress.integration_root
+        ),
+    )
+
+    assert resumed.fields["base_sha"] == original_base
+
+
+def test_resuming_a_worktree_with_no_checkpoint_is_refused(fake_repo: Path) -> None:
+    with pytest.raises(ConfigError, match="Nothing to resume"):
+        supervisor.run(
+            fake_repo,
+            fake_repo,
+            "add oauth2",
+            resume=supervisor.Resume(
+                branch="engine/add-oauth2", integration_root=fake_repo / "nowhere"
+            ),
+        )
+
+
+def test_resuming_the_wrong_branch_is_refused(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Continuing one run's work on another's branch would merge new stages
+    onto a history they were never written against."""
+    progress = _interrupted_run(monkeypatch, fake_repo)
+
+    with pytest.raises(ConfigError, match="refusing to continue"):
+        supervisor.run(
+            fake_repo,
+            fake_repo,
+            "add oauth2",
+            resume=supervisor.Resume(
+                branch="engine/something-else", integration_root=progress.integration_root
+            ),
+        )
+
+
+def test_a_dry_run_cannot_resume(monkeypatch: pytest.MonkeyPatch, fake_repo: Path) -> None:
+    """A dry run discards its worktree at the end — which on a resume is the
+    worktree holding the interrupted run's work."""
+    progress = _interrupted_run(monkeypatch, fake_repo)
+
+    with pytest.raises(ConfigError, match="dry run cannot resume"):
+        supervisor.run(
+            fake_repo,
+            fake_repo,
+            "add oauth2",
+            dry_run=True,
+            resume=supervisor.Resume(
+                branch=progress.branch, integration_root=progress.integration_root
+            ),
+        )
+
+    assert progress.integration_root.exists()
+
+
+def test_a_successful_run_leaves_nothing_to_resume(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    progress = _Progress()
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", progress=progress)
+
+    assert report.summary == "done"
+    # the worktree is removed on success, and the checkpoint lives inside it,
+    # so nothing can offer to resume a run that already finished
+    assert not progress.integration_root.exists()
+    assert checkpoint.load(progress.integration_root) is None
+
+
+def test_a_resumed_stage_is_still_told_what_its_upstreams_produced(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Stages only communicate through the description built from their
+    upstreams (scheduler.build_stage_description). Skipping a stage without
+    being able to describe it would hand the next agent a prompt missing
+    exactly the context that stage exists to provide — which is why the
+    checkpoint stores summaries and file lists, not just ids."""
+    progress = _interrupted_run(monkeypatch, fake_repo)
+    descriptions: dict[str, str] = {}
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        descriptions[task.agent] = task.description
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(
+        fake_repo,
+        fake_repo,
+        "add oauth2",
+        resume=supervisor.Resume(
+            branch=progress.branch, integration_root=progress.integration_root
+        ),
+    )
+
+    tests_prompt = descriptions["tests"]
+    assert "backend done" in tests_prompt  # the skipped stage's own summary
+    assert "backend.py" in tests_prompt  # and what it changed

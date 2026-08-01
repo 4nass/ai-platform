@@ -424,3 +424,91 @@ def test_cli_work_on_an_empty_queue_says_so(engine) -> None:
 
     assert result.exit_code == 0
     assert "Nothing queued" in result.stdout
+
+
+def _interrupted(engine, project) -> int:
+    from core.jobs import store
+
+    job_id = store.submit(engine, project=str(project), request="add oauth2")
+    store.claim(engine, job_id, worker_pid=4242)
+    store.record_progress(engine, job_id, branch="engine/add-oauth2")
+    store.transition(engine, job_id, store.INTERRUPTED, note="worker presumed gone")
+    return job_id
+
+
+def test_cli_resume_requeues_an_interrupted_job(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    from core.jobs import store, worker
+
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 4321)
+    job_id = _interrupted(engine, tmp_path)
+
+    result = runner.invoke(ai_platform.app, ["resume", str(job_id)])
+
+    assert result.exit_code == 0
+    assert store.get(engine, job_id).state == "queued"
+    assert "Worker started" in result.stdout
+
+
+def test_cli_resume_says_when_there_is_nothing_merged_to_keep(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """A job interrupted before it landed a stage will start the workflow over.
+    Saying so first is the difference between an informed resume and a
+    surprise bill."""
+    from core.jobs import worker
+
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 1)
+
+    result = runner.invoke(ai_platform.app, ["resume", str(_interrupted(engine, tmp_path))])
+
+    assert "from the start" in result.stdout
+
+
+def test_cli_resume_lists_the_stages_it_will_skip(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    from core.jobs import store, worker
+    from core.orchestrator import checkpoint
+
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 1)
+    monkeypatch.setattr(
+        checkpoint,
+        "load",
+        lambda _: checkpoint.Checkpoint(
+            base_sha="abc",
+            branch="engine/add-oauth2",
+            request="add oauth2",
+            complexity="complex",
+            task_ids=["architecture", "backend"],
+            stages=[checkpoint.StageRecord(id="architecture", agent="architect")],
+        ),
+    )
+    job_id = _interrupted(engine, tmp_path)
+    store.record_progress(engine, job_id, integration_root="/tmp/engine-run-x")
+
+    result = runner.invoke(ai_platform.app, ["resume", str(job_id)])
+
+    assert "Skipping 1 stage(s) already merged: architecture" in result.stdout
+
+
+def test_cli_resume_refuses_a_job_that_reached_a_verdict(engine, tmp_path) -> None:
+    from core.jobs import store
+
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    store.claim(engine, job_id, worker_pid=1)
+    store.transition(engine, job_id, store.FAILED)
+
+    result = runner.invoke(ai_platform.app, ["resume", str(job_id)])
+
+    assert result.exit_code == 1
+    assert "not interrupted" in result.stdout
+    assert store.get(engine, job_id).state == "failed"
+
+
+def test_cli_status_points_an_interrupted_job_at_resume(engine, tmp_path) -> None:
+    result = runner.invoke(ai_platform.app, ["status", str(_interrupted(engine, tmp_path))])
+
+    assert result.exit_code == 0
+    assert "ai-platform resume" in result.stdout

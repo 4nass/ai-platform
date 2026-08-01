@@ -14,7 +14,8 @@ The suite covers policy and data contracts, provider adapters, context selection
 | Git integration | Checkout isolation, worktrees, contracts, merges, cleanup |
 | Validation | Frozen policy, sandbox command, ignored-write handling |
 | Supervisor | End-to-end run, review, correction, final report |
-| Jobs | State transitions, idempotency, atomic claim, heartbeat thread, reconciliation, crash-induced hook-lock repair, cancellation |
+| Jobs | State transitions, idempotency, atomic claim, heartbeat thread, reconciliation, crash-induced hook-lock repair, cancellation, resume |
+| Crash recovery | Stage checkpointing, resuming onto the original branch/base, hook-path repair across repeated crashes |
 
 ## Standard verification
 
@@ -54,6 +55,9 @@ Automated tests should prove:
 - read-only roles cannot modify files;
 - target tests run from the integrated revision in a disposable checkout;
 - correction is bounded and only used for eligible failures;
+- a stage is recorded as complete only after its work is merged, never before;
+- a resumed run continues the original branch and base commit, and does not re-run merged stages;
+- a crashed run's `core.hooksPath` neutralization is repaired, and never becomes the value a later run restores;
 - cleanup and finalization are idempotent.
 
 ## Routing policy checks

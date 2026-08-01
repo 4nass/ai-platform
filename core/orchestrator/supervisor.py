@@ -23,6 +23,7 @@ from rich.console import Console
 from core.context.manager import ContextManager, SelectedContext
 from core.errors import ConfigError
 from core.orchestrator import (
+    checkpoint,
     contracts,
     correction,
     decomposer,
@@ -62,6 +63,21 @@ silently falling back to `head` — a run recorded as `snapshot` that actually
 behaved like `head` would be a lie in the telemetry."""
 
 DIRTY_POLICIES = (DIRTY_HEAD, DIRTY_REJECT, DIRTY_SNAPSHOT)
+
+
+@dataclass(frozen=True)
+class Resume:
+    """Where an interrupted run left its work, so a new one can pick it up.
+
+    Deliberately just a location: everything else a resume needs — the base
+    commit, the run complexity, the pruned task set, which stages already
+    landed — comes from the checkpoint inside that worktree, which is the only
+    thing that actually witnessed the interrupted run. Passing those as
+    arguments would let a caller assert a state the branch does not support.
+    """
+
+    branch: str
+    integration_root: Path
 
 
 @dataclass
@@ -369,6 +385,42 @@ def _discard_integration_worktree(
         console.print(f"[bold yellow]could not delete branch {branch}[/bold yellow]: {exc}")
 
 
+def _adopt_interrupted_run(resume: Resume) -> checkpoint.Checkpoint:
+    """Validates that an interrupted run's worktree is still what it claims.
+
+    Refuses rather than improvises. Every failure here means the resumed run
+    would be operating on something other than the work it is meant to
+    continue — a worktree someone deleted, a branch switched underneath it, a
+    checkpoint from a different run — and continuing anyway would merge new
+    stages onto the wrong history while reporting the original request's name.
+    """
+    state = checkpoint.load(resume.integration_root)
+    if state is None:
+        raise ConfigError(
+            f"Nothing to resume in {resume.integration_root}: no readable checkpoint. "
+            "Either the run never got far enough to land a stage, or its worktree is "
+            "gone. Submit the request again to start from scratch."
+        )
+    if state.branch != resume.branch:
+        raise ConfigError(
+            f"{resume.integration_root} holds a checkpoint for {state.branch}, not "
+            f"{resume.branch} — refusing to continue one run's work on another's branch."
+        )
+    try:
+        checked_out = git.Repo(resume.integration_root).active_branch.name
+    except Exception as exc:
+        raise ConfigError(
+            f"Cannot resume {resume.branch}: {resume.integration_root} is no longer a "
+            f"usable worktree ({type(exc).__name__}: {exc})."
+        ) from exc
+    if checked_out != state.branch:
+        raise ConfigError(
+            f"{resume.integration_root} now has {checked_out} checked out, not "
+            f"{state.branch}. Restore that branch there, or start the request again."
+        )
+    return state
+
+
 def run(
     engine_root: Path,
     target_root: Path,
@@ -377,6 +429,7 @@ def run(
     session_id: str | None = None,
     dirty_policy: str = DIRTY_HEAD,
     progress: Callable[..., None] | None = None,
+    resume: Resume | None = None,
 ) -> RunReport:
     """`engine_root` is the ai-platform install (config/, prompts/, the
     shared telemetry.sqlite); `target_root` is the repo this run actually
@@ -412,7 +465,20 @@ def run(
     queue exists (see core.jobs), and a caller with no interest in progress
     passes nothing. What it buys is that a run killed halfway leaves a record
     of where its work is, instead of an orphan branch nobody can attribute.
+
+    `resume` continues such a run instead of starting one: the interrupted
+    run's integration worktree is adopted rather than replaced, its base
+    commit, complexity and pruned task set are restored from the checkpoint it
+    left there, and the stages already merged onto its branch are skipped. See
+    core.orchestrator.checkpoint for what is and isn't restored, and why
+    verification and review are deliberately re-run.
     """
+    if resume is not None and dry_run:
+        raise ConfigError(
+            "A dry run cannot resume: it inspects a plan and then discards its worktree, "
+            "which is exactly the worktree holding the interrupted run's work."
+        )
+
     repo = git.Repo(target_root)
     # Progress reporting must never be able to fail a run: it is bookkeeping
     # for an observer, and a queue with a bad row is a smaller problem than a
@@ -441,9 +507,22 @@ def run(
     with git_ops.exclusive_run_lock(repo), git_ops.disable_hooks(repo):
         git_ops.prune_worktrees(repo)
 
-        base_sha = git_ops.current_commit(repo)
-        report_progress(base_ref=git_ops.current_ref(repo), base_sha=base_sha)
         excluded = _apply_dirty_policy(repo, dirty_policy)
+
+        # Checked before anything is created, so a run that is refused leaves
+        # nothing behind — same reason the lock is taken first.
+        run_state = _adopt_interrupted_run(resume) if resume is not None else None
+        if run_state is not None:
+            integration_root, branch = resume.integration_root, run_state.branch
+            # From the checkpoint, never re-derived: the target's HEAD may have
+            # moved since the interrupted run started, and reviewing against a
+            # different base would describe changes this run never made.
+            base_sha = run_state.base_sha
+        else:
+            base_sha = git_ops.current_commit(repo)
+            integration_root, branch = git_ops.create_integration_worktree(repo, request)
+
+        report_progress(base_ref=git_ops.current_ref(repo), base_sha=base_sha)
         # The run's policy, frozen. Read from the base commit rather than from
         # any working tree, and never re-read: roles without an artifact
         # contract can write .ai-platform.yml, and re-reading it after they run
@@ -452,13 +531,15 @@ def run(
         # the run as `done`. See core.orchestrator.target_config.
         config = target_config.load_at_commit(repo, base_sha)
 
-        integration_root, branch = git_ops.create_integration_worktree(repo, request)
         # Everything from here on operates on the run's own checkout. `repo`
         # (the target's working tree) is still used for hook neutralization,
         # which is repository-wide config rather than per-worktree, and for
         # pruning.
         integration_repo = git.Repo(integration_root)
-        console.print(f"[bold]Integration worktree:[/bold] {integration_root} ({branch})")
+        adopted = " (resumed)" if run_state is not None else ""
+        console.print(
+            f"[bold]Integration worktree:[/bold] {integration_root} ({branch}){adopted}"
+        )
         # Reported before a single agent runs: from here on there is state on
         # disk, and anything that kills this process without recording where
         # it is leaves an orphan branch nobody can attribute to a request.
@@ -544,7 +625,29 @@ def run(
             report_progress(run_id=recorder.run_id)
 
         complexity = router.DEFAULT_COMPLEXITY
-        if workflow.decompose:
+        if run_state is not None:
+            # Restored, not re-decided. Calling the decomposer again would be a
+            # provider call whose answer can differ from the one the already-merged
+            # stages were selected and routed under — a resumed run would then be
+            # running a different workflow than the branch it is adding to.
+            complexity = run_state.complexity
+            workflow = planner.prune(workflow, set(run_state.task_ids))
+            console.print(
+                f"[bold]Resuming[/bold] {branch}: "
+                f"{', '.join(t.id for t in workflow.tasks)} at {base_sha[:12]}"
+            )
+            # A stage that was mid-flight when the worker died left a worktree
+            # that is neither merged nor removed, and `worktree prune` will not
+            # reclaim it because the directory still exists. Its stage is about
+            # to be re-run in a fresh one, so this is only ever named, never
+            # deleted: it may hold uncommitted agent work, and one per crash
+            # accumulating unmentioned is a leak nobody would ever find.
+            for stale_path, stale_branch in git_ops.stage_worktrees(repo, branch):
+                console.print(
+                    f"[dim]left by the interrupted run: {stale_path} "
+                    f"({stale_branch}) — remove it once you've looked[/dim]"
+                )
+        elif workflow.decompose:
             report_progress(stage="decompose")
             known_ids = [t.id for t in workflow.tasks]
             decomposer_result = scheduler.run_task(
@@ -595,12 +698,60 @@ def run(
                 summary="dry-run",
             )
 
+        # Written before the first stage rather than at the first merge: a run
+        # killed between here and then has an integration worktree on disk, and
+        # without a checkpoint naming it, a resume could only start over — on a
+        # *second* branch, leaving the first orphaned.
+        if run_state is None:
+            run_state = checkpoint.Checkpoint(
+                base_sha=base_sha,
+                branch=branch,
+                request=request,
+                complexity=complexity,
+                task_ids=[t.id for t in workflow.tasks],
+            )
+            checkpoint.save(integration_root, run_state)
+
         remaining = {t.id: t for t in workflow.tasks}
         completed: list[StageResult] = []
         completed_ids: set[str] = set()
         blocked_ids: set[str] = set()
         stage_reports: list[StageReport] = []
         all_files_changed: list[str] = []
+
+        # Stages the interrupted run already merged. Reinstated as full results
+        # rather than merely crossed off the list: downstream stages are told
+        # what their upstreams produced (scheduler.build_stage_description), so
+        # a resumed run that skipped a stage without being able to describe it
+        # would hand the next agent a prompt missing exactly the context that
+        # stage exists to provide.
+        for record in run_state.stages:
+            task = remaining.pop(record.id, None)
+            if task is None:
+                continue  # no longer in the workflow; nothing to skip
+            completed.append(
+                StageResult(
+                    task=task,
+                    status="done",
+                    result=ProviderResult(success=True, summary=record.summary),
+                    files_changed=list(record.files_changed),
+                )
+            )
+            completed_ids.add(record.id)
+            all_files_changed.extend(record.files_changed)
+            stage_reports.append(
+                StageReport(
+                    id=record.id,
+                    agent=record.agent,
+                    status="done",
+                    summary=record.summary,
+                    files_changed=list(record.files_changed),
+                )
+            )
+        if completed_ids:
+            console.print(
+                f"[bold]Already merged:[/bold] {', '.join(sorted(completed_ids))} — not re-run"
+            )
         # Reported as a set, not a single name: up to `max_parallel` stages
         # run at once, and naming only the last dispatched would describe a
         # run that isn't happening.
@@ -686,6 +837,23 @@ def run(
                             completed.append(stage_result)
                             completed_ids.add(task.id)
                             all_files_changed.extend(stage_result.files_changed)
+                            # After the merge, never before, so the checkpoint
+                            # can only ever under-claim: a crash in this gap
+                            # costs a resumed run one repeated stage, whereas
+                            # claiming a stage that never landed would silently
+                            # drop its work off the branch.
+                            run_state = checkpoint.record_stage(
+                                integration_root,
+                                run_state,
+                                checkpoint.StageRecord(
+                                    id=task.id,
+                                    agent=task.agent,
+                                    summary=stage_result.result.summary
+                                    if stage_result.result
+                                    else "",
+                                    files_changed=list(stage_result.files_changed),
+                                ),
+                            )
                         else:
                             stage_result.status = "conflict"
                             blocked_ids.add(task.id)
