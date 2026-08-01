@@ -36,7 +36,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | Priority | Capability | Issue | Status |
 |---|---|---:|---|
 | P0 | Safe ephemeral-write policy | [#23](https://github.com/4nass/ai-platform/issues/23) | Delivered; issue closed |
-| P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered in code; issue remains open |
+| P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered; issue closed — including resuming an interrupted run |
 | P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Planned |
 | P0 | Authentication, authorization, idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Planned |
 | P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Planned |
@@ -53,7 +53,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P2 | Attachments and rich artifacts | [#38](https://github.com/4nass/ai-platform/issues/38) | Planned |
 | P2 | Incremental context indexing | [#39](https://github.com/4nass/ai-platform/issues/39) | Planned |
 | P2 | Reliable WSL service mode | [#40](https://github.com/4nass/ai-platform/issues/40) | Planned |
-| P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Delivered; issue remains open |
+| P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Delivered; issue closed |
 | P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Planned |
 
 ## Release rule
