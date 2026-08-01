@@ -125,11 +125,40 @@ def test_load_or_build_rebuilds_on_corrupt_cache(repo: git.Repo, tmp_path: Path)
 
     cache_path = tmp_path / builder.CACHE_PATH
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(b"not a pickle")
+    cache_path.write_bytes(b"not valid json")
 
     graph = builder.load_or_build(tmp_path)
 
     assert "a.py" in graph.nodes
+
+
+def test_load_or_build_rebuilds_rather_than_deserializing_a_malicious_cache(
+    repo: git.Repo, tmp_path: Path
+) -> None:
+    """The cache used to be pickle, and pickle.load() on attacker-controlled
+    bytes is arbitrary code execution in the parent process (issue #3). JSON
+    can't do that — but json.loads() must still be reached (not crash on a
+    non-UTF-8 read) for the "corrupt cache rebuilds" guarantee to hold against
+    exactly this input, not just against ASCII garbage."""
+    import pickle
+
+    _commit(repo, tmp_path, {"a.py": "1\n"}, "first")
+
+    cache_path = tmp_path / builder.CACHE_PATH
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class _ExecOnUnpickle:
+        def __reduce__(self):
+            return (list, ())  # if this ever runs, deserialization executed arbitrary code
+
+    cache_path.write_bytes(pickle.dumps(_ExecOnUnpickle()))
+
+    graph = builder.load_or_build(tmp_path)
+
+    assert "a.py" in graph.nodes
+    # the cache is now a real, valid JSON file -- confirms load_or_build
+    # rebuilt and rewrote it rather than choking on the binary content
+    assert cache_path.read_text(encoding="utf-8").startswith("{")
 
 
 def test_related_files_ranks_imports_above_co_changes(repo: git.Repo, tmp_path: Path) -> None:

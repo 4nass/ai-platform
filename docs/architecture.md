@@ -47,7 +47,7 @@ Generated target data:
 ```text
 <target>/.ai-platform/
   vector/
-  graph.pkl
+  graph.json
 ```
 
 Shared execution history stays at the engine root because provider quotas span all target repositories.

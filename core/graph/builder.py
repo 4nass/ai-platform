@@ -4,7 +4,7 @@ doc-to-code mentions. Cached to disk, keyed on the current git HEAD commit.
 
 from __future__ import annotations
 
-import pickle
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,7 +16,13 @@ from core.graph.ast_deps import extract_imports
 from core.graph.git_deps import co_change_counts
 from core.graph.knowledge import mention_edges
 
-CACHE_PATH = Path(".ai-platform/graph.pkl")
+CACHE_PATH = Path(".ai-platform/graph.json")
+# JSON, not pickle: pickle.load() on this file would be arbitrary code
+# execution in the parent process, outside any agent sandbox, on a path
+# that's gitignored and therefore invisible to commit_all/contracts/the
+# reviewer's diff (see #2) if something ever wrote to it unexpectedly.
+# Every value on the graph (node/edge attributes below) is already a plain
+# str/int/float, so there's nothing pickle buys here that JSON can't hold.
 DOC_FILES = [
     Path("README.md"),
     Path("memory/architecture.md"),
@@ -84,6 +90,29 @@ def build_graph(repo_root: Path) -> nx.MultiDiGraph:
     return graph
 
 
+def _graph_to_dict(graph: nx.MultiDiGraph) -> dict:
+    """Plain-data projection of the graph — the whole reason this can be
+    JSON instead of pickle. Every node/edge attribute set anywhere in this
+    module is a str, int, or float (see build_graph, co_change_counts),
+    so nothing here needs an object serializer."""
+    return {
+        "nodes": [{"id": node, **data} for node, data in graph.nodes(data=True)],
+        "edges": [{"u": u, "v": v, **data} for u, v, data in graph.edges(data=True)],
+    }
+
+
+def _graph_from_dict(data: dict) -> nx.MultiDiGraph:
+    graph = nx.MultiDiGraph()
+    for node in data["nodes"]:
+        node = dict(node)
+        graph.add_node(node.pop("id"), **node)
+    for edge in data["edges"]:
+        edge = dict(edge)
+        u, v = edge.pop("u"), edge.pop("v")
+        graph.add_edge(u, v, **edge)
+    return graph
+
+
 def load_or_build(repo_root: Path) -> nx.MultiDiGraph:
     """Rebuilds only when the current HEAD differs from the cached one.
 
@@ -97,17 +126,17 @@ def load_or_build(repo_root: Path) -> nx.MultiDiGraph:
 
     if cache_path.is_file():
         try:
-            with cache_path.open("rb") as f:
-                cached = pickle.load(f)
+            cached = json.loads(cache_path.read_bytes())
             if cached.get("head_sha") == head_sha:
-                return cached["graph"]
-        except (pickle.PickleError, EOFError, KeyError, AttributeError):
-            pass  # corrupt cache — fall through and rebuild
+                return _graph_from_dict(cached)
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, AttributeError):
+            pass  # corrupt or unrecognized cache — fall through and rebuild
 
     graph = build_graph(repo_root)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cache_path.open("wb") as f:
-        pickle.dump({"head_sha": head_sha, "graph": graph}, f)
+    cache_path.write_text(
+        json.dumps({"head_sha": head_sha, **_graph_to_dict(graph)}), encoding="utf-8"
+    )
     return graph
 
 
