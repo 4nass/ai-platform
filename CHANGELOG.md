@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The default architecture and security profiles are calibrated for a Pro subscription: Codex is preferred at every complexity, Claude Sonnet is the routine/complex fallback, and Claude Opus/high is reserved for critical fallback. `ultracode` remains adapter-supported but is not selected automatically.
 - Context selection now scores and gates candidates instead of injecting whatever retrieval returned: vector hits require a similarity floor, graph expansion is gated by lift (personalized vs. background PageRank), and every candidate's keep/drop decision is recorded (`core/context/selection.py`).
 - Rendered context (not just file paths) is now actually sent to providers; each adapter declares `READS_FILES` to choose between full content and a ranked pointer map.
 - Token accounting sums cached and uncached input tokens instead of reporting only the uncached remainder, so reported cost reflects the full prompt (`providers/anthropic_api/adapter.py`, `core/orchestrator/supervisor.py`).

@@ -254,6 +254,35 @@ def test_dogfood_policy_has_claude_and_codex_profiles_for_every_role_and_tier() 
             assert all(profile.model for profile in profiles)
             assert all(profile.reasoning_effort for profile in profiles)
 
+
+def test_dogfood_policy_is_calibrated_for_pro_without_automatic_ultracode() -> None:
+    engine_root = Path(__file__).parents[1]
+    expected_first_profiles = {
+        ("architect", "routine"): ("codex_cli", "gpt-5.6-terra", "medium"),
+        ("architect", "complex"): ("codex_cli", "gpt-5.6-sol", "high"),
+        ("architect", "critical"): ("codex_cli", "gpt-5.6-sol", "xhigh"),
+        ("security", "routine"): ("codex_cli", "gpt-5.6-sol", "medium"),
+        ("security", "complex"): ("codex_cli", "gpt-5.6-sol", "high"),
+        ("security", "critical"): ("codex_cli", "gpt-5.6-sol", "xhigh"),
+    }
+
+    for (role, complexity), expected in expected_first_profiles.items():
+        profile = router.eligible_profiles(engine_root, role, complexity)[0]
+
+        assert (profile.provider, profile.model, profile.reasoning_effort) == expected
+
+    roles = (
+        "decomposer", "architect", "backend", "frontend", "reviewer",
+        "security", "tests", "documentation", "corrector",
+    )
+    all_efforts = {
+        profile.reasoning_effort
+        for role in roles
+        for complexity in router.COMPLEXITIES
+        for profile in router.eligible_profiles(engine_root, role, complexity)
+    }
+    assert "ultracode" not in all_efforts
+
 # --- gate 1: quota pressure ---
 
 

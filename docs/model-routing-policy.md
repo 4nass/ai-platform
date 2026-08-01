@@ -33,11 +33,11 @@ Each cell lists the preferred profile, followed by its fallback.
 | Role | Routine | Complex | Critical |
 |---|---|---|---|
 | decomposer | Codex Terra / low; Claude Sonnet / medium | same | same |
-| architect | Claude Sonnet / high; Codex Terra / medium | Claude Opus / xhigh; Codex Sol / high | Claude Opus / ultracode; Codex Sol / xhigh |
+| architect | Codex Terra / medium; Claude Sonnet / high | Codex Sol / high; Claude Sonnet / high | Codex Sol / xhigh; Claude Opus / high |
 | backend | Codex Terra / medium; Claude Sonnet / medium | Claude Sonnet / high; Codex Terra / high | Codex Sol / high; Claude Opus / xhigh |
 | frontend | Codex Terra / medium; Claude Sonnet / medium | Codex Sol / high; Claude Sonnet / high | Codex Sol / xhigh; Claude Opus / xhigh |
 | reviewer | Codex Terra / medium; Claude Sonnet / high | Codex Sol / high; Claude Opus / high | Codex Sol / xhigh; Claude Opus / xhigh |
-| security | Claude Opus / high; Codex Sol / medium | Claude Opus / xhigh; Codex Sol / high | Claude Opus / ultracode; Codex Sol / xhigh |
+| security | Codex Sol / medium; Claude Sonnet / high | Codex Sol / high; Claude Sonnet / high | Codex Sol / xhigh; Claude Opus / high |
 | tests | Codex Terra / low; Claude Sonnet / medium | Codex Terra / medium; Claude Sonnet / medium | Codex Sol / high; Claude Opus / high |
 | documentation | Codex Terra / low; Claude Sonnet / low | Codex Terra / low; Claude Sonnet / medium | Codex Sol / medium; Claude Sonnet / high |
 | corrector | Codex Terra / medium; Claude Sonnet / medium | Codex Terra / high; Claude Sonnet / high | Codex Sol / high; Claude Opus / xhigh |
@@ -46,7 +46,7 @@ Full model identifiers are kept in `config/agents.yaml`.
 
 ## Rationale
 
-Architecture and security receive the strongest critical profiles because mistakes have high downstream cost. Review uses strong independent reasoning but remains read-only. Backend and frontend default to capable implementation profiles; routine work favors balanced models. Tests and documentation usually benefit more from clear contracts and context than maximal reasoning, so their routine defaults are intentionally lighter. Correction escalates with the original run's complexity.
+The shipped policy is calibrated for a Pro subscription: Codex handles architecture and security by default, while Claude remains an independent fallback. Critical work still escalates to Codex Sol at `xhigh` and keeps Claude Opus at `high` in reserve, without selecting premium orchestration automatically. Review uses strong independent reasoning but remains read-only. Backend and frontend default to capable implementation profiles; routine work favors balanced models. Tests and documentation usually benefit more from clear contracts and context than maximal reasoning, so their routine defaults are intentionally lighter. Correction escalates with the original run's complexity.
 
 The decomposer stays economical. Its output space is deliberately small and parser-validated, so spending an architecture-grade profile on classification would usually be wasteful.
 
@@ -55,11 +55,11 @@ The decomposer stays economical. Its output space is deliberately small and pars
 The YAML field is provider-neutral `effort`.
 
 - Codex supports `minimal`, `low`, `medium`, `high`, and `xhigh`.
-- Claude Code supports `low`, `medium`, `high`, `xhigh`, `max`, and `ultracode` in this engine policy.
+- Claude Code supports `low`, `medium`, `high`, `xhigh`, `max`, and `ultracode` at the adapter boundary.
 
 Adapters translate the value to the provider CLI. Invalid provider/effort combinations fail configuration validation before execution.
 
-`ultracode` is a Claude Code orchestration mode, not merely another numeric effort value. It should remain limited to critical architecture and security work. Current Claude Code documentation requires a recent CLI for this mode and for Claude Opus 5; verify versions during deployment.
+`ultracode` is a Claude Code orchestration mode, not merely another numeric effort value. The shipped Pro policy never selects it automatically; reserve it for an explicit Max-oriented policy or a deliberate manual override. Current Claude Code documentation requires a recent CLI for this mode and for Claude Opus 5; verify versions during deployment.
 
 ## Version and naming policy
 

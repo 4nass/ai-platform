@@ -7,21 +7,27 @@
 ```yaml
 architect:
   profiles:
-    - provider: claude_code
-      model: claude-opus-5
-      effort: xhigh
     - provider: codex_cli
       model: gpt-5.6-sol
       effort: high
+    - provider: claude_code
+      model: claude-sonnet-5
+      effort: high
   profiles_by_complexity:
     routine:
+      - provider: codex_cli
+        model: gpt-5.6-terra
+        effort: medium
       - provider: claude_code
         model: claude-sonnet-5
         effort: high
     critical:
+      - provider: codex_cli
+        model: gpt-5.6-sol
+        effort: xhigh
       - provider: claude_code
         model: claude-opus-5
-        effort: ultracode
+        effort: high
 ```
 
 Rules:

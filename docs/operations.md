@@ -70,7 +70,7 @@ Run `ai-platform route <role> --complexity <class>` and inspect:
 
 ### Claude rejects effort or model
 
-Check `claude --version`, update Claude Code, and compare the configured identifier with the official model configuration documentation. `ultracode` requires a recent release and is reserved for critical profiles.
+Check `claude --version`, update Claude Code, and compare the configured identifier with the official model configuration documentation. The shipped Pro policy does not select `ultracode`; if a custom policy enables it, use a recent compatible release.
 
 ### Codex rejects effort or model
 
