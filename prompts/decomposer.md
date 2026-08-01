@@ -17,11 +17,13 @@ Task types:
 Rules:
 - Only select task types that are genuinely relevant to the request — omitting an unneeded one is
   the whole point (a one-line fix doesn't need architecture, frontend, security, or documentation).
+- Classify the whole request as `routine` (small and local), `complex` (multi-file or requiring
+  substantial judgment), or `critical` (high-risk architecture, migration, security, or difficult
+  to reverse). You choose only this class; the engine maps it to allow-listed models and efforts.
 - When in doubt about whether a change is security-sensitive, include `security` — a report that
   finds nothing costs little; skipping it on a genuinely sensitive change costs more.
-- End your response with exactly one line: `TASKS: ` followed by a comma-separated list of the
-  selected task types (e.g. `TASKS: backend, tests`). This line is parsed automatically: it must
-  start at the very beginning of its own line (no indentation, no list marker, no surrounding
-  prose) and contain nothing else. Don't include task types outside the six listed above, and if
-  you mention the format inline while reasoning, keep that mention indented so it can't be
-  mistaken for your actual answer.
+- End your response with exactly two lines:
+  `COMPLEXITY: routine|complex|critical`
+  `TASKS: <comma-separated task types>`
+  Both lines are parsed automatically and must start at the beginning of their own line, with no
+  list marker or surrounding prose. Don't include task types outside the six listed above.

@@ -1,36 +1,112 @@
-# Which providers may serve each role, in order of preference.
+# Ordered execution profiles for every role.
 #
-# The list declares *eligibility*, which the engine cannot derive: anthropic_api
-# has no disk access, and a role's contract may rule a provider out entirely.
-# The router (core/orchestrator/router.py) walks this order and takes the first
-# candidate that clears its quota and failure gates — your order governs, and it
-# only overrides on measurable grounds.
+# The first profile clearing quota and failure gates runs; the second is a
+# fallback, not a second opinion. The base list is the "complex" policy.
+# profiles_by_complexity overrides it for bounded classifications emitted by
+# the decomposer: routine, complex, or critical. Models are never invented by
+# an agent.
 #
-# A bare `provider: X` still works; it reads as a one-element list.
+# `effort` is provider-neutral configuration. The adapters translate it to
+# Codex's model_reasoning_effort or Claude Code's --effort. Legacy
+# reasoning_effort/provider/providers entries remain accepted by the loader.
 
 decomposer:
-  providers: [codex_cli, claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-terra, effort: low}
+    - {provider: claude_code, model: claude-sonnet-5, effort: medium}
 
 architect:
-  providers: [claude_code]
+  profiles:
+    - {provider: claude_code, model: claude-opus-5, effort: xhigh}
+    - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: claude_code, model: claude-sonnet-5, effort: high}
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: medium}
+    critical:
+      - {provider: claude_code, model: claude-opus-5, effort: ultracode}
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: xhigh}
 
 backend:
-  providers: [claude_code]
+  profiles:
+    - {provider: claude_code, model: claude-sonnet-5, effort: high}
+    - {provider: codex_cli, model: gpt-5.6-terra, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: medium}
+      - {provider: claude_code, model: claude-sonnet-5, effort: medium}
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+      - {provider: claude_code, model: claude-opus-5, effort: xhigh}
 
 frontend:
-  providers: [claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+    - {provider: claude_code, model: claude-sonnet-5, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: medium}
+      - {provider: claude_code, model: claude-sonnet-5, effort: medium}
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: xhigh}
+      - {provider: claude_code, model: claude-opus-5, effort: xhigh}
 
 reviewer:
-  providers: [codex_cli, claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+    - {provider: claude_code, model: claude-opus-5, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: medium}
+      - {provider: claude_code, model: claude-sonnet-5, effort: high}
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: xhigh}
+      - {provider: claude_code, model: claude-opus-5, effort: xhigh}
 
 security:
-  providers: [claude_code, codex_cli]
+  profiles:
+    - {provider: claude_code, model: claude-opus-5, effort: xhigh}
+    - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: claude_code, model: claude-opus-5, effort: high}
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: medium}
+    critical:
+      - {provider: claude_code, model: claude-opus-5, effort: ultracode}
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: xhigh}
 
 tests:
-  providers: [codex_cli, claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-terra, effort: medium}
+    - {provider: claude_code, model: claude-sonnet-5, effort: medium}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: low}
+      - {provider: claude_code, model: claude-sonnet-5, effort: medium}
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+      - {provider: claude_code, model: claude-opus-5, effort: high}
 
 documentation:
-  providers: [claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-terra, effort: low}
+    - {provider: claude_code, model: claude-sonnet-5, effort: medium}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: low}
+      - {provider: claude_code, model: claude-sonnet-5, effort: low}
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: medium}
+      - {provider: claude_code, model: claude-sonnet-5, effort: high}
 
 corrector:
-  providers: [codex_cli, claude_code]
+  profiles:
+    - {provider: codex_cli, model: gpt-5.6-terra, effort: high}
+    - {provider: claude_code, model: claude-sonnet-5, effort: high}
+  profiles_by_complexity:
+    routine:
+      - {provider: codex_cli, model: gpt-5.6-terra, effort: medium}
+      - {provider: claude_code, model: claude-sonnet-5, effort: medium}
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: high}
+      - {provider: claude_code, model: claude-opus-5, effort: xhigh}

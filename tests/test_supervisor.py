@@ -470,10 +470,12 @@ def test_run_prunes_the_plan_when_decomposer_selects_a_subset(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path
 ) -> None:
     _enable_decompose(fake_repo)
+    seen_complexities: dict[str, str] = {}
 
     def fake_run(task: AgentTask) -> ProviderResult:
+        seen_complexities[task.agent] = task.complexity
         if task.agent == "decomposer":
-            return ProviderResult(success=True, summary="Reasoning...\nTASKS: architecture, backend")
+            return ProviderResult(success=True, summary="Reasoning...\nCOMPLEXITY: critical\nTASKS: architecture, backend")
         if task.agent == "reviewer":
             return ProviderResult(success=True, summary="VERDICT: PASS")
         _write_compliant_artifact(task)
@@ -488,6 +490,8 @@ def test_run_prunes_the_plan_when_decomposer_selects_a_subset(
     assert ids == {"architecture", "backend"}  # frontend/tests/security/documentation never even appear
     assert report.summary == "done"
 
+    assert seen_complexities["decomposer"] == "routine"
+    assert {seen_complexities[name] for name in ("architect", "backend", "reviewer")} == {"critical"}
 
 def test_run_dry_run_invokes_only_the_decomposer_and_skips_the_rest(
     monkeypatch: pytest.MonkeyPatch, fake_repo: Path

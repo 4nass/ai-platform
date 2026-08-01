@@ -14,7 +14,7 @@ from core.errors import ConfigError
 from core.orchestrator import scheduler
 from core.orchestrator.planner import Task
 from core.orchestrator.scheduler import StageResult
-from providers.base import AgentTask, ProviderResult
+from providers.base import AgentTask, ProviderResult, TokenUsage
 
 AGENTS_YAML = """backend:
   provider: claude_code
@@ -88,6 +88,54 @@ def test_run_task_dispatches_to_the_resolved_provider(monkeypatch: pytest.Monkey
     assert captured["task"].description == "do the thing"
     assert captured["task"].context_paths == ["a.py", "b.py"]
 
+
+def test_run_task_propagates_the_selected_execution_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "agents.yaml").write_text(
+        "backend:\n  profiles: [{provider: codex_cli, model: gpt-x, reasoning_effort: low}]\n",
+        encoding="utf-8",
+    )
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "codex_cli", _fake_provider(captured))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(tmp_path, "backend", "x", recorder=recorder)
+
+    assert (captured["task"].model, captured["task"].reasoning_effort) == ("gpt-x", "low")
+    assert recorder.calls[0]["model"] == "gpt-x"
+    assert recorder.calls[0]["reasoning_effort"] == "low"
+
+
+
+
+def test_run_task_propagates_complexity_profile_and_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "agents.yaml").write_text(
+        """backend:
+  profiles: [{provider: codex_cli, model: gpt-5.6-terra, effort: medium}]
+  profiles_by_complexity:
+    critical:
+      - {provider: codex_cli, model: gpt-5.6-sol, effort: xhigh}
+""",
+        encoding="utf-8",
+    )
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "codex_cli", _fake_provider(captured))
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(
+        tmp_path, "backend", "x", recorder=recorder, complexity="critical"
+    )
+
+    task = captured["task"]
+    assert (task.model, task.reasoning_effort, task.complexity) == (
+        "gpt-5.6-sol", "xhigh", "critical"
+    )
+    assert recorder.calls[0]["metadata"]["complexity"] == "critical"
 
 def test_run_task_renders_pointers_for_a_provider_that_reads_files(
     monkeypatch: pytest.MonkeyPatch, repo_root: Path
@@ -367,6 +415,30 @@ def test_a_successful_call_records_no_error(monkeypatch: pytest.MonkeyPatch, rep
     scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
 
     assert "error" not in recorder.calls[0]["metadata"]
+
+
+
+
+def test_call_metadata_records_the_effective_model_reported_by_provider(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    def fake_run(task: AgentTask) -> ProviderResult:
+        return ProviderResult(
+            success=True,
+            summary="done",
+            usage=TokenUsage(model="claude-opus-4-8"),
+        )
+
+    monkeypatch.setitem(
+        scheduler.PROVIDERS,
+        "claude_code",
+        type("FakeProvider", (), {"run": staticmethod(fake_run)}),
+    )
+    recorder = _SpyRecorder()
+
+    scheduler.run_task(repo_root, "backend", "x", recorder=recorder)
+
+    assert recorder.calls[0]["metadata"]["effective_model"] == "claude-opus-4-8"
 
 
 def test_a_runaway_error_message_is_truncated(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:

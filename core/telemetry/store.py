@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS calls (
   agent    TEXT,
   provider TEXT,
   model    TEXT,
+  reasoning_effort TEXT,
   success  INTEGER,
   input_tokens          INTEGER,
   output_tokens         INTEGER,
@@ -78,7 +79,7 @@ def _now() -> str:
 
 
 def _migrate(con: sqlite3.Connection, engine_root: Path) -> None:
-    """Adds columns to a pre-existing runs table that `CREATE TABLE IF NOT
+    """Adds columns to pre-existing tables that `CREATE TABLE IF NOT
     EXISTS` can't retrofit. Guarded so it's a no-op on a fresh database (the
     schema above already declares the column) and idempotent on repeated
     calls.
@@ -97,6 +98,10 @@ def _migrate(con: sqlite3.Connection, engine_root: Path) -> None:
             "UPDATE runs SET target_repo = ? WHERE target_repo IS NULL OR target_repo = ''",
             (str(engine_root),),
         )
+
+    call_columns = {row["name"] for row in con.execute("PRAGMA table_info(calls)")}
+    if "reasoning_effort" not in call_columns:
+        con.execute("ALTER TABLE calls ADD COLUMN reasoning_effort TEXT")
 
 
 @contextmanager
@@ -159,6 +164,8 @@ class RunRecorder:
         *,
         agent: str,
         provider: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
         result: ProviderResult,
         stage_id: str | None = None,
         context_files: int = 0,
@@ -173,17 +180,18 @@ class RunRecorder:
         with connect(self.engine_root) as con:
             con.execute(
                 "INSERT INTO calls("
-                " run_id, stage_id, agent, provider, model, success,"
+                " run_id, stage_id, agent, provider, model, reasoning_effort, success,"
                 " input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,"
                 " cost_usd, started_at, finished_at, duration_ms, provider_duration_ms,"
                 " context_files, context_chars, routing_reason, context_reason, metadata"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     self.run_id,
                     stage_id,
                     agent,
                     provider,
-                    usage.model if usage else "",
+                    model or (usage.model if usage else ""),
+                    reasoning_effort or "",
                     1 if result.success else 0,
                     usage.input_tokens if usage else 0,
                     usage.output_tokens if usage else 0,
@@ -270,17 +278,22 @@ def provider_pressure(engine_root: Path, *, window_hours: float, provider: str |
         return [dict(row) for row in con.execute(query, params)]
 
 
-def role_performance(engine_root: Path, agent: str, *, window_hours: float) -> dict[str, dict]:
+def role_performance(
+    engine_root: Path, agent: str, *, window_hours: float, provider: str | None = None,
+    model: str | None = None, reasoning_effort: str | None = None,
+) -> dict[str, dict]:
     """How each provider has actually done on one role, keyed by provider.
 
     The router's second gate reads this. `calls` is returned alongside every
     average for the same reason as in provider_pressure: a success rate with
-    no sample size behind it invites a policy built on two data points.
+    no sample size behind it invites a policy built on two data points. When
+    a provider is supplied, model and effort scope the query to that exact
+    execution profile; omitted values match legacy/provider-neutral rows.
     """
     since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
     rows = {}
     with connect(engine_root) as con:
-        for row in con.execute(
+        query = (
             "SELECT provider,"
             " COUNT(*) AS calls,"
             " ROUND(AVG(success), 3) AS success_rate,"
@@ -288,9 +301,23 @@ def role_performance(engine_root: Path, agent: str, *, window_hours: float) -> d
             " CAST(AVG(input_tokens + cache_read_tokens + cache_creation_tokens + output_tokens)"
             "   AS INTEGER) AS avg_tokens"
             " FROM calls WHERE agent = ? AND started_at >= ?"
-            " GROUP BY provider",
-            (agent, since),
-        ):
+        )
+        params: list[object] = [agent, since]
+        if provider is not None:
+            query += " AND provider = ?"
+            params.append(provider)
+        if model is not None:
+            query += " AND model = ?"
+            params.append(model)
+        elif provider is not None:
+            query += " AND COALESCE(model, '') = ''"
+        if reasoning_effort is not None:
+            query += " AND reasoning_effort = ?"
+            params.append(reasoning_effort)
+        elif provider is not None:
+            query += " AND COALESCE(reasoning_effort, '') = ''"
+        query += " GROUP BY provider"
+        for row in con.execute(query, params):
             rows[row["provider"]] = dict(row)
     return rows
 

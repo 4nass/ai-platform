@@ -34,6 +34,15 @@ NO_HISTORY = "no_history"
 OVER_QUOTA = "over_quota"
 FAILING_ROLE = "failing_role"
 ALL_GATED = "all_gated"
+DEFAULT_COMPLEXITY = "complex"
+COMPLEXITIES = {"routine", "complex", "critical"}
+PROVIDER_EFFORTS = {
+    "codex_cli": {"minimal", "low", "medium", "high", "xhigh"},
+    # Claude Code accepts these through --effort. Ultracode is a session
+    # orchestration setting (with xhigh model effort), represented here
+    # because it is selected through the same CLI flag.
+    "claude_code": {"low", "medium", "high", "xhigh", "max", "ultracode"},
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,8 @@ class Candidate:
     chosen: bool
     rule: str
     reason: str
+    model: str | None = None
+    reasoning_effort: str | None = None
     quota_ratio: float | None = None
     success_rate: float | None = None
     calls: int = 0
@@ -66,6 +77,9 @@ class Decision:
     """Stored verbatim in the calls table's routing_reason column — the column
     that answers "why this provider?" and has been empty since it was created."""
     candidates: list[Candidate]
+    model: str | None = None
+    reasoning_effort: str | None = None
+    complexity: str = DEFAULT_COMPLEXITY
 
 
 def load_thresholds(engine_root: Path) -> Thresholds:
@@ -78,13 +92,64 @@ def load_thresholds(engine_root: Path) -> Thresholds:
     )
 
 
-def eligible_providers(engine_root: Path, agent: str) -> list[str]:
-    """The declared preference order for a role.
+@dataclass(frozen=True)
+class ExecutionProfile:
+    provider: str
+    model: str | None = None
+    reasoning_effort: str | None = None
 
-    Accepts either `providers: [a, b]` or the older `provider: a`, which reads
-    as a one-element list — the migration is mechanical and old configs keep
-    working.
+    @property
+    def label(self) -> str:
+        details = "/".join(v for v in (self.model, self.reasoning_effort) if v)
+        return f"{self.provider} ({details})" if details else self.provider
+
+
+def _validate_complexity(complexity: str) -> None:
+    if complexity not in COMPLEXITIES:
+        allowed = ", ".join(sorted(COMPLEXITIES))
+        raise ConfigError(f"Unsupported task complexity {complexity!r}. Available: {allowed}")
+
+
+def _declared_profiles(entry: dict, agent: str, complexity: str):
+    """Returns the role's list for this complexity, with a base fallback."""
+    overrides = entry.get("profiles_by_complexity", {})
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict):
+        raise ConfigError(
+            f"Agent role '{agent}' has invalid profiles_by_complexity: expected a mapping"
+        )
+    unknown = sorted(set(overrides) - COMPLEXITIES)
+    if unknown:
+        raise ConfigError(
+            f"Agent role '{agent}' declares unknown complexity profile(s): {', '.join(unknown)}"
+        )
+    if complexity in overrides:
+        return overrides[complexity]
+    return entry.get("profiles") or entry.get("providers")
+
+
+def _effort(item: dict, agent: str) -> str | None:
+    if "effort" in item and "reasoning_effort" in item:
+        raise ConfigError(
+            f"Execution profile for agent '{agent}' declares both 'effort' and "
+            "legacy 'reasoning_effort'; keep only 'effort'"
+        )
+    value = item.get("effort", item.get("reasoning_effort"))
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise ConfigError(f"Invalid effort for agent '{agent}': {value!r}")
+    return value
+
+
+def eligible_profiles(
+    engine_root: Path, agent: str, complexity: str = DEFAULT_COMPLEXITY
+) -> list[ExecutionProfile]:
+    """The declared preference order for a role and task complexity.
+
+    `profiles_by_complexity` may override the base `profiles` list. Bare
+    `providers: [a, b]` and legacy `provider: a` entries remain supported.
     """
+    _validate_complexity(complexity)
     config = yaml.safe_load((engine_root / AGENTS_CONFIG_PATH).read_text(encoding="utf-8")) or {}
 
     if agent not in config:
@@ -92,13 +157,56 @@ def eligible_providers(engine_root: Path, agent: str) -> list[str]:
         raise ConfigError(f"Unknown agent role '{agent}'. Configured roles: {known}")
 
     entry = config[agent] or {}
-    declared = entry.get("providers") or ([entry["provider"]] if entry.get("provider") else [])
+    if not isinstance(entry, dict):
+        raise ConfigError(f"Agent role '{agent}' must be a mapping, got: {entry!r}")
+    declared = _declared_profiles(entry, agent, complexity)
+    if not declared and entry.get("provider"):
+        declared = [{
+            key: entry[key]
+            for key in ("provider", "model", "effort", "reasoning_effort")
+            if key in entry
+        }]
     if not declared:
         raise ConfigError(
             f"Agent role '{agent}' declares no providers in {AGENTS_CONFIG_PATH}. "
-            "Set `providers: [name, ...]`."
+            "Set `profiles: [{provider: name, ...}]` or `providers: [name, ...]`."
         )
-    return list(declared)
+    if not isinstance(declared, list):
+        raise ConfigError(f"Agent role '{agent}' profiles must be a list, got: {declared!r}")
+
+    profiles = []
+    for item in declared:
+        if isinstance(item, str):
+            profiles.append(ExecutionProfile(item))
+        elif isinstance(item, dict) and item.get("provider"):
+            effort = _effort(item, agent)
+            profile = ExecutionProfile(str(item["provider"]), item.get("model"), effort)
+            if profile.model is not None and (
+                not isinstance(profile.model, str) or not profile.model.strip()
+            ):
+                raise ConfigError(f"Invalid model for agent '{agent}': {profile.model!r}")
+            allowed_efforts = PROVIDER_EFFORTS.get(profile.provider)
+            if (
+                profile.reasoning_effort is not None
+                and allowed_efforts is not None
+                and profile.reasoning_effort not in allowed_efforts
+            ):
+                allowed = ", ".join(sorted(allowed_efforts))
+                raise ConfigError(
+                    f"Unsupported {profile.provider} effort {profile.reasoning_effort!r} "
+                    f"for agent '{agent}'. Available: {allowed}"
+                )
+            profiles.append(profile)
+        else:
+            raise ConfigError(f"Invalid execution profile for agent '{agent}': {item!r}")
+    return profiles
+
+
+def eligible_providers(
+    repo_root: Path, agent: str, complexity: str = DEFAULT_COMPLEXITY
+) -> list[str]:
+    """Compatibility view of :func:`eligible_profiles`."""
+    return [profile.provider for profile in eligible_profiles(repo_root, agent, complexity)]
 
 
 def route(
@@ -107,6 +215,7 @@ def route(
     known_providers: set[str],
     *,
     thresholds: Thresholds | None = None,
+    complexity: str = DEFAULT_COMPLEXITY,
 ) -> Decision:
     """Picks a provider for this role and explains the choice.
 
@@ -121,9 +230,9 @@ def route(
     loudly beats failing.
     """
     thresholds = thresholds or load_thresholds(engine_root)
-    declared = eligible_providers(engine_root, agent)
+    declared = eligible_profiles(engine_root, agent, complexity)
 
-    unknown = [p for p in declared if p not in known_providers]
+    unknown = [p.provider for p in declared if p.provider not in known_providers]
     if unknown:
         known = ", ".join(sorted(known_providers))
         raise ConfigError(
@@ -134,14 +243,16 @@ def route(
         row["provider"]: row
         for row in quota_store.pressure(engine_root, window_hours=thresholds.window_hours)
     }
-    history = telemetry.role_performance(engine_root, agent, window_hours=thresholds.window_hours)
-
     candidates: list[Candidate] = []
-    chosen: str | None = None
+    chosen: ExecutionProfile | None = None
 
-    for rank, provider in enumerate(declared, start=1):
+    for rank, profile in enumerate(declared, start=1):
+        provider = profile.provider
         quota_ratio = (pressure.get(provider) or {}).get("used_ratio")
-        record = history.get(provider) or {}
+        record = telemetry.role_performance(
+            engine_root, agent, window_hours=thresholds.window_hours,
+            provider=provider, model=profile.model, reasoning_effort=profile.reasoning_effort,
+        ).get(provider) or {}
         calls = record.get("calls", 0)
         success_rate = record.get("success_rate")
 
@@ -149,9 +260,9 @@ def route(
             candidates.append(
                 Candidate(
                     provider, rank, False, OVER_QUOTA,
-                    f"at {quota_ratio:.0%} of its declared budget, over the "
+                    f"{profile.label}: at {quota_ratio:.0%} of its declared budget, over the "
                     f"{thresholds.max_quota_ratio:.0%} ceiling",
-                    quota_ratio, success_rate, calls,
+                    profile.model, profile.reasoning_effort, quota_ratio, success_rate, calls,
                 )
             )
             continue
@@ -167,63 +278,75 @@ def route(
             candidates.append(
                 Candidate(
                     provider, rank, False, FAILING_ROLE,
-                    f"succeeded {success_rate:.0%} of {calls} times on this role, below the "
+                    f"{profile.label}: succeeded {success_rate:.0%} of {calls} times on this "
+                    "role, below the "
                     f"{thresholds.min_success_rate:.0%} floor",
-                    quota_ratio, success_rate, calls,
+                    profile.model, profile.reasoning_effort, quota_ratio, success_rate, calls,
                 )
             )
             continue
 
         if chosen is None:
-            chosen = provider
+            chosen = profile
             if calls == 0:
-                rule, reason = NO_HISTORY, "first choice; no recorded history on this role yet"
+                rule, reason = NO_HISTORY, (
+                    f"{profile.label}: first choice; no recorded history on this profile yet"
+                )
             else:
                 rule = PREFERRED
                 reason = (
-                    f"first choice clearing both gates — {success_rate:.0%} success over "
+                    f"{profile.label}: first choice clearing both gates — "
+                    f"{success_rate:.0%} success over "
                     f"{calls} calls"
                 )
                 if quota_ratio is not None:
                     reason += f", {quota_ratio:.0%} of budget used"
             candidates.append(
-                Candidate(provider, rank, True, rule, reason, quota_ratio, success_rate, calls)
+                Candidate(provider, rank, True, rule, reason, profile.model, profile.reasoning_effort, quota_ratio, success_rate, calls)
             )
         else:
             candidates.append(
                 Candidate(
                     provider, rank, False, "not_needed",
-                    "not reached — an earlier choice cleared the gates",
-                    quota_ratio, success_rate, calls,
+                    f"not reached — {profile.label}; an earlier choice cleared the gates",
+                    profile.model, profile.reasoning_effort, quota_ratio, success_rate, calls,
                 )
             )
 
     if chosen is not None:
         picked = next(c for c in candidates if c.chosen)
-        return Decision(chosen, picked.rule, picked.reason, candidates)
+        return Decision(
+            chosen.provider, picked.rule, picked.reason, candidates,
+            chosen.model, chosen.reasoning_effort, complexity,
+        )
 
     # Everything was gated. Run the declared first choice regardless, and say
     # so plainly — the alternative is refusing to work, which is worse.
     fallback = declared[0]
     reason = (
         f"every candidate was gated ({'; '.join(c.reason for c in candidates)}); "
-        f"running {fallback} anyway rather than blocking the run"
+        f"running {fallback.label} anyway rather than blocking the run"
     )
     candidates = [
         Candidate(
             c.provider,
             c.rank,
-            c.provider == fallback,
+            c.rank == 1,
             ALL_GATED,
             # The chosen row has to say it is running despite its gate, or a
             # reader sees only the rejection and cannot tell what happened.
             f"{c.reason} — running it anyway rather than blocking the run"
-            if c.provider == fallback
+            if c.rank == 1
             else c.reason,
+            c.model,
+            c.reasoning_effort,
             c.quota_ratio,
             c.success_rate,
             c.calls,
         )
         for c in candidates
     ]
-    return Decision(fallback, ALL_GATED, reason, candidates)
+    return Decision(
+        fallback.provider, ALL_GATED, reason, candidates,
+        fallback.model, fallback.reasoning_effort, complexity,
+    )

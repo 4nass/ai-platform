@@ -208,6 +208,21 @@ def test_run_invokes_codex_exec_with_the_verified_flags(monkeypatch: pytest.Monk
     assert "--cd" in cmd
 
 
+def test_run_pins_profile_model_and_toml_string_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _mock_run_sequence(_authed(), _completed(["codex"], stdout=REAL_EVENTS))
+    monkeypatch.setattr(subprocess, "run", fake)
+    task = _task()
+    task.model = "gpt-5.6-sol"
+    task.reasoning_effort = "xhigh"
+
+    result = adapter.run(task)
+
+    cmd = fake.captured[1]
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol"
+    assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+    assert result.usage.model == "gpt-5.6-sol"
+
+
 def test_run_closes_stdin_so_codex_does_not_block_waiting_on_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

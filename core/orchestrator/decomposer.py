@@ -15,6 +15,7 @@ import re
 # format with examples, so an inline mention must not win over the real
 # trailing answer.
 _TASKS_RE = re.compile(r"^\**TASKS:\**\s*(.+)", re.IGNORECASE | re.MULTILINE)
+_COMPLEXITY_RE = re.compile(r"^\**COMPLEXITY:\**\s*(\w+)", re.IGNORECASE | re.MULTILINE)
 
 
 def build_description(request: str, known_ids: list[str]) -> str:
@@ -22,7 +23,8 @@ def build_description(request: str, known_ids: list[str]) -> str:
     return (
         f'Decide which task types are needed for this request: "{request}".\n\n'
         f"Available task types: {ids}.\n\n"
-        "End your response with exactly one line: 'TASKS: ' followed by a comma-separated "
+        "End your response with exactly two lines: first 'COMPLEXITY: ' followed by one "
+        "of routine, complex, or critical; then 'TASKS: ' followed by a comma-separated "
         "subset of the task types above."
     )
 
@@ -41,3 +43,12 @@ def parse_tasks(text: str, known_ids: list[str]) -> list[str] | None:
     selected = [item.strip() for item in lines[-1].split(",")]
     valid = [item for item in selected if item in known]
     return valid or None
+
+
+def parse_complexity(text: str) -> str | None:
+    """Returns only one of the engine's bounded complexity classes."""
+    matches = _COMPLEXITY_RE.findall(text)
+    if not matches:
+        return None
+    value = matches[-1].lower()
+    return value if value in {"routine", "complex", "critical"} else None

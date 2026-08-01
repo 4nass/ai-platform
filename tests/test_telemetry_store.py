@@ -257,6 +257,52 @@ def test_metadata_defaults_to_empty_json_not_null(tmp_path: Path) -> None:
         assert json.loads(con.execute("SELECT metadata FROM runs").fetchone()[0]) == {}
 
 
+def test_existing_database_is_additively_migrated_for_reasoning_effort(tmp_path: Path) -> None:
+    import sqlite3
+
+    con = sqlite3.connect(tmp_path / telemetry.DB_PATH)
+    old_schema = telemetry.SCHEMA.replace("  reasoning_effort TEXT,\n", "")
+    con.executescript(old_schema)
+    con.commit()
+    con.close()
+
+    with telemetry.connect(tmp_path) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(calls)")}
+
+    assert "reasoning_effort" in columns
+
+
+def test_configured_profile_is_stored_even_without_provider_usage(tmp_path: Path) -> None:
+    recorder = telemetry.RunRecorder(tmp_path, "x")
+    recorder.record_call(
+        agent="reviewer", provider="codex_cli", model="gpt-x", reasoning_effort="high",
+        result=ProviderResult(success=False, summary="failed before usage"),
+    )
+
+    with telemetry.connect(tmp_path) as con:
+        row = con.execute("SELECT model, reasoning_effort FROM calls").fetchone()
+
+    assert tuple(row) == ("gpt-x", "high")
+
+
+def test_role_performance_can_select_an_exact_profile(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with telemetry.connect(tmp_path) as con:
+        con.executemany(
+            "INSERT INTO calls(agent, provider, model, reasoning_effort, success, started_at) "
+            "VALUES('reviewer', 'codex_cli', ?, ?, ?, ?)",
+            [("fast", "low", 0, now), ("deep", "high", 1, now)],
+        )
+
+    result = telemetry.role_performance(
+        tmp_path, "reviewer", window_hours=24, provider="codex_cli",
+        model="deep", reasoning_effort="high",
+    )
+
+    assert result["codex_cli"]["calls"] == 1
+    assert result["codex_cli"]["success_rate"] == 1.0
+
+
 # --- provider pressure: the quota substrate that replaces dollar reasoning ---
 
 

@@ -41,17 +41,23 @@ class StageResult:
     files_changed: list[str] = field(default_factory=list)
 
 
-def resolve_provider(engine_root: Path, agent: str) -> str:
+def resolve_provider(
+    engine_root: Path, agent: str, complexity: str = router.DEFAULT_COMPLEXITY
+) -> str:
     """The provider this role should use right now, per the router.
 
     Was a static config lookup; it is now a decision. Callers that only need
     the name keep this signature — `route_agent` returns the reasoning too.
     """
-    return route_agent(engine_root, agent).provider
+    return route_agent(engine_root, agent, complexity).provider
 
 
-def route_agent(engine_root: Path, agent: str) -> router.Decision:
-    return router.route(engine_root, agent, known_providers=set(PROVIDERS))
+def route_agent(
+    engine_root: Path, agent: str, complexity: str = router.DEFAULT_COMPLEXITY
+) -> router.Decision:
+    return router.route(
+        engine_root, agent, known_providers=set(PROVIDERS), complexity=complexity
+    )
 
 
 def run_task(
@@ -63,6 +69,7 @@ def run_task(
     recorder=None,
     stage_id: str | None = None,
     engine_root: Path | None = None,
+    complexity: str = router.DEFAULT_COMPLEXITY,
 ) -> ProviderResult:
     """Runs one task through its configured provider, recording what it cost.
 
@@ -87,7 +94,7 @@ def run_task(
     of the engine's real, persistent one.
     """
     engine_root = engine_root or repo_root
-    decision = route_agent(engine_root, agent)
+    decision = route_agent(engine_root, agent, complexity)
     provider_name = decision.provider
     provider = PROVIDERS[provider_name]
 
@@ -100,6 +107,9 @@ def run_task(
         description=description,
         repo_root=repo_root,
         engine_root=engine_root,
+        model=decision.model,
+        reasoning_effort=decision.reasoning_effort,
+        complexity=complexity,
         context_paths=context_paths,
         context_render=rendered.text if rendered else "",
     )
@@ -113,6 +123,8 @@ def run_task(
         recorder.record_call(
             agent=agent,
             provider=provider_name,
+            model=decision.model,
+            reasoning_effort=decision.reasoning_effort,
             result=result,
             stage_id=stage_id,
             # What this call actually received — not what was selected. The
@@ -127,7 +139,7 @@ def run_task(
             # Per call, not per run: two providers in the same run can get
             # different renderings, so the run-level config snapshot alone
             # can't tell you what a given call was actually sent.
-            metadata=_call_metadata(context, provider_reads_files, result),
+            metadata=_call_metadata(context, provider_reads_files, result, complexity),
         )
     return result
 
@@ -152,7 +164,10 @@ MAX_ERROR_CHARS = 2000
 
 
 def _call_metadata(
-    context: SelectedContext | None, provider_reads_files: bool, result: ProviderResult
+    context: SelectedContext | None,
+    provider_reads_files: bool,
+    result: ProviderResult,
+    complexity: str,
 ) -> dict:
     """What this call needs recorded beyond its numbers.
 
@@ -165,7 +180,12 @@ def _call_metadata(
     measuring a failure rate and being able to act on one. Truncated so a
     runaway stderr can't bloat the row.
     """
-    metadata: dict = {"injection": _injection_label(context, provider_reads_files)}
+    metadata: dict = {
+        "injection": _injection_label(context, provider_reads_files),
+        "complexity": complexity,
+    }
+    if result.usage is not None and result.usage.model:
+        metadata["effective_model"] = result.usage.model
     if not result.success and result.summary:
         metadata["error"] = result.summary[:MAX_ERROR_CHARS]
     return metadata
