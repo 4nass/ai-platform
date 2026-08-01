@@ -224,16 +224,22 @@ def route(
             continue
 
         table = Table(title=f"{name} ({decision.complexity}) → {decision.provider}")
-        for column in ("rank", "provider", "quota", "success", "calls", "decision"):
+        # model/effort get their own column rather than only appearing inside
+        # the wrapped reason prose: they are what this role's routing now turns
+        # on, and two candidates can differ by nothing else. Kept to one column
+        # because eight of them squeeze the reason into unreadable wrapping.
+        for column in ("rank", "provider", "profile", "quota", "success", "calls", "decision"):
             table.add_column(column)
 
         for candidate in decision.candidates:
             quota_ratio = f"{candidate.quota_ratio:.0%}" if candidate.quota_ratio is not None else "-"
             success = f"{candidate.success_rate:.0%}" if candidate.success_rate is not None else "-"
             style = "green" if candidate.chosen else "dim"
+            profile = "/".join(p for p in (candidate.model, candidate.reasoning_effort) if p) or "-"
             table.add_row(
                 str(candidate.rank),
                 candidate.provider,
+                profile,
                 quota_ratio,
                 success,
                 str(candidate.calls),

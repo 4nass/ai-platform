@@ -1,0 +1,12 @@
+# Normalize to LF in the repository, regardless of what wrote the file.
+#
+# Agents drive real CLIs here, and a provider that rewrites a file with CRLF
+# under WSL2 turns an otherwise-empty change into a whole-file diff — which is
+# both unreviewable and enough to make the review gate judge noise instead of
+# the actual change. Caught exactly that way: 19 files "modified" with zero
+# content difference.
+* text=auto eol=lf
+
+# Generated/binary, never normalize.
+*.pkl binary
+*.sqlite binary

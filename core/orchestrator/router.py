@@ -202,13 +202,6 @@ def eligible_profiles(
     return profiles
 
 
-def eligible_providers(
-    repo_root: Path, agent: str, complexity: str = DEFAULT_COMPLEXITY
-) -> list[str]:
-    """Compatibility view of :func:`eligible_profiles`."""
-    return [profile.provider for profile in eligible_profiles(repo_root, agent, complexity)]
-
-
 def route(
     engine_root: Path,
     agent: str,
