@@ -116,9 +116,13 @@ def _graph_from_dict(data: dict) -> nx.MultiDiGraph:
 def load_or_build(repo_root: Path) -> nx.MultiDiGraph:
     """Rebuilds only when the current HEAD differs from the cached one.
 
-    Safe to key on HEAD alone (no working-tree hash needed): callers only
-    reach this after `git_ops.ensure_clean_worktree()`, so the tree is
-    guaranteed clean whenever this runs.
+    The cache is keyed on HEAD, but `build_graph` reads the *working tree* —
+    so those two only agree when the tree is clean. That used to be
+    guaranteed: runs refused to start otherwise. Since the run branch moved
+    into its own integration worktree, a dirty target tree is allowed, and a
+    graph built from uncommitted state must not be written to a cache the
+    next clean run at the same HEAD would then trust. So a dirty tree still
+    *reads* the cache (it's the right graph for HEAD) but never *writes* one.
     """
     repo = git.Repo(repo_root)
     head_sha = repo.head.commit.hexsha
@@ -133,11 +137,31 @@ def load_or_build(repo_root: Path) -> nx.MultiDiGraph:
             pass  # corrupt or unrecognized cache — fall through and rebuild
 
     graph = build_graph(repo_root)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps({"head_sha": head_sha, **_graph_to_dict(graph)}), encoding="utf-8"
-    )
+    if not _source_tree_is_dirty(repo):
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"head_sha": head_sha, **_graph_to_dict(graph)}), encoding="utf-8"
+        )
     return graph
+
+
+def _source_tree_is_dirty(repo: git.Repo) -> bool:
+    """Whether anything the graph is built *from* differs from HEAD.
+
+    Deliberately not `repo.is_dirty(untracked_files=True)`: that counts this
+    module's own cache file, so in a target repo that doesn't gitignore
+    `.ai-platform/` the first write would make the tree permanently "dirty"
+    and no cache would ever be written again. Caught by the malicious-cache
+    test, whose fixture has no .gitignore.
+
+    Excluding the whole `.ai-platform/` directory is the right rule, not a
+    workaround: it holds engine-generated artifacts (this cache, the vector
+    index), and `chunking.iter_source_files` — the only thing feeding
+    `build_graph` — already skips gitignored files, so nothing in there can
+    change the graph regardless.
+    """
+    status = repo.git.status("--porcelain", "--untracked-files=all", "--", ".", f":(exclude){CACHE_PATH.parts[0]}")
+    return bool(status.strip())
 
 
 def _relation_strength(data: dict) -> float:

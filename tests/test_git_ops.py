@@ -11,17 +11,17 @@ import pytest
 
 from core.orchestrator.git_ops import (
     commit_all,
-    create_branch,
+    create_integration_worktree,
     create_worktree,
     current_commit,
     diff_since,
     disable_hooks,
-    ensure_clean_worktree,
     format_changed_files,
     ignored_writes,
     merge_worktree,
     prune_worktrees,
     remove_worktree,
+    uncommitted_changes,
 )
 
 
@@ -37,37 +37,67 @@ def repo(tmp_path: Path) -> git.Repo:
     return r
 
 
-def test_ensure_clean_worktree_passes_when_clean(repo: git.Repo) -> None:
-    ensure_clean_worktree(repo)
+def test_uncommitted_changes_false_when_clean(repo: git.Repo) -> None:
+    assert uncommitted_changes(repo) is False
 
 
-def test_ensure_clean_worktree_raises_when_dirty(repo: git.Repo) -> None:
+def test_uncommitted_changes_true_when_dirty(repo: git.Repo) -> None:
+    """No longer fatal — the run works in its own integration worktree, so a
+    dirty target tree is safe. It still gets warned about, since a worktree
+    checkout only contains committed state."""
     Path(repo.working_tree_dir, "dirty.txt").write_text("x", encoding="utf-8")
 
-    with pytest.raises(RuntimeError):
-        ensure_clean_worktree(repo)
+    assert uncommitted_changes(repo) is True
 
 
 def test_current_commit_matches_head(repo: git.Repo) -> None:
     assert current_commit(repo) == repo.head.commit.hexsha
 
 
-def test_create_branch_slugifies_the_request(repo: git.Repo) -> None:
-    name = create_branch(repo, "Add OAuth2 authentication!")
+def test_create_integration_worktree_slugifies_the_request(repo: git.Repo) -> None:
+    before = repo.active_branch.name
+
+    path, name = create_integration_worktree(repo, "Add OAuth2 authentication!")
 
     assert name == "engine/add-oauth2-authentication"
-    assert repo.active_branch.name == name
+    assert git.Repo(path).active_branch.name == name
+    # the caller's own checkout is left exactly where it was
+    assert repo.active_branch.name == before
+    remove_worktree(repo, path)
 
 
-def test_create_branch_avoids_name_collision(repo: git.Repo) -> None:
-    base = repo.active_branch.name
-
-    first = create_branch(repo, "Add feature")
-    repo.git.checkout(base)
-    second = create_branch(repo, "Add feature")
+def test_create_integration_worktree_avoids_name_collision(repo: git.Repo) -> None:
+    first_path, first = create_integration_worktree(repo, "Add feature")
+    second_path, second = create_integration_worktree(repo, "Add feature")
 
     assert first == "engine/add-feature"
     assert second == "engine/add-feature-2"
+    remove_worktree(repo, first_path)
+    remove_worktree(repo, second_path)
+
+
+def test_two_integration_worktrees_can_coexist(repo: git.Repo) -> None:
+    """The point of the change: two runs against the same repo no longer
+    compete for one checkout."""
+    first_path, _ = create_integration_worktree(repo, "first run")
+    second_path, _ = create_integration_worktree(repo, "second run")
+
+    assert first_path.is_dir() and second_path.is_dir()
+    assert first_path != second_path
+    remove_worktree(repo, first_path)
+    remove_worktree(repo, second_path)
+
+
+def test_integration_worktree_branches_from_head_not_the_dirty_tree(repo: git.Repo) -> None:
+    """A worktree checkout only ever contains committed state — which is what
+    makes running against a dirty target safe, and what the supervisor warns
+    about."""
+    Path(repo.working_tree_dir, "uncommitted.py").write_text("x = 1\n", encoding="utf-8")
+
+    path, _ = create_integration_worktree(repo, "run anyway")
+
+    assert not (path / "uncommitted.py").exists()
+    remove_worktree(repo, path)
 
 
 def test_commit_all_with_no_changes_returns_empty(repo: git.Repo) -> None:
@@ -107,7 +137,7 @@ def test_format_changed_files_multiple() -> None:
 
 
 def test_create_worktree_checks_out_a_new_branch_from_base(repo: git.Repo) -> None:
-    base_branch = create_branch(repo, "Add feature")
+    base_branch = create_integration_worktree(repo, "Add feature")[1]
 
     worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
 
@@ -119,45 +149,60 @@ def test_create_worktree_checks_out_a_new_branch_from_base(repo: git.Repo) -> No
 
 
 def test_create_worktree_sees_files_committed_on_the_base_branch(repo: git.Repo) -> None:
-    base_branch = create_branch(repo, "Add feature")
-    Path(repo.working_tree_dir, "architecture.md").write_text("plan\n", encoding="utf-8")
-    commit_all(repo, "architecture done")
+    """A later stage must see what earlier ones merged. Those commits land on
+    the *integration* worktree now, not the caller's checkout — which is the
+    whole point of the isolation, and what this asserts."""
+    integration_path, base_branch = create_integration_worktree(repo, "Add feature")
+    integration_repo = git.Repo(integration_path)
+    Path(integration_path, "architecture.md").write_text("plan\n", encoding="utf-8")
+    commit_all(integration_repo, "architecture done")
 
     worktree_path, _ = create_worktree(repo, base_branch, "backend")
 
     assert (worktree_path / "architecture.md").is_file()
+    # the caller's own checkout never saw any of it
+    assert not Path(repo.working_tree_dir, "architecture.md").exists()
+    remove_worktree(repo, worktree_path)
+    remove_worktree(repo, integration_path)
 
 
 def test_merge_worktree_merges_changes_back(repo: git.Repo) -> None:
-    base_branch = create_branch(repo, "Add feature")
+    integration_path, base_branch = create_integration_worktree(repo, "Add feature")
     worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
     Path(worktree_path, "backend.py").write_text("x = 1\n", encoding="utf-8")
     commit_all(git.Repo(worktree_path), "backend done")
 
-    merged = merge_worktree(repo, task_branch)
+    merged = merge_worktree(git.Repo(integration_path), task_branch)
 
     assert merged is True
-    assert Path(repo.working_tree_dir, "backend.py").is_file()
+    assert (integration_path / "backend.py").is_file()
+    # merged into the run's branch, not into whatever the user had checked out
+    assert not Path(repo.working_tree_dir, "backend.py").exists()
+    remove_worktree(repo, worktree_path)
+    remove_worktree(repo, integration_path)
 
 
 def test_merge_worktree_returns_false_on_conflict_and_aborts_cleanly(repo: git.Repo) -> None:
-    base_branch = create_branch(repo, "Add feature")
+    integration_path, base_branch = create_integration_worktree(repo, "Add feature")
+    integration_repo = git.Repo(integration_path)
     worktree_path, task_branch = create_worktree(repo, base_branch, "backend")
 
-    # main and the worktree branch each change the same file differently
-    Path(repo.working_tree_dir, "README.md").write_text("main change\n", encoding="utf-8")
-    commit_all(repo, "main changes readme")
+    # the run branch and the task branch each change the same file differently
+    Path(integration_path, "README.md").write_text("run change\n", encoding="utf-8")
+    commit_all(integration_repo, "run branch changes readme")
     Path(worktree_path, "README.md").write_text("worktree change\n", encoding="utf-8")
     commit_all(git.Repo(worktree_path), "worktree changes readme")
 
-    merged = merge_worktree(repo, task_branch)
+    merged = merge_worktree(integration_repo, task_branch)
 
     assert merged is False
-    assert not repo.is_dirty(untracked_files=True)  # `merge --abort` left it clean
+    assert not integration_repo.is_dirty(untracked_files=True)  # `merge --abort` left it clean
+    remove_worktree(repo, worktree_path)
+    remove_worktree(repo, integration_path)
 
 
 def test_remove_worktree_removes_the_directory(repo: git.Repo) -> None:
-    base_branch = create_branch(repo, "Add feature")
+    base_branch = create_integration_worktree(repo, "Add feature")[1]
     worktree_path, _ = create_worktree(repo, base_branch, "backend")
 
     remove_worktree(repo, worktree_path)
@@ -166,7 +211,7 @@ def test_remove_worktree_removes_the_directory(repo: git.Repo) -> None:
 
 
 def test_prune_worktrees_cleans_up_stale_registration(repo: git.Repo) -> None:
-    base_branch = create_branch(repo, "Add feature")
+    base_branch = create_integration_worktree(repo, "Add feature")[1]
     worktree_path, _ = create_worktree(repo, base_branch, "backend")
     shutil.rmtree(worktree_path)  # simulate a crashed run that left the directory gone
 
@@ -182,7 +227,7 @@ def test_create_worktree_does_not_reuse_a_leftover_task_branch(repo: git.Repo) -
     Deriving the next run's branch name without checking would then die here —
     before reaching the provider, with nothing recorded to explain why.
     Observed in a real run."""
-    branch = create_branch(repo, "add a thing")
+    branch = create_integration_worktree(repo, "add a thing")[1]
     first_path, first_branch = create_worktree(repo, branch, "documentation")
     remove_worktree(repo, first_path)  # worktree gone, branch deliberately kept
 
@@ -194,7 +239,7 @@ def test_create_worktree_does_not_reuse_a_leftover_task_branch(repo: git.Repo) -
 
 
 def test_task_branch_names_stay_readable_when_uniquified(repo: git.Repo) -> None:
-    branch = create_branch(repo, "add a thing")
+    branch = create_integration_worktree(repo, "add a thing")[1]
     path_one, _ = create_worktree(repo, branch, "tests")
     remove_worktree(repo, path_one)
 

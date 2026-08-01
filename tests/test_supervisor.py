@@ -200,13 +200,83 @@ def test_run_commits_each_stage_separately(monkeypatch: pytest.MonkeyPatch, fake
     _patch_provider(monkeypatch, _multi_stage_run())
     _patch_tests(monkeypatch, passed=True, output="ok")
 
-    supervisor.run(fake_repo, fake_repo, "add oauth2")
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     repo = git.Repo(fake_repo)
-    messages = [c.message for c in repo.iter_commits(max_count=20)]
+    # walk the run branch, not HEAD: the commits land in the run's own
+    # integration worktree, and the caller's checkout never moves
+    messages = [c.message for c in repo.iter_commits(report.branch, max_count=20)]
     assert any("architecture:" in m for m in messages)
     assert any("backend:" in m for m in messages)
     assert any("documentation:" in m for m in messages)
+
+
+def test_run_never_moves_the_targets_own_checkout(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The point of the integration worktree: a run used to switch the user's
+    HEAD to engine/<slug> and leave it there."""
+    repo = git.Repo(fake_repo)
+    branch_before = repo.active_branch.name
+    head_before = repo.head.commit.hexsha
+
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert repo.active_branch.name == branch_before
+    assert repo.head.commit.hexsha == head_before
+    assert report.branch != branch_before
+    # the work is on the run branch, ahead of where the caller still sits
+    assert repo.commit(report.branch).hexsha != head_before
+
+
+def test_run_tolerates_a_dirty_target_tree_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Used to be a hard refusal. Now allowed, because nothing writes to that
+    tree -- but warned about, since the run branches from HEAD while the
+    injected context still carries the uncommitted diff."""
+    Path(fake_repo, "src.py").write_text("def foo():\n    return 999\n", encoding="utf-8")
+
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert report.summary == "done"
+    assert "uncommitted changes" in capsys.readouterr().out
+    # the uncommitted edit is still sitting there, untouched
+    assert "999" in Path(fake_repo, "src.py").read_text(encoding="utf-8")
+
+
+def test_a_successful_run_removes_its_integration_worktree_but_keeps_the_branch(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert report.summary == "done"
+    repo = git.Repo(fake_repo)
+    assert "engine-run-" not in repo.git.worktree("list")
+    assert report.branch in {h.name for h in repo.heads}  # the deliverable survives
+
+
+def test_a_failed_run_keeps_its_integration_worktree_for_inspection(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On failure the on-disk state answers questions the branch alone can't."""
+    _patch_provider(monkeypatch, _multi_stage_run(verdict="VERDICT: FAIL"))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert report.summary == "needs attention"
+    assert "engine-run-" in git.Repo(fake_repo).git.worktree("list")
+    assert "Left for inspection" in capsys.readouterr().out
 
 
 def test_run_isolates_a_failed_stages_partial_edits_to_its_own_worktree(

@@ -11,12 +11,16 @@ from pathlib import Path
 import git
 
 
-def ensure_clean_worktree(repo: git.Repo) -> None:
-    if repo.is_dirty(untracked_files=True):
-        raise RuntimeError(
-            "The git working tree isn't clean: commit or stash your changes "
-            "before running the prototype."
-        )
+def uncommitted_changes(repo: git.Repo) -> bool:
+    """Whether the working tree has changes git hasn't recorded.
+
+    No longer a precondition for a run: since the run branch is checked out
+    in its own integration worktree (`create_integration_worktree`), nothing
+    the engine does touches this tree, so a dirty one is safe to work in
+    while a run is going. It still matters enough to warn about — see
+    `supervisor.run` for what the warning says and why.
+    """
+    return repo.is_dirty(untracked_files=True)
 
 
 def current_commit(repo: git.Repo) -> str:
@@ -40,11 +44,28 @@ def _unused_branch_name(repo: git.Repo, base_name: str) -> str:
     return f"{base_name}-{suffix}"
 
 
-def create_branch(repo: git.Repo, request: str) -> str:
+def create_integration_worktree(repo: git.Repo, request: str) -> tuple[Path, str]:
+    """The run's own checkout of a fresh `engine/<slug>` branch.
+
+    Replaces checking that branch out in the caller's working tree, which
+    made a run invasive in three ways at once: it switched the user's HEAD
+    out from under them, left them on the engine branch afterwards, and made
+    two concurrent runs impossible since both wanted the same tree. Every
+    stage's worktree branches from here, and every merge/commit/diff for the
+    run happens here — the target repo's own checkout is never written to.
+
+    Branched from the repo's current HEAD, not from its working tree: a
+    worktree checkout only ever contains committed state, so uncommitted
+    work in the target is invisible to the run. That's what makes running
+    against a dirty tree safe, and also why `supervisor.run` warns about it
+    (the context still shows that diff, so the agent could see code that
+    isn't in what it's editing).
+    """
     branch_name = _unused_branch_name(repo, f"engine/{_slugify(request)}")
-    new_branch = repo.create_head(branch_name)
-    new_branch.checkout()
-    return branch_name
+    worktree_path = Path(tempfile.mkdtemp(prefix="engine-run-"))
+    worktree_path.rmdir()  # `git worktree add` needs to create this path itself
+    repo.git.worktree("add", str(worktree_path), "-b", branch_name, "HEAD")
+    return worktree_path, branch_name
 
 
 def commit_all(repo: git.Repo, summary: str) -> list[str]:

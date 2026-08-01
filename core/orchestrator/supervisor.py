@@ -222,10 +222,15 @@ def run(
     for an external target: config/prompts/telemetry are engine-scoped and
     fixed, while git operations, the test command and the context index are
     target-scoped (see core.context.manager, core.orchestrator.test_runner).
+
+    A third root appears once work starts: the run's own *integration*
+    worktree, where the `engine/<slug>` branch is checked out and where every
+    merge, correction commit, test run and diff happens. `target_root`'s own
+    checkout is only ever read — never switched, never written to — so a run
+    can proceed while its target is being worked in.
     """
     repo = git.Repo(target_root)
     if not dry_run:
-        git_ops.ensure_clean_worktree(repo)
         git_ops.prune_worktrees(repo)
 
     console.rule("Engine")
@@ -235,13 +240,20 @@ def run(
 
     context_manager = ContextManager(target_root, engine_root=engine_root)
     context_manager.index_repo()
-    # Baseline for the correction loop's ignored_writes check below: unlike a
-    # DAG stage's worktree (a fresh checkout that starts with none of these),
-    # target_root already legitimately has .ai-platform/ at this point --
-    # index_repo() just wrote it. Without subtracting this, the corrector's
-    # very own context index would be reported as something *it* wrote.
-    baseline_ignored = set(git_ops.ignored_writes(repo))
     context = context_manager.select_context(request)
+
+    if not dry_run and git_ops.uncommitted_changes(repo):
+        # No longer fatal: the run works in its own integration worktree, so
+        # nothing here gets touched. But a worktree checkout only contains
+        # *committed* state, while the context still carries this tree's
+        # uncommitted diff — so the agent can be shown code that isn't in
+        # what it's editing. Worth saying out loud rather than silently
+        # tolerating, since the mismatch is invisible from the outcome.
+        console.print(
+            "[bold yellow]Working tree has uncommitted changes[/bold yellow] — the run "
+            "branches from HEAD, so they are not in what the agents edit, even though "
+            "the injected context still shows them."
+        )
     kept_files = len(context.context_paths())
     if kept_files:
         console.print(
@@ -344,7 +356,19 @@ def run(
         )
 
     base_sha = git_ops.current_commit(repo)
-    branch = git_ops.create_branch(repo, request)
+    integration_root, branch = git_ops.create_integration_worktree(repo, request)
+    # Everything from here on operates on the run's own checkout. `repo` (the
+    # target's working tree) is still used for hook neutralization, which is
+    # repository-wide config rather than per-worktree, and for pruning.
+    integration_repo = git.Repo(integration_root)
+    console.print(f"[bold]Integration worktree:[/bold] {integration_root} ({branch})")
+    # Baseline for the correction loop's ignored_writes check below. Taken on
+    # the integration worktree, which starts as a clean checkout containing
+    # only tracked files — so in practice this is empty, unlike the old
+    # target_root baseline that had to subtract the .ai-platform/ index.
+    # Kept rather than assumed empty: a target whose .gitignore matches
+    # something git *does* track would otherwise look like a violation.
+    baseline_ignored = set(git_ops.ignored_writes(integration_repo))
 
     with git_ops.disable_hooks(repo):
         remaining = {t.id: t for t in workflow.tasks}
@@ -381,7 +405,7 @@ def run(
                     snapshot = list(completed)
                     future = executor.submit(
                         _run_stage_in_worktree,
-                        target_root,
+                        integration_root,
                         engine_root,
                         branch,
                         task,
@@ -418,10 +442,10 @@ def run(
                         worktree_path, task_branch = None, None
 
                     if stage_result.status == "done":
-                        merged = git_ops.merge_worktree(repo, task_branch)
+                        merged = git_ops.merge_worktree(integration_repo, task_branch)
                         if merged:
-                            git_ops.remove_worktree(repo, worktree_path)
-                            repo.git.branch("-D", task_branch)
+                            git_ops.remove_worktree(integration_repo, worktree_path)
+                            integration_repo.git.branch("-D", task_branch)
                             console.print(
                                 f"[bold]{task.id}[/bold]: {git_ops.format_changed_files(stage_result.files_changed)}"
                             )
@@ -442,7 +466,7 @@ def run(
                             # message, not a dead run — the stage already failed
                             # and every other one is still in flight.
                             try:
-                                git_ops.remove_worktree(repo, worktree_path)
+                                git_ops.remove_worktree(integration_repo, worktree_path)
                             except Exception as exc:
                                 console.print(
                                     f"[bold yellow]could not remove {worktree_path}[/bold yellow]: {exc}"
@@ -469,12 +493,12 @@ def run(
 
         any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
-        test_result = test_runner.run_tests(target_root)
+        test_result = test_runner.run_tests(integration_root)
         _print_test_result(test_result)
 
-        diff = git_ops.diff_since(repo, base_sha)
+        diff = git_ops.diff_since(integration_repo, base_sha)
         review_result = scheduler.run_task(
-            target_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
+            integration_root, "reviewer", review.build_description(request, diff), recorder=recorder, engine_root=engine_root, complexity=complexity
         )
         review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
         review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
@@ -508,7 +532,7 @@ def run(
                     review_summary=review_result.summary if review_passed is False else "",
                 )
                 correction_result = scheduler.run_task(
-                    target_root,
+                    integration_root,
                     "corrector",
                     correction_description,
                     context,
@@ -518,7 +542,7 @@ def run(
                     complexity=complexity,
                 )
                 corrected_files = git_ops.commit_all(
-                    repo, f"correction {attempt}: {correction_result.summary or request}"
+                    integration_repo, f"correction {attempt}: {correction_result.summary or request}"
                 )
                 # The corrector runs directly on target_root, not a throwaway
                 # worktree -- an ignored write here persists past this run, unlike
@@ -528,7 +552,7 @@ def run(
                 # be trusted to reason about. Diffed against baseline_ignored,
                 # not raw -- target_root already has .ai-platform/ from
                 # index_repo() above, unlike a stage's fresh worktree checkout.
-                ignored = [p for p in git_ops.ignored_writes(repo) if p not in baseline_ignored]
+                ignored = [p for p in git_ops.ignored_writes(integration_repo) if p not in baseline_ignored]
                 if ignored:
                     console.print(
                         f"[bold red]correction-{attempt} wrote outside version control[/bold red]: "
@@ -539,12 +563,12 @@ def run(
                 all_files_changed.extend(corrected_files)
                 console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
 
-                test_result = test_runner.run_tests(target_root)
+                test_result = test_runner.run_tests(integration_root)
                 _print_test_result(test_result)
 
-                diff = git_ops.diff_since(repo, base_sha)
+                diff = git_ops.diff_since(integration_repo, base_sha)
                 review_result = scheduler.run_task(
-                    target_root,
+                    integration_root,
                     "reviewer",
                     review.build_description(request, diff),
                     recorder=recorder,
@@ -563,6 +587,23 @@ def run(
 
     summary = "done" if overall_ok else "needs attention"
 
+    # The branch is the deliverable and always survives — nothing is ever
+    # auto-merged, so `git checkout engine/<slug>` is how the work is picked
+    # up either way. The *directory* only earns its keep when something went
+    # wrong: that's when the exact on-disk state (untracked files, test
+    # artifacts, a half-applied edit) answers questions the branch alone
+    # can't. On success it would just accumulate, which is the leak that
+    # issue #1 was about, one level up.
+    if overall_ok:
+        try:
+            git_ops.remove_worktree(integration_repo, integration_root)
+        except Exception as exc:
+            console.print(
+                f"[bold yellow]could not remove {integration_root}[/bold yellow]: {exc}"
+            )
+    else:
+        console.print(f"[bold]Left for inspection:[/bold] {integration_root} ({branch})")
+
     totals: dict = {}
     if recorder is not None:
         recorder.finish(branch=branch, summary=summary)
@@ -572,6 +613,8 @@ def run(
     if correction_attempts:
         console.print(f"[bold]Corrections:[/bold] {correction_attempts} attempt(s)")
     console.print(f"[bold]Summary:[/bold] {summary}")
+    if overall_ok:
+        console.print(f"[bold]Branch:[/bold] {branch} — review it, then merge if you're happy")
 
     return RunReport(
         branch=branch,
