@@ -4,3 +4,12 @@
 # go test ./..., etc). Absent entirely, tests are skipped rather than
 # assumed to be "uv run pytest -q".
 test_command: "uv run pytest -q"
+
+# Tests run sandboxed (bubblewrap: no network, no writes outside the repo)
+# by default -- see core/orchestrator/test_runner.py, issue #4. HF_HUB_OFFLINE
+# avoids one real bit of friction that surfaced building this: the embedding
+# model loader does a HEAD request to check for updates even when the model
+# is already cached locally, which the sandbox's network isolation turns into
+# a real (if harmless) failure instead of a silent no-op.
+test_env:
+  HF_HUB_OFFLINE: "1"

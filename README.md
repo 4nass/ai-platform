@@ -80,10 +80,16 @@ uv run ai-platform run "Add a simple utility function" --repo ~/code/some-other-
 
 **Declaring how a target repo validates a change.** `core/orchestrator/test_runner.py` never assumes `pytest`: it reads `test_command` (and optionally `test_timeout`, default 120s) from a `.ai-platform.yml` at the target repo's root. Absent entirely, tests are skipped — cleanly labeled `SKIPPED`, not silently treated as passing without saying so — rather than run a command that doesn't apply to that stack.
 
+**Agent-written tests run before any review verdict exists** (issue #4) — that's inherent to "run the target's own test suite as the verification step," not something reordering fixes. What's fixable is that they used to run with the invoking user's full, unsandboxed privileges. By default, when [`bwrap`](https://github.com/containers/bubblewrap) is installed, they now run inside one: the host filesystem stays visible *read-only* (so the test command's own toolchain — `uv`, `npm`, `go`, whatever — keeps resolving normally; there's no per-target container image to know what a given repo needs), the target repo is bound read-write, and every namespace is unshared — no network, no writes anywhere else on the host. This is deliberately not the same guarantee a container would give; it closes the two highest-value risks (destructive writes elsewhere, network exfiltration) without adding a Docker/Podman dependency this project doesn't otherwise have. If `bwrap` isn't installed, tests still run — degrading loudly beats silently running unprotected — with a warning saying so.
+
 ```yaml
 # .ai-platform.yml, at the target repo's root
 test_command: "uv run pytest -q"   # or a list: [npm, test] — or go test ./..., cargo test, etc.
 test_timeout: 120
+test_sandbox: true                 # default; set false to opt out entirely
+sandbox_cache_dirs: ["~/.cache"]   # extra read-write binds a toolchain's cache needs beyond ~/.cache
+test_env:                          # extra environment variables, sandboxed or not
+  HF_HUB_OFFLINE: "1"
 ```
 
 **Check subscription pressure:**

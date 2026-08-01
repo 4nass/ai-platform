@@ -105,10 +105,14 @@ def format_totals(totals: dict) -> str:
     return line
 
 
-def _test_label(result: test_runner.TestResult) -> str:
-    if result.skipped:
-        return "SKIPPED"
-    return "PASS" if result.passed else "FAIL"
+def _print_test_result(result: test_runner.TestResult) -> None:
+    label = "SKIPPED" if result.skipped else ("PASS" if result.passed else "FAIL")
+    sandbox_note = "" if result.sandboxed or result.skipped else " (unsandboxed)"
+    console.print(f"[bold]Tests:[/bold] {label}{sandbox_note}")
+    if result.sandbox_warning:
+        console.print(f"[bold yellow]{result.sandbox_warning}[/bold yellow]")
+    if result.output:
+        console.print(result.output)
 
 
 def _run_stage_in_worktree(
@@ -418,9 +422,7 @@ def run(
         any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
         test_result = test_runner.run_tests(target_root)
-        console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
-        if test_result.output:
-            console.print(test_result.output)
+        _print_test_result(test_result)
 
         diff = git_ops.diff_since(repo, base_sha)
         review_result = scheduler.run_task(
@@ -490,9 +492,7 @@ def run(
                 console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
 
                 test_result = test_runner.run_tests(target_root)
-                console.print(f"[bold]Tests:[/bold] {_test_label(test_result)}")
-                if test_result.output:
-                    console.print(test_result.output)
+                _print_test_result(test_result)
 
                 diff = git_ops.diff_since(repo, base_sha)
                 review_result = scheduler.run_task(
