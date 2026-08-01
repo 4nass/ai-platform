@@ -784,3 +784,102 @@ def test_run_correction_loop_does_not_trigger_on_a_dag_stage_failure(
     assert corrector_calls == []
     assert report.correction_attempts == 0
     assert report.summary == "needs attention"
+
+
+# --- worker crash containment (issue #1) ---
+
+
+def test_an_unknown_agent_fails_one_stage_instead_of_crashing_the_run(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A workflow naming a role that agents.yaml doesn't define used to raise
+    ConfigError out of the worker, through future.result(), killing the whole
+    run and stranding that stage's worktree."""
+    workflow = WORKFLOW_YAML.replace("agent: backend", "agent: not_a_configured_role")
+    (fake_repo / "config" / "workflow.yaml").write_text(workflow, encoding="utf-8")
+    repo = git.Repo(fake_repo)
+    repo.index.add(["config/workflow.yaml"])
+    repo.index.commit("point a task at an undefined role")
+
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    assert by_id["backend"].status == "failed"
+    assert "Unknown agent role" in by_id["backend"].summary
+    # the sibling that shares no dependency with it still ran to completion
+    assert by_id["frontend"].status == "done"
+    assert report.summary == "needs attention"
+
+
+def test_a_provider_raising_fails_one_stage_instead_of_crashing_the_run(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Providers are expected to return a failed ProviderResult, but nothing
+    forces them to — an adapter bug or an unimplemented one raises instead."""
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "backend":
+            raise NotImplementedError("this provider is a stub")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    by_id = {s.id: s for s in report.stages}
+    assert by_id["backend"].status == "failed"
+    assert "NotImplementedError" in by_id["backend"].summary
+    assert by_id["frontend"].status == "done"
+    assert report.summary == "needs attention"
+
+
+def test_a_crashed_stage_leaves_no_worktree_behind(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The leak half of issue #1: the worktree is created before anything
+    that can raise, so an escaping exception stranded the directory with
+    nothing left holding a reference to it."""
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="VERDICT: PASS")
+        if task.agent == "backend":
+            raise RuntimeError("boom")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    listed = git.Repo(fake_repo).git.worktree("list")
+    assert "engine-task/" not in listed  # no task worktree still registered
+    assert "engine-backend-" not in listed
+
+
+def test_a_worker_that_breaks_its_never_raise_contract_is_still_contained(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """_run_stage_in_worktree is written never to raise; this covers the
+    backstop for a bug in that guarantee itself, which is the failure mode
+    the issue is actually about."""
+
+    def exploding_stage(*args, **kwargs):
+        raise RuntimeError("the worker's own error handling failed")
+
+    monkeypatch.setattr(supervisor, "_run_stage_in_worktree", exploding_stage)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert report.summary == "needs attention"
+    assert all(s.status in {"failed", "skipped"} for s in report.stages)

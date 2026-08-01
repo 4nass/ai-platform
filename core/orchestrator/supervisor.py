@@ -137,52 +137,75 @@ def _run_stage_in_worktree(
     about the other's still-in-progress work; and it avoids a data race
     with the main thread, which keeps appending to the real list while
     other tasks are still in flight.
+
+    **Never raises** (issue #1). Anything escaping here surfaces on the main
+    thread at `future.result()`, which kills the entire run *and* strands the
+    worktree this function created — one misconfigured role took down every
+    other stage, and left a directory in /tmp nothing would ever reclaim. So
+    the whole body is guarded and an unexpected error is reported the same
+    way a provider failure is: this stage fails, the DAG degrades around it,
+    and the worktree comes back to the caller so it still gets cleaned up.
     """
     try:
         worktree_path, task_branch = git_ops.create_worktree(git.Repo(target_root), branch, task.id)
-    except git.GitCommandError as exc:
+    except Exception as exc:
+        # Nothing was created (or it failed half-way and git's own bookkeeping
+        # will be pruned next run), so there's no worktree to hand back.
         failure = ProviderResult(success=False, summary=f"worktree setup failed: {exc}")
         return StageResult(task=task, status="failed", result=failure), None, None
 
-    provider_name = scheduler.resolve_provider(engine_root, task.agent, complexity)
-    console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
+    try:
+        provider_name = scheduler.resolve_provider(engine_root, task.agent, complexity)
+        console.print(f"[bold]{task.id}[/bold] ({display_name(provider_name)})...")
 
-    description = scheduler.build_stage_description(request, completed_snapshot)
-    result = scheduler.run_task(
-        worktree_path,
-        task.agent,
-        description,
-        context,
-        recorder=recorder,
-        stage_id=task.id,
-        engine_root=engine_root,
-        complexity=complexity,
-    )
+        description = scheduler.build_stage_description(request, completed_snapshot)
+        result = scheduler.run_task(
+            worktree_path,
+            task.agent,
+            description,
+            context,
+            recorder=recorder,
+            stage_id=task.id,
+            engine_root=engine_root,
+            complexity=complexity,
+        )
 
-    worktree_repo = git.Repo(worktree_path)
-    changed = git_ops.commit_all(worktree_repo, f"{task.id}: {result.summary or request}")
+        worktree_repo = git.Repo(worktree_path)
+        changed = git_ops.commit_all(worktree_repo, f"{task.id}: {result.summary or request}")
 
-    status = "done" if result.success else "failed"
-    bad_files: list[str] = []
-    if result.success:
-        bad_files = contracts.violations(task.agent, changed)
-        # Distinct from a contract violation (which is about *where within
-        # its scope* a role wrote): this is a write git will never see at
-        # all -- gitignored, so invisible to commit_all/the reviewer's diff
-        # regardless of role (see #2). Applies even to backend/frontend/
-        # tests, which have no declared artifact contract.
-        ignored = git_ops.ignored_writes(worktree_repo)
-        if ignored:
-            bad_files = bad_files + [f"{path} [gitignored]" for path in ignored]
-        if bad_files:
-            status = "violated"
+        status = "done" if result.success else "failed"
+        bad_files: list[str] = []
+        if result.success:
+            bad_files = contracts.violations(task.agent, changed)
+            # Distinct from a contract violation (which is about *where within
+            # its scope* a role wrote): this is a write git will never see at
+            # all -- gitignored, so invisible to commit_all/the reviewer's diff
+            # regardless of role (see #2). Applies even to backend/frontend/
+            # tests, which have no declared artifact contract.
+            ignored = git_ops.ignored_writes(worktree_repo)
+            if ignored:
+                bad_files = bad_files + [f"{path} [gitignored]" for path in ignored]
+            if bad_files:
+                status = "violated"
 
-    if status == "failed":
-        console.print(f"[bold red]{task.id} failed[/bold red]: {result.summary}")
-    elif status == "violated":
-        console.print(f"[bold red]{task.id} violated its contract[/bold red]: touched {', '.join(bad_files)}")
+        if status == "failed":
+            console.print(f"[bold red]{task.id} failed[/bold red]: {result.summary}")
+        elif status == "violated":
+            console.print(f"[bold red]{task.id} violated its contract[/bold red]: touched {', '.join(bad_files)}")
 
-    return StageResult(task=task, status=status, result=result, files_changed=changed), worktree_path, task_branch
+        return (
+            StageResult(task=task, status=status, result=result, files_changed=changed),
+            worktree_path,
+            task_branch,
+        )
+    except Exception as exc:
+        # A config error naming an unknown role, a provider raising, a git
+        # failure mid-commit — all of it becomes this one stage's failure
+        # rather than the run's. The type name is kept because "why did this
+        # stage fail" is unanswerable from a bare message.
+        console.print(f"[bold red]{task.id} failed[/bold red]: {type(exc).__name__}: {exc}")
+        failure = ProviderResult(success=False, summary=f"{type(exc).__name__}: {exc}")
+        return StageResult(task=task, status="failed", result=failure), worktree_path, task_branch
 
 
 def run(
@@ -375,7 +398,24 @@ def run(
                 done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
                 for future in done:
                     task = in_flight.pop(future)
-                    stage_result, worktree_path, task_branch = future.result()
+                    # _run_stage_in_worktree is written never to raise, so this
+                    # is the backstop for a bug in *that* guarantee: without it
+                    # a single unexpected error still takes down every other
+                    # in-flight stage, which is the failure mode issue #1 is
+                    # about. No worktree path is recoverable here — the run's
+                    # own prune_worktrees will reclaim it next time.
+                    try:
+                        stage_result, worktree_path, task_branch = future.result()
+                    except Exception as exc:
+                        console.print(
+                            f"[bold red]{task.id} crashed[/bold red]: {type(exc).__name__}: {exc}"
+                        )
+                        stage_result = StageResult(
+                            task=task,
+                            status="failed",
+                            result=ProviderResult(success=False, summary=f"{type(exc).__name__}: {exc}"),
+                        )
+                        worktree_path, task_branch = None, None
 
                     if stage_result.status == "done":
                         merged = git_ops.merge_worktree(repo, task_branch)
@@ -398,7 +438,15 @@ def run(
                     else:
                         blocked_ids.add(task.id)
                         if worktree_path is not None:
-                            git_ops.remove_worktree(repo, worktree_path)
+                            # Best-effort: a worktree we can't remove is worth a
+                            # message, not a dead run — the stage already failed
+                            # and every other one is still in flight.
+                            try:
+                                git_ops.remove_worktree(repo, worktree_path)
+                            except Exception as exc:
+                                console.print(
+                                    f"[bold yellow]could not remove {worktree_path}[/bold yellow]: {exc}"
+                                )
                             # The branch outlives the worktree on purpose (see
                             # git_ops.remove_worktree) — but a branch nobody is
                             # told about is a leak, not a safety net.
