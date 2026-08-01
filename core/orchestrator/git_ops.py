@@ -13,17 +13,33 @@ import git
 
 from core.orchestrator import target_config
 
+ENGINE_INDEX_DIR = ".ai-platform"
+"""The engine's own derived artifacts under a target repo (vector index,
+graph cache). Excluded from `local_modifications` for the same reason
+`graph.builder._source_tree_is_dirty` excludes it: it's something the engine
+wrote, not something the user is in the middle of."""
 
-def uncommitted_changes(repo: git.Repo) -> bool:
-    """Whether the working tree has changes git hasn't recorded.
 
-    No longer a precondition for a run: since the run branch is checked out
-    in its own integration worktree (`create_integration_worktree`), nothing
-    the engine does touches this tree, so a dirty one is safe to work in
-    while a run is going. It still matters enough to warn about — see
-    `supervisor.run` for what the warning says and why.
+def local_modifications(repo: git.Repo) -> list[str]:
+    """Paths in this checkout that differ from what HEAD records — tracked
+    modifications and untracked files alike.
+
+    Not a precondition for a run, and not a warning either. A run works only
+    on `base_sha`: the integration worktree is checked out from it, and every
+    prompt is built from that worktree (see `supervisor.run`). So these paths
+    are simply *not part of the run*, and the count is reported to say so.
+
+    Returning the list rather than a bool because the number is the message.
+    Telling someone their tree is dirty is noise — they know. Telling them
+    four specific edits are outside what the agents will see is information.
     """
-    return repo.is_dirty(untracked_files=True)
+    output = repo.git.status(
+        "--porcelain", "--untracked-files=all", "--", ".", f":(exclude){ENGINE_INDEX_DIR}"
+    )
+    # `XY <path>` per line; the two status columns are fixed-width, so the
+    # path starts at 3. A rename reads `R  old -> new`, which is fine here:
+    # this feeds a count and a short listing, not a path lookup.
+    return [line[3:].strip() for line in output.splitlines() if line.strip()]
 
 
 def current_commit(repo: git.Repo) -> str:
@@ -60,9 +76,9 @@ def create_integration_worktree(repo: git.Repo, request: str) -> tuple[Path, str
     Branched from the repo's current HEAD, not from its working tree: a
     worktree checkout only ever contains committed state, so uncommitted
     work in the target is invisible to the run. That's what makes running
-    against a dirty tree safe, and also why `supervisor.run` warns about it
-    (the context still shows that diff, so the agent could see code that
-    isn't in what it's editing).
+    against a dirty tree safe — and, since `supervisor.run` now also builds
+    every prompt from this checkout rather than from the target's, what makes
+    it *coherent*: what the agents read and what they edit are the same tree.
     """
     branch_name = _unused_branch_name(repo, f"engine/{_slugify(request)}")
     worktree_path = Path(tempfile.mkdtemp(prefix="engine-run-"))
@@ -172,6 +188,12 @@ def exclusive_run_lock(repo: git.Repo):
 
     Fails fast rather than waiting: a second run blocking silently for the
     length of the first is worse than being told why it can't start.
+
+    Must be acquired before the run's first mutating operation, not after —
+    the first version took it once the integration worktree already existed,
+    so the run that got refused had already pruned, created a branch and
+    checked out a worktree. Rejection has to leave nothing behind, which
+    means the lock comes first and everything else happens inside it.
     """
     lock_path = Path(repo.git_dir) / "ai-platform-run.lock"
     handle = lock_path.open("w")

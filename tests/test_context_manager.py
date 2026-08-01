@@ -285,6 +285,29 @@ def test_context_manager_indexes_under_dot_ai_platform_in_the_target(fake_repo: 
     assert (fake_repo / ".ai-platform" / "vector" / "qdrant_db").exists()
 
 
+def test_context_manager_keeps_the_index_out_of_the_tree_it_reads(fake_repo: Path, tmp_path: Path) -> None:
+    """A run reads from its integration worktree — a throwaway checkout of
+    the base commit — but the index belongs to the project.
+
+    Writing it into the tree being read would cost twice: the graph cache
+    would be deleted with that worktree and rebuilt every run, and in a
+    target that doesn't gitignore `.ai-platform/`, `git_ops.commit_all`'s
+    `git add -A` would sweep the vector store onto the produced branch.
+    """
+    storage_root = tmp_path.parent / f"{tmp_path.name}-storage"
+    storage_root.mkdir()
+    manager = ContextManager(fake_repo, storage_root=storage_root)
+
+    manager.index_repo()
+
+    assert (storage_root / ".ai-platform" / "vector" / "qdrant_db").exists()
+    assert not (fake_repo / ".ai-platform").exists()
+
+    # and it still searches the tree it was pointed at
+    context = manager.select_context("where is authentication handled?")
+    assert any(c["path"] == "auth.py" for c in context.chunks)
+
+
 def test_context_manager_loads_thresholds_from_engine_root_not_repo_root(tmp_path: Path) -> None:
     """config/context.yaml is engine policy: it must be read from the engine
     install even when repo_root points at a target with no config/ of its

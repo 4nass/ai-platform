@@ -336,26 +336,49 @@ def load_config(engine_root: Path) -> ContextConfig:
 
 
 class ContextManager:
-    def __init__(self, repo_root: Path, *, engine_root: Path | None = None):
-        """`repo_root` is the target being indexed and searched. `engine_root`
-        is where config/context.yaml's thresholds live — the engine install,
-        which defaults to `repo_root` so self-targeting (still the common
-        case) and existing callers/tests need no change."""
+    def __init__(
+        self,
+        repo_root: Path,
+        *,
+        engine_root: Path | None = None,
+        storage_root: Path | None = None,
+    ):
+        """`repo_root` is the tree whose content is indexed and searched.
+        `engine_root` is where config/context.yaml's thresholds live — the
+        engine install, which defaults to `repo_root` so self-targeting
+        (still the common case) and existing callers/tests need no change.
+
+        `storage_root` is where the derived index is kept, and defaults to
+        `repo_root` for the same reason. A run separates the two: content is
+        read from its integration worktree, a throwaway checkout of the run's
+        base commit, while the index stays in the target repo that outlives
+        it.
+
+        Reading content from the snapshot rather than from the target's own
+        checkout is what makes the prompt and the edited tree agree. Excluding
+        the git diff was not enough on its own — file content, chunk excerpts
+        and project memory were all read straight off the user's working
+        tree, so an uncommitted edit could still reach the model describing
+        code that does not exist in what the agent is editing.
+        """
         self.repo_root = repo_root
         self.engine_root = engine_root if engine_root is not None else repo_root
+        self.storage_root = storage_root if storage_root is not None else repo_root
         self.config = load_config(self.engine_root)
         self._store: VectorStore | None = None
         self._graph: nx.MultiDiGraph | None = None
 
     def index_repo(self) -> int:
         if self.config.use_graph:
-            self._graph = graph_builder.load_or_build(self.repo_root)
+            self._graph = graph_builder.load_or_build(
+                self.repo_root, storage_root=self.storage_root
+            )
 
         if not self.config.use_vector_db:
             return 0
         chunks = chunk_repo(self.repo_root)
         vectors = embed_texts([chunk.text for chunk in chunks])
-        self._store = VectorStore(self.repo_root / VECTOR_STORAGE_PATH)
+        self._store = VectorStore(self.storage_root / VECTOR_STORAGE_PATH)
         self._store.reset()
         self._store.add(chunks, vectors)
         return len(chunks)
@@ -377,7 +400,7 @@ class ContextManager:
         raw_chunks: list[dict] = []
         if self.config.use_vector_db:
             if self._store is None:
-                self._store = VectorStore(self.repo_root / VECTOR_STORAGE_PATH)
+                self._store = VectorStore(self.storage_root / VECTOR_STORAGE_PATH)
             query_vector = embed_query(request)
             raw_chunks = self._store.search(query_vector, limit=self.config.max_files)
 
@@ -405,5 +428,15 @@ class ContextManager:
         return context
 
     def _current_git_diff(self) -> str:
+        """The uncommitted diff of the tree being indexed.
+
+        Empty by construction during a run, and deliberately so: `repo_root`
+        is then the integration worktree, a clean checkout of the run's base
+        commit. `use_git_diff` stays a real setting rather than dead code —
+        `ai-platform context` still points at the user's own checkout, where
+        showing the diff is the whole point, and a future
+        `--dirty-policy=snapshot` would reintroduce uncommitted state into
+        the run's own tree, at which point this reports it again.
+        """
         repo = git.Repo(self.repo_root)
         return repo.git.diff("--", ".", ":(exclude)uv.lock")

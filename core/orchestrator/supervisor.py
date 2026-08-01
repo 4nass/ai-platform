@@ -20,6 +20,7 @@ import git
 from rich.console import Console
 
 from core.context.manager import ContextManager, SelectedContext
+from core.errors import ConfigError
 from core.orchestrator import (
     contracts,
     correction,
@@ -37,6 +38,28 @@ from core.telemetry import store as telemetry
 from providers.base import ProviderResult, display_name
 
 console = Console()
+
+DIRTY_HEAD = "head"
+"""Work only on the base commit. The default, and the only coherent one
+available: the integration worktree is checked out from `base_sha` and every
+prompt is built from that worktree, so uncommitted work in the target is
+outside the run in both directions — not shown to the agents, not edited by
+them."""
+
+DIRTY_REJECT = "reject"
+"""Refuse to start at all when the target has local modifications. For
+callers who would rather be stopped than have their in-progress work quietly
+left out."""
+
+DIRTY_SNAPSHOT = "snapshot"
+"""Reproduce the dirty state inside the run. Declared but not implemented:
+carrying tracked modifications *and* untracked files across without touching
+the user's index is the whole difficulty, and doing it badly would corrupt
+the tree it's meant to preserve. Asking for it fails loudly rather than
+silently falling back to `head` — a run recorded as `snapshot` that actually
+behaved like `head` would be a lie in the telemetry."""
+
+DIRTY_POLICIES = (DIRTY_HEAD, DIRTY_REJECT, DIRTY_SNAPSHOT)
 
 
 @dataclass
@@ -148,7 +171,7 @@ def _verify(
 
 
 def _run_stage_in_worktree(
-    target_root: Path,
+    integration_root: Path,
     engine_root: Path,
     branch: str,
     task: planner.Task,
@@ -180,7 +203,9 @@ def _run_stage_in_worktree(
     and the worktree comes back to the caller so it still gets cleaned up.
     """
     try:
-        worktree_path, task_branch = git_ops.create_worktree(git.Repo(target_root), branch, task.id)
+        worktree_path, task_branch = git_ops.create_worktree(
+            git.Repo(integration_root), branch, task.id
+        )
     except Exception as exc:
         # Nothing was created (or it failed half-way and git's own bookkeeping
         # will be pruned next run), so there's no worktree to hand back.
@@ -251,12 +276,81 @@ def _run_stage_in_worktree(
         return StageResult(task=task, status="failed", result=failure), worktree_path, task_branch
 
 
+def _apply_dirty_policy(repo: git.Repo, policy: str) -> list[str]:
+    """Decides what a run does about local modifications in the target, and
+    returns the paths it is leaving out.
+
+    A run works on `base_sha` and nothing else: the integration worktree is
+    checked out from it, and every prompt is built from that worktree. So
+    tracked modifications, untracked files and uncommitted memory edits are
+    all simply outside the run. That is coherent — the agent reads and edits
+    the same tree — but it is not obvious from the outside, which is why the
+    count is printed rather than left implicit.
+
+    A warning was the previous answer and it wasn't enough: it described a
+    mismatch (context showing edits the agents couldn't see) instead of
+    removing it, and for a run driven from a phone, "your tree is dirty" is
+    not something the reader can act on mid-run.
+    """
+    if policy not in DIRTY_POLICIES:
+        raise ConfigError(
+            f"Unknown --dirty-policy {policy!r}. Valid policies: {', '.join(DIRTY_POLICIES)}"
+        )
+    if policy == DIRTY_SNAPSHOT:
+        raise ConfigError(
+            "--dirty-policy=snapshot is not implemented yet: carrying tracked modifications "
+            "and untracked files into the run without touching your index is the hard part, "
+            f"and a half-done version corrupts what it's meant to preserve. Use "
+            f"--dirty-policy={DIRTY_HEAD} to run on the last commit, or commit/stash first."
+        )
+
+    excluded = git_ops.local_modifications(repo)
+    if not excluded:
+        return []
+
+    if policy == DIRTY_REJECT:
+        raise ConfigError(
+            f"{len(excluded)} local modification(s) in {repo.working_tree_dir} and "
+            f"--dirty-policy={DIRTY_REJECT}: commit or stash them, or re-run with "
+            f"--dirty-policy={DIRTY_HEAD} to work on the last commit and leave them out."
+        )
+
+    shown = ", ".join(excluded[:5])
+    more = f", +{len(excluded) - 5} more" if len(excluded) > 5 else ""
+    console.print(
+        f"[bold yellow]{len(excluded)} local modification(s) excluded from the run[/bold yellow] — "
+        f"it works on the last commit only ({shown}{more})"
+    )
+    return excluded
+
+
+def _discard_integration_worktree(
+    repo: git.Repo, integration_repo: git.Repo, integration_root: Path, branch: str
+) -> None:
+    """Removes a worktree and its branch, for a run that produced nothing.
+
+    Best-effort on both halves: a worktree that won't go is worth a message,
+    not a failed command, and the branch is deleted from `repo` rather than
+    `integration_repo` because the latter's checkout no longer exists by then.
+    """
+    try:
+        git_ops.remove_worktree(integration_repo, integration_root)
+    except Exception as exc:
+        console.print(f"[bold yellow]could not remove {integration_root}[/bold yellow]: {exc}")
+        return
+    try:
+        repo.git.branch("-D", branch)
+    except Exception as exc:
+        console.print(f"[bold yellow]could not delete branch {branch}[/bold yellow]: {exc}")
+
+
 def run(
     engine_root: Path,
     target_root: Path,
     request: str,
     dry_run: bool = False,
     session_id: str | None = None,
+    dirty_policy: str = DIRTY_HEAD,
 ) -> RunReport:
     """`engine_root` is the ai-platform install (config/, prompts/, the
     shared telemetry.sqlite); `target_root` is the repo this run actually
@@ -267,159 +361,184 @@ def run(
     target-scoped (see core.context.manager, core.orchestrator.test_runner).
 
     A third root appears once work starts: the run's own *integration*
-    worktree, where the `engine/<slug>` branch is checked out and where every
-    merge, correction commit, test run and diff happens. `target_root`'s own
-    checkout is only ever read — never switched, never written to — so a run
-    can proceed while its target is being worked in.
+    worktree, checked out from `base_sha`, where the `engine/<slug>` branch
+    lives and where every merge, correction commit, test run and diff
+    happens. `target_root`'s own checkout is only ever read — never switched,
+    never written to — so a run can proceed while its target is being worked
+    in.
+
+    That worktree is also the **only** tree the run reads from. Context is
+    indexed from it, not from `target_root`: file content, chunk excerpts and
+    project memory all used to come off the user's own checkout while the
+    agents edited a checkout of `base_sha`, so an uncommitted edit could
+    describe code that did not exist in what was being edited. Local
+    modifications are counted and reported, and are otherwise not part of the
+    run — see `dirty_policy` and `_apply_dirty_policy`.
+
+    Order matters here and is enforced by structure rather than convention:
+    the run lock is taken before the first mutating operation, so a run that
+    is refused has created no branch, no worktree, and pruned nothing.
     """
     repo = git.Repo(target_root)
-    if not dry_run:
-        git_ops.prune_worktrees(repo)
 
     console.rule("Engine")
 
     workflow = planner.plan(engine_root)
     console.print(f"[bold]Plan generated[/bold]: {len(workflow.tasks)} tasks (up to {workflow.max_parallel} in parallel)")
 
-    context_manager = ContextManager(target_root, engine_root=engine_root)
-    context_manager.index_repo()
-    context = context_manager.select_context(request)
-
-    if not dry_run and git_ops.uncommitted_changes(repo):
-        # No longer fatal: the run works in its own integration worktree, so
-        # nothing here gets touched. But a worktree checkout only contains
-        # *committed* state, while the context still carries this tree's
-        # uncommitted diff — so the agent can be shown code that isn't in
-        # what it's editing. Worth saying out loud rather than silently
-        # tolerating, since the mismatch is invisible from the outcome.
-        console.print(
-            "[bold yellow]Working tree has uncommitted changes[/bold yellow] — the run "
-            "branches from HEAD, so they are not in what the agents edit, even though "
-            "the injected context still shows them."
-        )
-    kept_files = len(context.context_paths())
-    if kept_files:
-        console.print(
-            f"[bold]Context selected:[/bold] {kept_files} of {len(context.decisions)} candidates "
-            f"(injected as {context_manager.config.injection_mode})"
-        )
-    else:
-        # Not an error: asking for a feature the repo has no trace of is the
-        # normal case for new work. Saying so is the point — silently shipping
-        # twenty irrelevant files is what this replaced.
-        console.print(
-            f"[bold yellow]No context selected[/bold yellow] — none of "
-            f"{len(context.decisions)} candidates cleared the relevance floor. "
-            "The agent will explore on its own; run `ai-platform context` to see why."
-        )
-
-    # Created before the decomposer call, which is itself a billable provider
-    # call — starting the recorder any later would understate every run. The
-    # config snapshot and engine commit are captured now because neither can
-    # be reconstructed from a past row: they're what makes runs comparable
-    # across engine versions and across config changes.
-    recorder = None
-    routing = router.load_thresholds(engine_root)
-    if not dry_run:
-        recorder = telemetry.RunRecorder(
-            engine_root,
-            request,
-            target_repo=str(target_root),
-            session_id=session_id,
-            engine_commit=git_ops.current_commit(repo),
-            metadata={
-                "use_graph": context_manager.config.use_graph,
-                "use_vector_db": context_manager.config.use_vector_db,
-                "use_git_diff": context_manager.config.use_git_diff,
-                "use_memory": context_manager.config.use_memory,
-                "max_files": context_manager.config.max_files,
-                "injection_mode": context_manager.config.injection_mode,
-                # The floors a run was judged against: comparing two runs'
-                # file counts means nothing without them.
-                "min_similarity": context_manager.config.min_similarity,
-                "min_similarity_ratio": context_manager.config.min_similarity_ratio,
-                "min_lift": context_manager.config.min_lift,
-                "max_context_chars": context_manager.config.max_context_chars,
-                # The thresholds routing was judged against. Same reason as the
-                # context floors: comparing two runs' provider choices means
-                # nothing without knowing the bar each was held to.
-                "max_quota_ratio": routing.max_quota_ratio,
-                "min_success_rate": routing.min_success_rate,
-                "min_samples": routing.min_samples,
-                "routing_window_hours": routing.window_hours,
-                "decompose": workflow.decompose,
-                "max_parallel": workflow.max_parallel,
-                "max_correction_attempts": workflow.max_correction_attempts,
-            },
-        )
-
-    complexity = router.DEFAULT_COMPLEXITY
-    if workflow.decompose:
-        known_ids = [t.id for t in workflow.tasks]
-        decomposer_result = scheduler.run_task(
-            target_root,
-            "decomposer",
-            decomposer.build_description(request, known_ids),
-            context,
-            recorder=recorder,
-            engine_root=engine_root,
-            complexity="routine",
-        )
-        chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
-        classified = (
-            decomposer.parse_complexity(decomposer_result.summary)
-            if decomposer_result.success else None
-        )
-        complexity = classified or router.DEFAULT_COMPLEXITY
-        if chosen is None:
-            console.print("[bold yellow]Decomposition unavailable[/bold yellow] — running the full workflow")
-        else:
-            workflow = planner.prune(workflow, set(chosen))
-            dropped = sorted(set(known_ids) - set(chosen))
-            selected = ", ".join(t.id for t in workflow.tasks)
-            dropped_note = f" ({', '.join(dropped)} not needed)" if dropped else ""
-            console.print(f"[bold]Decomposed to:[/bold] {selected}{dropped_note}")
-
-    console.print(f"[bold]Task complexity:[/bold] {complexity}")
-    if dry_run:
-        console.print("[bold]Dry run[/bold] — no agent will be invoked")
-        console.print("[bold]Planned workflow:[/bold]")
-        for task in workflow.tasks:
-            deps = ", ".join(task.depends_on) if task.depends_on else "none"
-            console.print(f"  - {task.id} ({task.agent}) depends_on: {deps}")
-        return RunReport(
-            branch="",
-            stages=[],
-            files_changed=[],
-            tests_passed=False,
-            tests_output="",
-            review_passed=None,
-            review_summary="",
-            summary="dry-run",
-        )
-
-    base_sha = git_ops.current_commit(repo)
-    # The run's policy, frozen. Read from the base commit rather than from
-    # any working tree, and never re-read: roles without an artifact
-    # contract can write .ai-platform.yml, and re-reading it after they run
-    # let a stage set `test_sandbox: false` and have the engine honour it —
-    # a real, demonstrated bypass of issue #4's sandbox that still reported
-    # the run as `done`. See core.orchestrator.target_config.
-    config = target_config.load_at_commit(repo, base_sha)
-    integration_root, branch = git_ops.create_integration_worktree(repo, request)
-    # Everything from here on operates on the run's own checkout. `repo` (the
-    # target's working tree) is still used for hook neutralization, which is
-    # repository-wide config rather than per-worktree, and for pruning.
-    integration_repo = git.Repo(integration_root)
-    console.print(f"[bold]Integration worktree:[/bold] {integration_root} ({branch})")
-    # Baseline for the correction loop's ignored_writes check below. Taken on
-    # the integration worktree, which starts as a clean checkout containing
-    # only tracked files — so in practice this is empty, unlike the old
-    # target_root baseline that had to subtract the .ai-platform/ index.
-    # Kept rather than assumed empty: a target whose .gitignore matches
-    # something git *does* track would otherwise look like a violation.
-
+    # Nothing above this line touches the target. Everything below it does —
+    # pruning rewrites git's worktree bookkeeping, `disable_hooks` rewrites
+    # repository-wide config, and the integration worktree creates a branch —
+    # so the lock wraps all of it, including a dry run. A dry run still
+    # prunes, still creates a worktree to index and still calls the
+    # decomposer; exempting it would leave exactly the races the lock exists
+    # to prevent.
     with git_ops.exclusive_run_lock(repo), git_ops.disable_hooks(repo):
+        git_ops.prune_worktrees(repo)
+
+        base_sha = git_ops.current_commit(repo)
+        excluded = _apply_dirty_policy(repo, dirty_policy)
+        # The run's policy, frozen. Read from the base commit rather than from
+        # any working tree, and never re-read: roles without an artifact
+        # contract can write .ai-platform.yml, and re-reading it after they run
+        # let a stage set `test_sandbox: false` and have the engine honour it —
+        # a real, demonstrated bypass of issue #4's sandbox that still reported
+        # the run as `done`. See core.orchestrator.target_config.
+        config = target_config.load_at_commit(repo, base_sha)
+
+        integration_root, branch = git_ops.create_integration_worktree(repo, request)
+        # Everything from here on operates on the run's own checkout. `repo`
+        # (the target's working tree) is still used for hook neutralization,
+        # which is repository-wide config rather than per-worktree, and for
+        # pruning.
+        integration_repo = git.Repo(integration_root)
+        console.print(f"[bold]Integration worktree:[/bold] {integration_root} ({branch})")
+
+        # Indexed from the integration worktree, so the prompt and the edited
+        # tree are the same state. The index itself stays under `target_root`:
+        # it belongs to the project, and writing it into a directory this run
+        # deletes would both throw away the graph cache every time and risk
+        # `commit_all` sweeping `.ai-platform/` onto the branch in a target
+        # that doesn't gitignore it.
+        context_manager = ContextManager(
+            integration_root, engine_root=engine_root, storage_root=target_root
+        )
+        context_manager.index_repo()
+        context = context_manager.select_context(request)
+
+        kept_files = len(context.context_paths())
+        if kept_files:
+            console.print(
+                f"[bold]Context selected:[/bold] {kept_files} of {len(context.decisions)} candidates "
+                f"(injected as {context_manager.config.injection_mode})"
+            )
+        else:
+            # Not an error: asking for a feature the repo has no trace of is the
+            # normal case for new work. Saying so is the point — silently shipping
+            # twenty irrelevant files is what this replaced.
+            console.print(
+                f"[bold yellow]No context selected[/bold yellow] — none of "
+                f"{len(context.decisions)} candidates cleared the relevance floor. "
+                "The agent will explore on its own; run `ai-platform context` to see why."
+            )
+
+        # Created before the decomposer call, which is itself a billable provider
+        # call — starting the recorder any later would understate every run. The
+        # config snapshot and engine commit are captured now because neither can
+        # be reconstructed from a past row: they're what makes runs comparable
+        # across engine versions and across config changes.
+        recorder = None
+        routing = router.load_thresholds(engine_root)
+        if not dry_run:
+            recorder = telemetry.RunRecorder(
+                engine_root,
+                request,
+                target_repo=str(target_root),
+                session_id=session_id,
+                engine_commit=git_ops.current_commit(repo),
+                metadata={
+                    "use_graph": context_manager.config.use_graph,
+                    "use_vector_db": context_manager.config.use_vector_db,
+                    "use_git_diff": context_manager.config.use_git_diff,
+                    "use_memory": context_manager.config.use_memory,
+                    "max_files": context_manager.config.max_files,
+                    "injection_mode": context_manager.config.injection_mode,
+                    # The floors a run was judged against: comparing two runs'
+                    # file counts means nothing without them.
+                    "min_similarity": context_manager.config.min_similarity,
+                    "min_similarity_ratio": context_manager.config.min_similarity_ratio,
+                    "min_lift": context_manager.config.min_lift,
+                    "max_context_chars": context_manager.config.max_context_chars,
+                    # The thresholds routing was judged against. Same reason as the
+                    # context floors: comparing two runs' provider choices means
+                    # nothing without knowing the bar each was held to.
+                    "max_quota_ratio": routing.max_quota_ratio,
+                    "min_success_rate": routing.min_success_rate,
+                    "min_samples": routing.min_samples,
+                    "routing_window_hours": routing.window_hours,
+                    "decompose": workflow.decompose,
+                    "max_parallel": workflow.max_parallel,
+                    "max_correction_attempts": workflow.max_correction_attempts,
+                    # What the run was allowed to see of the target. A run whose
+                    # source was dirty is not wrong, but it is not reproducible
+                    # from `base_sha` alone either — the excluded edits explain a
+                    # result the commit doesn't.
+                    "dirty_policy": dirty_policy,
+                    "source_dirty": bool(excluded),
+                    "excluded_local_modifications": len(excluded),
+                },
+            )
+
+        complexity = router.DEFAULT_COMPLEXITY
+        if workflow.decompose:
+            known_ids = [t.id for t in workflow.tasks]
+            decomposer_result = scheduler.run_task(
+                integration_root,
+                "decomposer",
+                decomposer.build_description(request, known_ids),
+                context,
+                recorder=recorder,
+                engine_root=engine_root,
+                complexity="routine",
+            )
+            chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
+            classified = (
+                decomposer.parse_complexity(decomposer_result.summary)
+                if decomposer_result.success else None
+            )
+            complexity = classified or router.DEFAULT_COMPLEXITY
+            if chosen is None:
+                console.print("[bold yellow]Decomposition unavailable[/bold yellow] — running the full workflow")
+            else:
+                workflow = planner.prune(workflow, set(chosen))
+                dropped = sorted(set(known_ids) - set(chosen))
+                selected = ", ".join(t.id for t in workflow.tasks)
+                dropped_note = f" ({', '.join(dropped)} not needed)" if dropped else ""
+                console.print(f"[bold]Decomposed to:[/bold] {selected}{dropped_note}")
+
+        console.print(f"[bold]Task complexity:[/bold] {complexity}")
+
+        if dry_run:
+            console.print("[bold]Dry run[/bold] — no agent will be invoked")
+            console.print("[bold]Planned workflow:[/bold]")
+            for task in workflow.tasks:
+                deps = ", ".join(task.depends_on) if task.depends_on else "none"
+                console.print(f"  - {task.id} ({task.agent}) depends_on: {deps}")
+            # A dry run produces nothing, so it keeps nothing: the worktree it
+            # indexed from and the branch that carried it both go. Left behind,
+            # they'd accumulate an `engine/<slug>-N` branch per inspection.
+            _discard_integration_worktree(repo, integration_repo, integration_root, branch)
+            return RunReport(
+                branch="",
+                stages=[],
+                files_changed=[],
+                tests_passed=False,
+                tests_output="",
+                review_passed=None,
+                review_summary="",
+                summary="dry-run",
+            )
+
         remaining = {t.id: t for t in workflow.tasks}
         completed: list[StageResult] = []
         completed_ids: set[str] = set()
@@ -640,46 +759,46 @@ def run(
                 if overall_ok:
                     break
 
-    summary = "done" if overall_ok else "needs attention"
+        summary = "done" if overall_ok else "needs attention"
 
-    # The branch is the deliverable and always survives — nothing is ever
-    # auto-merged, so `git checkout engine/<slug>` is how the work is picked
-    # up either way. The *directory* only earns its keep when something went
-    # wrong: that's when the exact on-disk state (untracked files, test
-    # artifacts, a half-applied edit) answers questions the branch alone
-    # can't. On success it would just accumulate, which is the leak that
-    # issue #1 was about, one level up.
-    if overall_ok:
-        try:
-            git_ops.remove_worktree(integration_repo, integration_root)
-        except Exception as exc:
-            console.print(
-                f"[bold yellow]could not remove {integration_root}[/bold yellow]: {exc}"
-            )
-    else:
-        console.print(f"[bold]Left for inspection:[/bold] {integration_root} ({branch})")
+        # The branch is the deliverable and always survives — nothing is ever
+        # auto-merged, so `git checkout engine/<slug>` is how the work is picked
+        # up either way. The *directory* only earns its keep when something went
+        # wrong: that's when the exact on-disk state (untracked files, test
+        # artifacts, a half-applied edit) answers questions the branch alone
+        # can't. On success it would just accumulate, which is the leak that
+        # issue #1 was about, one level up.
+        if overall_ok:
+            try:
+                git_ops.remove_worktree(integration_repo, integration_root)
+            except Exception as exc:
+                console.print(
+                    f"[bold yellow]could not remove {integration_root}[/bold yellow]: {exc}"
+                )
+        else:
+            console.print(f"[bold]Left for inspection:[/bold] {integration_root} ({branch})")
 
-    totals: dict = {}
-    if recorder is not None:
-        recorder.finish(branch=branch, summary=summary)
-        totals = telemetry.run_totals(engine_root, recorder.run_id)
-        console.print(f"[bold]Usage:[/bold] {format_totals(totals)}")
+        totals: dict = {}
+        if recorder is not None:
+            recorder.finish(branch=branch, summary=summary)
+            totals = telemetry.run_totals(engine_root, recorder.run_id)
+            console.print(f"[bold]Usage:[/bold] {format_totals(totals)}")
 
-    if correction_attempts:
-        console.print(f"[bold]Corrections:[/bold] {correction_attempts} attempt(s)")
-    console.print(f"[bold]Summary:[/bold] {summary}")
-    if overall_ok:
-        console.print(f"[bold]Branch:[/bold] {branch} — review it, then merge if you're happy")
+        if correction_attempts:
+            console.print(f"[bold]Corrections:[/bold] {correction_attempts} attempt(s)")
+        console.print(f"[bold]Summary:[/bold] {summary}")
+        if overall_ok:
+            console.print(f"[bold]Branch:[/bold] {branch} — review it, then merge if you're happy")
 
-    return RunReport(
-        branch=branch,
-        stages=stage_reports,
-        files_changed=all_files_changed,
-        tests_passed=test_result.passed,
-        tests_output=test_result.output,
-        review_passed=review_passed,
-        review_summary=review_result.summary,
-        summary=summary,
-        totals=totals,
-        correction_attempts=correction_attempts,
-    )
+        return RunReport(
+            branch=branch,
+            stages=stage_reports,
+            files_changed=all_files_changed,
+            tests_passed=test_result.passed,
+            tests_output=test_result.output,
+            review_passed=review_passed,
+            review_summary=review_result.summary,
+            summary=summary,
+            totals=totals,
+            correction_attempts=correction_attempts,
+        )

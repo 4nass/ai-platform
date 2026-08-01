@@ -20,10 +20,10 @@ from core.orchestrator.git_ops import (
     exclusive_run_lock,
     format_changed_files,
     ignored_writes,
+    local_modifications,
     merge_worktree,
     prune_worktrees,
     remove_worktree,
-    uncommitted_changes,
 )
 
 
@@ -39,17 +39,40 @@ def repo(tmp_path: Path) -> git.Repo:
     return r
 
 
-def test_uncommitted_changes_false_when_clean(repo: git.Repo) -> None:
-    assert uncommitted_changes(repo) is False
+def test_local_modifications_empty_when_clean(repo: git.Repo) -> None:
+    assert local_modifications(repo) == []
 
 
-def test_uncommitted_changes_true_when_dirty(repo: git.Repo) -> None:
-    """No longer fatal — the run works in its own integration worktree, so a
-    dirty target tree is safe. It still gets warned about, since a worktree
-    checkout only contains committed state."""
-    Path(repo.working_tree_dir, "dirty.txt").write_text("x", encoding="utf-8")
+def test_local_modifications_lists_tracked_and_untracked_alike(repo: git.Repo) -> None:
+    """Both are equally outside the run: the integration worktree is checked
+    out from the base commit, so neither reaches the agents."""
+    Path(repo.working_tree_dir, "README.md").write_text("edited\n", encoding="utf-8")
+    Path(repo.working_tree_dir, "untracked.txt").write_text("x", encoding="utf-8")
 
-    assert uncommitted_changes(repo) is True
+    assert sorted(local_modifications(repo)) == ["README.md", "untracked.txt"]
+
+
+def test_local_modifications_lists_files_inside_untracked_directories(repo: git.Repo) -> None:
+    """`git status` collapses an untracked directory to one entry by default,
+    which would report "1 modification" for twenty new files."""
+    nested = Path(repo.working_tree_dir, "newpkg", "sub")
+    nested.mkdir(parents=True)
+    (nested / "a.py").write_text("a", encoding="utf-8")
+    (nested / "b.py").write_text("b", encoding="utf-8")
+
+    assert sorted(local_modifications(repo)) == ["newpkg/sub/a.py", "newpkg/sub/b.py"]
+
+
+def test_local_modifications_ignores_the_engines_own_index(repo: git.Repo) -> None:
+    """`.ai-platform/` is the vector store and graph cache — something the
+    engine wrote, not work the user is in the middle of. Counting it would
+    report a local modification on every run against a target that doesn't
+    gitignore it."""
+    index_dir = Path(repo.working_tree_dir, ".ai-platform", "vector")
+    index_dir.mkdir(parents=True)
+    (index_dir / "db").write_text("x", encoding="utf-8")
+
+    assert local_modifications(repo) == []
 
 
 def test_current_commit_matches_head(repo: git.Repo) -> None:

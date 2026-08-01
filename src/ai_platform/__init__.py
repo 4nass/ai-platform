@@ -57,12 +57,26 @@ def run(
         "--session",
         help="Groups this run with others from the same conversation in the telemetry history.",
     ),
+    dirty_policy: str = typer.Option(
+        "head",
+        "--dirty-policy",
+        help="What to do about local modifications in the target: 'head' (default) works on the "
+        "last commit and leaves them out, reporting how many; 'reject' refuses to start; "
+        "'snapshot' would reproduce them inside the run and is not implemented yet.",
+    ),
 ) -> None:
     """Indexes the repo, selects relevant context, and runs the workflow DAG (see config/workflow.yaml)."""
     from core.orchestrator import supervisor
 
     try:
-        report = supervisor.run(ENGINE_ROOT, _target_root(repo), request, dry_run=dry_run, session_id=session)
+        report = supervisor.run(
+            ENGINE_ROOT,
+            _target_root(repo),
+            request,
+            dry_run=dry_run,
+            session_id=session,
+            dirty_policy=dirty_policy,
+        )
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)

@@ -9,7 +9,8 @@ from pathlib import Path
 import git
 import pytest
 
-from core.orchestrator import scheduler, supervisor, test_runner
+from core.errors import ConfigError
+from core.orchestrator import git_ops, scheduler, supervisor, test_runner
 from core.telemetry import store as telemetry
 from providers.base import AgentTask, ProviderResult
 
@@ -234,23 +235,362 @@ def test_run_never_moves_the_targets_own_checkout(
     assert repo.commit(report.branch).hexsha != head_before
 
 
-def test_run_tolerates_a_dirty_target_tree_and_says_so(
-    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Used to be a hard refusal. Now allowed, because nothing writes to that
-    tree -- but warned about, since the run branches from HEAD while the
-    injected context still carries the uncommitted diff."""
-    Path(fake_repo, "src.py").write_text("def foo():\n    return 999\n", encoding="utf-8")
+# --- a run sees exactly its base commit, and nothing else ---
+#
+# A run is checked out from `base_sha` and every prompt is built from that
+# checkout. Excluding the git diff was not enough on its own: file content,
+# chunk excerpts and project memory were all read off the user's own working
+# tree, so an uncommitted edit could describe code that did not exist in what
+# the agent was editing. These tests pin both halves -- what reaches the
+# prompt and what reaches the worktree -- against the same base commit.
 
-    _patch_provider(monkeypatch, _multi_stage_run())
+COMMITTED_MARKER = "COMMITTED_ONLY_9f3a"
+LOCAL_MARKER = "LOCAL_ONLY_4b7e"
+
+
+def _prepare_dirty_target(repo_root: Path) -> str:
+    """Commits content carrying COMMITTED_MARKER, then dirties the checkout
+    three ways: a tracked source edit, a tracked *memory* edit, and an
+    untracked memory doc -- each carrying LOCAL_MARKER. Returns the base
+    commit.
+
+    Two deliberate choices make the absence assertions mean something rather
+    than pass by accident:
+
+    - `injection_mode: full`, because pointers mode sends a ranked list of
+      paths and no file text at all;
+    - project memory as the carrier, because `memory/*.md` is loaded
+      unconditionally (it is not subject to the relevance floors), so whether
+      it reaches the prompt depends only on which tree was read -- not on
+      what an embedding model happened to score.
+    """
+    (repo_root / "config" / "context.yaml").write_text(
+        CONTEXT_YAML + "injection_mode: full\n", encoding="utf-8"
+    )
+    (repo_root / "memory").mkdir(exist_ok=True)
+    (repo_root / "memory" / "business_rules.md").write_text(
+        f"Rule: {COMMITTED_MARKER}\n", encoding="utf-8"
+    )
+    (repo_root / "src.py").write_text(
+        f"def foo():\n    return '{COMMITTED_MARKER}'\n", encoding="utf-8"
+    )
+    repo = git.Repo(repo_root)
+    repo.index.add(["config/context.yaml", "memory/business_rules.md", "src.py"])
+    base_sha = repo.index.commit("committed state").hexsha
+
+    (repo_root / "memory" / "business_rules.md").write_text(
+        f"Rule: {LOCAL_MARKER}\n", encoding="utf-8"
+    )
+    (repo_root / "src.py").write_text(
+        f"def foo():\n    return '{LOCAL_MARKER}'\n", encoding="utf-8"
+    )
+    (repo_root / "memory" / "local_notes.md").write_text(
+        f"Draft: {LOCAL_MARKER}\n", encoding="utf-8"
+    )
+    return base_sha
+
+
+WATCHED_PATHS = ("src.py", "memory/business_rules.md", "memory/local_notes.md")
+
+
+def _capturing_run(prompts: list[str], worktrees: list[dict[str, str]]):
+    """A provider fake that records what each call was told and what it could
+    see on disk, before doing its stage's normal work."""
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        prompts.append(task.context_render)
+        worktrees.append(
+            {
+                rel: (
+                    Path(task.repo_root, rel).read_text(encoding="utf-8")
+                    if Path(task.repo_root, rel).is_file()
+                    else ""
+                )
+                for rel in WATCHED_PATHS
+            }
+        )
+        if task.agent == "reviewer":
+            return ProviderResult(success=True, summary="Review notes.\nVERDICT: PASS")
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary=f"{task.agent} done")
+
+    return fake_run
+
+
+def test_a_local_modification_reaches_neither_the_prompt_nor_the_worktree(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _prepare_dirty_target(fake_repo)
+    prompts: list[str] = []
+    worktrees: list[dict[str, str]] = []
+    _patch_provider(monkeypatch, _capturing_run(prompts, worktrees))
     _patch_tests(monkeypatch, passed=True, output="ok")
 
     report = supervisor.run(fake_repo, fake_repo, "add oauth2")
 
     assert report.summary == "done"
-    assert "uncommitted changes" in capsys.readouterr().out
-    # the uncommitted edit is still sitting there, untouched
-    assert "999" in Path(fake_repo, "src.py").read_text(encoding="utf-8")
+
+    # Positive control. Project memory is ungated -- it is not subject to the
+    # relevance floors -- and `full` inlines it, so the committed text really
+    # is in every prompt that carried context at all. Without this, "the local
+    # marker is absent" would also pass on an empty string.
+    carried = [p for p in prompts if p]
+    assert carried and all(COMMITTED_MARKER in p for p in carried)
+    assert not any(LOCAL_MARKER in p for p in prompts)
+
+    assert worktrees
+    assert all(COMMITTED_MARKER in seen["src.py"] for seen in worktrees)
+    assert all(LOCAL_MARKER not in seen["src.py"] for seen in worktrees)
+    assert all(LOCAL_MARKER not in seen["memory/business_rules.md"] for seen in worktrees)
+
+
+def test_an_untracked_file_is_neither_injected_nor_checked_out(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """An untracked file is invisible to `git worktree add`, so injecting it
+    would describe a file the agent cannot open.
+
+    The untracked file here is a *memory doc*, which is loaded ungated: read
+    from the user's checkout it would land in every prompt by name and by
+    content, so its absence is a statement about which tree was read.
+    """
+    _prepare_dirty_target(fake_repo)
+    prompts: list[str] = []
+    worktrees: list[dict[str, str]] = []
+    _patch_provider(monkeypatch, _capturing_run(prompts, worktrees))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert not any("local_notes" in p for p in prompts)
+    assert worktrees and all(seen["memory/local_notes.md"] == "" for seen in worktrees)
+
+
+def test_what_the_agents_see_is_byte_for_byte_the_base_commit(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Both halves against the same commit: the text put in the prompt, and
+    the bytes on disk in the tree that text describes."""
+    _prepare_dirty_target(fake_repo)
+    repo = git.Repo(fake_repo)
+    base_sha = repo.head.commit.hexsha
+    prompts: list[str] = []
+    worktrees: list[dict[str, str]] = []
+    _patch_provider(monkeypatch, _capturing_run(prompts, worktrees))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    for rel in ("src.py", "memory/business_rules.md"):
+        committed = repo.git.show(f"{base_sha}:{rel}")
+        assert worktrees
+        assert all(seen[rel].rstrip("\n") == committed.rstrip("\n") for seen in worktrees)
+
+    # The injected side, verbatim -- memory is rendered inline in `full` mode.
+    # The negative half is what makes this discriminating: a diff of the
+    # user's tree quotes the committed line too (as a `-` line), so
+    # "the committed text is present" alone would hold even when the prompt
+    # was built from the dirty checkout.
+    injected_memory = repo.git.show(f"{base_sha}:memory/business_rules.md").strip()
+    carried = [p for p in prompts if p]
+    assert carried and all(injected_memory in p for p in carried)
+    assert not any(LOCAL_MARKER in p for p in prompts)
+
+
+def _user_visible_status(repo: git.Repo) -> list[str]:
+    """The target's own status, minus the engine's artifacts.
+
+    `.ai-platform/` (the vector index and graph cache) and `telemetry.sqlite`
+    belong to the engine, and here engine_root and target_root happen to be
+    the same directory -- so they show up in this repo's status without being
+    anything the run did to the *target*.
+    """
+    return sorted(
+        line
+        for line in repo.git.status("--porcelain", "--untracked-files=all").splitlines()
+        if not line[3:].startswith((".ai-platform", "telemetry.sqlite"))
+    )
+
+
+def test_the_user_checkout_is_left_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Not switched, not stashed, not committed, not cleaned. A run against a
+    repo someone is working in has to be invisible to them."""
+    _prepare_dirty_target(fake_repo)
+    repo = git.Repo(fake_repo)
+    before = (
+        repo.head.commit.hexsha,
+        repo.active_branch.name,
+        _user_visible_status(repo),
+        Path(fake_repo, "src.py").read_text(encoding="utf-8"),
+        Path(fake_repo, "memory/local_notes.md").read_text(encoding="utf-8"),
+    )
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert (
+        repo.head.commit.hexsha,
+        repo.active_branch.name,
+        _user_visible_status(repo),
+        Path(fake_repo, "src.py").read_text(encoding="utf-8"),
+        Path(fake_repo, "memory/local_notes.md").read_text(encoding="utf-8"),
+    ) == before
+
+
+def test_run_reports_how_many_local_modifications_it_left_out(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The count, not a "your tree is dirty" warning: the reader already knows
+    it's dirty, what they can't see is that four specific edits are outside
+    what the agents were given."""
+    _prepare_dirty_target(fake_repo)  # 2 tracked edits + 1 untracked file
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    out = capsys.readouterr().out
+    assert "3 local modification(s) excluded from the run" in out
+
+
+def test_run_says_nothing_about_exclusions_when_the_target_is_clean(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert "excluded from the run" not in capsys.readouterr().out
+
+
+def test_run_records_the_dirty_policy_and_whether_the_source_was_dirty(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A run whose source was dirty is not wrong, but it isn't reproducible
+    from `base_sha` alone either -- the excluded edits explain a result the
+    commit doesn't."""
+    _prepare_dirty_target(fake_repo)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    with telemetry.connect(fake_repo) as con:
+        metadata = json.loads(con.execute("SELECT metadata FROM runs").fetchone()["metadata"])
+
+    assert metadata["dirty_policy"] == supervisor.DIRTY_HEAD
+    assert metadata["source_dirty"] is True
+    assert metadata["excluded_local_modifications"] == 3
+
+
+def test_run_records_a_clean_source_as_such(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    with telemetry.connect(fake_repo) as con:
+        metadata = json.loads(con.execute("SELECT metadata FROM runs").fetchone()["metadata"])
+
+    assert metadata["source_dirty"] is False
+    assert metadata["excluded_local_modifications"] == 0
+
+
+# --- the other dirty policies ---
+
+
+def test_dirty_policy_reject_refuses_and_creates_nothing(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _prepare_dirty_target(fake_repo)
+    repo = git.Repo(fake_repo)
+    branches_before = {h.name for h in repo.heads}
+    _patch_provider(monkeypatch, _multi_stage_run())
+
+    with pytest.raises(ConfigError, match="dirty-policy=reject"):
+        supervisor.run(fake_repo, fake_repo, "add oauth2", dirty_policy=supervisor.DIRTY_REJECT)
+
+    assert {h.name for h in repo.heads} == branches_before
+
+
+def test_dirty_policy_reject_runs_normally_on_a_clean_target(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(
+        fake_repo, fake_repo, "add oauth2", dirty_policy=supervisor.DIRTY_REJECT
+    )
+
+    assert report.summary == "done"
+
+
+def test_dirty_policy_snapshot_is_refused_even_on_a_clean_target(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Falling back to `head` because the tree happens to be clean would put
+    `dirty_policy=snapshot` in the telemetry for a run that did no such
+    thing."""
+    _patch_provider(monkeypatch, _multi_stage_run())
+
+    with pytest.raises(ConfigError, match="not implemented"):
+        supervisor.run(fake_repo, fake_repo, "add oauth2", dirty_policy=supervisor.DIRTY_SNAPSHOT)
+
+
+def test_an_unknown_dirty_policy_is_refused(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+
+    with pytest.raises(ConfigError, match="Unknown --dirty-policy"):
+        supervisor.run(fake_repo, fake_repo, "add oauth2", dirty_policy="yolo")
+
+
+# --- the run lock comes before the first mutation ---
+
+
+def test_a_refused_run_creates_no_branch_and_no_worktree(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The lock used to be taken *after* the integration worktree existed, so
+    the run that got refused had already pruned, branched and checked out a
+    worktree before being told it couldn't start."""
+    repo = git.Repo(fake_repo)
+    branches_before = {h.name for h in repo.heads}
+    worktrees_before = repo.git.worktree("list")
+    _patch_provider(monkeypatch, _multi_stage_run())
+
+    with git_ops.exclusive_run_lock(repo):
+        with pytest.raises(RuntimeError, match="already modifying"):
+            supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert {h.name for h in repo.heads} == branches_before
+    assert repo.git.worktree("list") == worktrees_before
+
+
+def test_a_dry_run_leaves_no_branch_or_worktree_behind(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A dry run now creates an integration worktree, because that is what it
+    indexes from -- so it has to take it back down, or every inspection would
+    leave an `engine/<slug>-N` branch behind."""
+    repo = git.Repo(fake_repo)
+    branches_before = {h.name for h in repo.heads}
+    worktrees_before = repo.git.worktree("list")
+    _patch_provider(monkeypatch, _multi_stage_run())
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", dry_run=True)
+
+    assert report.summary == "dry-run"
+    assert {h.name for h in repo.heads} == branches_before
+    assert repo.git.worktree("list") == worktrees_before
 
 
 def test_a_successful_run_removes_its_integration_worktree_but_keeps_the_branch(

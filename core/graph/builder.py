@@ -113,7 +113,7 @@ def _graph_from_dict(data: dict) -> nx.MultiDiGraph:
     return graph
 
 
-def load_or_build(repo_root: Path) -> nx.MultiDiGraph:
+def load_or_build(repo_root: Path, storage_root: Path | None = None) -> nx.MultiDiGraph:
     """Rebuilds only when the current HEAD differs from the cached one.
 
     The cache is keyed on HEAD, but `build_graph` reads the *working tree* —
@@ -123,10 +123,20 @@ def load_or_build(repo_root: Path) -> nx.MultiDiGraph:
     graph built from uncommitted state must not be written to a cache the
     next clean run at the same HEAD would then trust. So a dirty tree still
     *reads* the cache (it's the right graph for HEAD) but never *writes* one.
+
+    `storage_root` separates *what is read* from *where the cache lives*, and
+    defaults to `repo_root` so single-root callers are unaffected. A run
+    builds the graph from its integration worktree — a throwaway checkout of
+    `base_sha` — while keeping the cache in the target repo, which outlives
+    it. Without the split the cache would be written into a directory deleted
+    minutes later and every run would rebuild from scratch; with it, the
+    cache is now always built from committed state, which is exactly what its
+    HEAD key claims.
     """
+    storage_root = repo_root if storage_root is None else storage_root
     repo = git.Repo(repo_root)
     head_sha = repo.head.commit.hexsha
-    cache_path = repo_root / CACHE_PATH
+    cache_path = storage_root / CACHE_PATH
 
     if cache_path.is_file():
         try:

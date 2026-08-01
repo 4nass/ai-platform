@@ -110,6 +110,24 @@ def test_load_or_build_reuses_cache_ignoring_uncommitted_changes(repo: git.Repo,
     assert "new_untracked.py" not in graph2.nodes
 
 
+def test_load_or_build_can_cache_outside_the_tree_it_reads(repo: git.Repo, tmp_path: Path) -> None:
+    """A run builds the graph from its integration worktree — deleted when
+    the run ends — so the cache has to live somewhere that outlives it, or
+    every run rebuilds from scratch."""
+    storage = tmp_path.parent / f"{tmp_path.name}-storage"
+    storage.mkdir()
+    _commit(repo, tmp_path, {"a.py": "1\n"}, "first")
+
+    builder.load_or_build(tmp_path, storage_root=storage)
+
+    assert (storage / builder.CACHE_PATH).is_file()
+    assert not (tmp_path / builder.CACHE_PATH).exists()
+
+    # and it is read back from there on the next call at the same HEAD
+    _write(tmp_path, "new_untracked.py", "1\n")
+    assert "new_untracked.py" not in builder.load_or_build(tmp_path, storage_root=storage).nodes
+
+
 def test_load_or_build_invalidates_on_new_commit(repo: git.Repo, tmp_path: Path) -> None:
     _commit(repo, tmp_path, {"a.py": "1\n"}, "first")
     builder.load_or_build(tmp_path)
