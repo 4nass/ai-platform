@@ -34,6 +34,7 @@ Two things a request is never allowed to decide about itself: **who sent it** an
 | Filesystem | Integration/stage/validation worktrees |
 | Provider tools | Read-only modes for reviewer and security roles |
 | Change scope | Role path contracts plus tracked/untracked/ignored inventory |
+| Budget | Reservation before every provider call, summed across concurrent runs; `strict` pauses rather than overruns |
 | Validation | Disposable checkout, timeout, optional no-network Bubblewrap |
 | Workflow | Fixed DAG, bounded complexity, bounded correction |
 | Delivery | No automatic merge or push |
@@ -55,7 +56,7 @@ Before enabling OpenClaw or any network-facing API, all of the following are req
 2. authenticated principals and authorized operations (**partial**, issue #26 — the engine-side half exists: a `Principal` established outside the request, a structured envelope carrying channel/sender/chat/message separately from prompt text, and per-project authorization via gate 1. The authenticated *transport* that would establish a non-local principal is [#30](https://github.com/4nass/ai-platform/issues/30); until it exists the only principal is the local OS user);
 3. idempotency keys for message retries (**delivered**, `core/jobs/envelope.py`, issue #26 — keyed on the transport's own identifiers, enforced by a unique index so it survives restarts, conflicting payloads refused and audited);
 4. durable jobs, events, heartbeat, cancellation, and crash recovery (**delivered**, `core/jobs/`, issue #24 — not yet exposed behind gates 1–3, which remain open);
-5. hard token/cost/time admission budgets;
+5. hard token/cost/time admission budgets (**delivered**, `core/jobs/budget.py`, issue #27 — reservations before dispatch, one un-bypassable gate, `strict` pauses the run for a decision; elapsed-time and currency ceilings are not implemented);
 6. approval gates for push, merge, deployment, secrets, and destructive actions;
 7. a fail-closed execution sandbox;
 8. secrets isolation and retention policy;

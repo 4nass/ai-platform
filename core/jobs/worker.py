@@ -25,7 +25,7 @@ import sys
 import threading
 from pathlib import Path
 
-from core.jobs import store
+from core.jobs import budget, store
 
 HEARTBEAT_SECONDS = 20.0
 """How often a running job says it is still alive. Well under
@@ -121,6 +121,19 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
                 resume=_resume_state(job),
                 project=admitted,
             )
+    except budget.BudgetExceeded as exc:
+        # Paused, not failed. The run is well-formed and its work so far is on
+        # a branch; what stopped it is a policy ceiling, and the answer is a
+        # human decision (raise the limit, or let it go) rather than a retry.
+        # `waiting_approval` is the state that says exactly that, and #28's
+        # approval flow is what leaves it.
+        store.transition(
+            engine_root,
+            job_id,
+            store.WAITING_APPROVAL,
+            note=f"budget: {exc.decision.reason}",
+        )
+        return store.WAITING_APPROVAL
     except BaseException as exc:
         if _is_repo_busy(exc):
             # Back to the queue, not failed: the job is fine, the target was
@@ -232,8 +245,9 @@ def _record_outcome(engine_root, job_id: int, report) -> None:
 def reconcile(engine_root: Path) -> list:
     """Marks abandoned jobs interrupted, and repairs what they left behind.
 
-    `store.reconcile` handles the row. The repair is here because it touches
-    a git repository, which the job store deliberately knows nothing about:
+    `store.reconcile` handles the row, `budget.reconcile` the capacity a dead
+    run is still holding. The git repair is here because it touches a git
+    repository, which the job store deliberately knows nothing about:
     a run neutralizes the target's `core.hooksPath` for its whole
     write-capable window and restores it in a `finally`, and a `finally` only
     runs if the process lives to run it. A killed worker therefore left the
@@ -244,6 +258,11 @@ def reconcile(engine_root: Path) -> list:
     import git
 
     from core.orchestrator import git_ops
+
+    # Reservations held by a run that is no longer spending would otherwise
+    # shrink every later run's window forever — a budget that tightens itself
+    # every time something crashes (see core.jobs.budget.reconcile).
+    budget.reconcile(engine_root)
 
     interrupted = store.reconcile(engine_root)
     for job in interrupted:

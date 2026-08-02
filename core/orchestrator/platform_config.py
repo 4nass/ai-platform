@@ -36,6 +36,7 @@ from pathlib import Path
 import yaml
 
 from core.errors import ConfigError
+from core.jobs.budget import SOFT, Limits
 from core.orchestrator.router import Thresholds
 from core.telemetry.quota import Budget
 
@@ -66,6 +67,25 @@ class PlatformConfig:
     max_correction_attempts: int = DEFAULT_MAX_CORRECTION_ATTEMPTS
     context_mode: str = DEFAULT_CONTEXT_MODE
     context_advanced: dict = field(default_factory=dict)
+
+    budget_mode: str = SOFT
+    """How the admission gate behaves when a limit would be crossed (issue
+    #27). `soft` is the interactive default and never blocks."""
+
+    budget_classes: dict[str, Limits] = field(default_factory=dict)
+    """Named limit sets. A project selects one by name (registry.Project's
+    `budget_class`), so the amounts live with the rest of the tuning policy and
+    the allowlist only says which class a repository belongs to."""
+
+    def limits_for(self, budget_class: str) -> Limits:
+        """The limits a project's class resolves to.
+
+        An unknown class returns unlimited rather than raising. The alternative
+        is a run refused at the gate for a typo in a file it never reads —
+        `ai-platform config` is where a misspelled class should be visible, not
+        the middle of a DAG.
+        """
+        return self.budget_classes.get(budget_class, Limits())
     """Overrides merged onto the resolved context preset's fields — the
     escape hatch for a project that needs different relevance floors without
     editing a shipped preset file."""
@@ -158,6 +178,39 @@ def _parse_advanced_context(data: dict) -> dict:
     return dict(advanced)
 
 
+def _parse_budgets(data: dict) -> tuple[str, dict[str, Limits]]:
+    """Reads `budgets.mode` and `budgets.classes` from platform.yaml.
+
+    Malformed entries are skipped rather than fatal, matching how quotas are
+    handled: one mistyped class must not stop every run, and a class that
+    silently does not exist resolves to unlimited — visible in
+    `ai-platform config`, which is where it should be caught.
+    """
+    from core.jobs.budget import MODES
+
+    raw = data.get("budgets") or {}
+    if not isinstance(raw, dict):
+        return SOFT, {}
+
+    mode = str(raw.get("mode") or SOFT)
+    if mode not in MODES:
+        raise ConfigError(
+            f"Unknown budget mode {mode!r} in {PLATFORM_CONFIG_PATH}. "
+            f"Valid: {', '.join(MODES)}"
+        )
+
+    classes: dict[str, Limits] = {}
+    for name, entry in (raw.get("classes") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        fields = {k: v for k, v in entry.items() if k in Limits.__dataclass_fields__}
+        try:
+            classes[str(name)] = Limits(**fields)
+        except TypeError:
+            continue
+    return mode, classes
+
+
 def load(engine_root: Path) -> PlatformConfig:
     """The resolved platform policy. Missing `platform.yaml` reproduces
     today's shipped defaults exactly — `balanced`/`standard`/`smart` and the
@@ -183,6 +236,8 @@ def load(engine_root: Path) -> PlatformConfig:
         raise ConfigError(f"'context.mode' must be a non-empty string, got: {context_mode!r}")
     context_preset_path(engine_root, context_mode)
 
+    budget_mode, budget_classes = _parse_budgets(data)
+
     return PlatformConfig(
         profile=profile,
         quotas=_parse_quotas(data),
@@ -193,4 +248,6 @@ def load(engine_root: Path) -> PlatformConfig:
         max_correction_attempts=_parse_max_correction_attempts(workflow),
         context_mode=context_mode,
         context_advanced=_parse_advanced_context(data),
+        budget_mode=budget_mode,
+        budget_classes=budget_classes,
     )

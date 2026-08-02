@@ -483,3 +483,47 @@ def test_a_job_submitted_by_path_is_run_as_is(
     job_id = _queue(fake_repo, fake_repo)
 
     assert worker.run_job(fake_repo, job_id) == store.SUCCEEDED
+
+
+# --- a hard budget pauses a job rather than failing it (issue #27) ---
+
+
+def test_a_strict_budget_overrun_moves_the_job_to_waiting_approval(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Paused, not failed. The run is well-formed and its work is on a branch;
+    what stopped it is a policy ceiling, and the answer is a human decision
+    rather than a retry."""
+    platform = (fake_repo / "config" / "platform.yaml")
+    platform.write_text(
+        platform.read_text(encoding="utf-8")
+        + "budgets:\n  mode: strict\n  classes:\n    standard: {max_run_tokens: 1}\n",
+        encoding="utf-8",
+    )
+    _allowlist(fake_repo, fake_repo)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    job_id = _queue(fake_repo, fake_repo, project_id="mine")
+
+    assert worker.run_job(fake_repo, job_id) == store.WAITING_APPROVAL
+
+    job = store.get(fake_repo, job_id)
+    assert job.state == store.WAITING_APPROVAL
+    assert "budget" in store.events(fake_repo, job_id)[-1]["note"]
+    assert "max_run_tokens" in store.events(fake_repo, job_id)[-1]["note"]
+
+
+def test_reconciliation_reclaims_budget_a_dead_run_still_holds(fake_repo: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from core.jobs import budget
+
+    budget.reserve(fake_repo, run_key="crashed", estimated=500_000)
+    old = (datetime.now(timezone.utc) - timedelta(seconds=budget.STALE_AFTER_SECONDS + 60)).isoformat()
+    with store.connect(fake_repo) as con:
+        con.execute("UPDATE reservations SET created_at = ?", (old,))
+
+    worker.reconcile(fake_repo)
+
+    limits = budget.Limits(max_window_tokens=1_000_000)
+    assert budget.usage(fake_repo, limits, run_key="crashed").window_tokens == 0

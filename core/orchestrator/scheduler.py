@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from core import untrusted
 from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
+from core.jobs import budget
 from core.orchestrator import router
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
@@ -87,12 +88,22 @@ def run_task(
     engine_root: Path | None = None,
     complexity: str = router.DEFAULT_COMPLEXITY,
     platform_config: "PlatformConfig | None" = None,
+    budget_limits=None,
+    run_key: str = "",
 ) -> ProviderResult:
     """Runs one task through its configured provider, recording what it cost.
 
     Every provider call in the system funnels through here — DAG stages, the
     decomposer, and the reviewer — so instrumenting this one function means a
     future call site is measured automatically instead of being silently free.
+
+    It is also where the budget gate lives (issue #27), for exactly that
+    reason. `PROVIDERS[...]` is dispatched on one line of this function and
+    nowhere else in the engine, so "no adapter can bypass the common budget
+    gate" is a structural property rather than a convention every adapter has
+    to remember: an adapter cannot be reached without passing it. Capacity is
+    reserved *before* dispatch and settled with the real figure afterwards —
+    including for a failed call, which spent its tokens regardless.
 
     The context arrives unrendered on purpose. Which rendering a provider gets
     depends on whether it can read the repo itself, and that isn't known until
@@ -135,10 +146,47 @@ def run_task(
         context_render=rendered.text if rendered else "",
     )
 
+    # --- the budget gate. Nothing below reaches a provider without it. ---
+    limits = budget_limits if budget_limits is not None else budget.Limits()
+    reservation, estimated = None, 0
+    if limits.declared and (key := run_key or _run_key(recorder)):
+        mode = platform_config.budget_mode if platform_config is not None else budget.SOFT
+        estimated = budget.estimate_tokens(description, agent_task.context_render)
+        # `admission`, not `decision`: the router's decision is still live here
+        # and is read further down for model, effort and routing reason.
+        admission = budget.admit(
+            engine_root, limits, run_key=key, estimated=estimated, mode=mode
+        )
+        if not admission.allowed:
+            raise budget.BudgetExceeded(admission)
+        reservation = budget.reserve(
+            engine_root,
+            run_key=key,
+            estimated=estimated,
+            stage=stage_id or "",
+            agent=agent,
+            provider=provider_name,
+        )
+
     started_at = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()
-    result = provider.run(agent_task)
+    try:
+        result = provider.run(agent_task)
+    except BaseException:
+        # Nothing was spent that anyone can attribute, so the capacity goes
+        # back. Settling this at the estimate would charge the budget for a
+        # call whose cost is unknown and possibly zero.
+        if reservation is not None:
+            budget.release(engine_root, reservation)
+        raise
     duration_ms = int((time.monotonic() - started) * 1000)
+
+    if reservation is not None:
+        # Settled, not released, even when the call failed: a provider that
+        # errored after processing a 200k-token prompt spent those tokens, and
+        # making failures free is precisely backwards for a loop that retries
+        # them.
+        budget.settle(engine_root, reservation, _spent(result, estimated))
 
     if recorder is not None:
         recorder.record_call(
@@ -163,6 +211,38 @@ def run_task(
             metadata=_call_metadata(context, provider_reads_files, result, complexity),
         )
     return result
+
+
+def _run_key(recorder) -> str:
+    """What reservations for this run are grouped under.
+
+    Derived from the telemetry run id when there is one, so budget and history
+    describe the same run. A caller with no recorder (a dry run, most tests)
+    gets no key and therefore no reservations — correct, because it also makes
+    no provider calls to pay for.
+    """
+    run_id = getattr(recorder, "run_id", None)
+    return f"run-{run_id}" if run_id else ""
+
+
+def _spent(result: ProviderResult, estimated: int) -> int:
+    """What a call actually cost, or the estimate when the provider said
+    nothing.
+
+    Falling back to the estimate rather than to zero: a provider that reports
+    no usage has not established that it was free, and a budget that treats
+    silence as free can be emptied by whichever adapter happens to be quiet.
+    """
+    usage = result.usage
+    if usage is None:
+        return estimated
+    total = (
+        (usage.input_tokens or 0)
+        + (usage.output_tokens or 0)
+        + (usage.cache_read_tokens or 0)
+        + (usage.cache_creation_tokens or 0)
+    )
+    return total or estimated
 
 
 def _context_reason(context: SelectedContext | None, rendered) -> str:

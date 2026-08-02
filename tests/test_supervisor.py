@@ -10,6 +10,7 @@ import git
 import pytest
 
 from core.errors import ConfigError
+from core.jobs import budget
 from core.orchestrator import checkpoint, git_ops, registry, scheduler, supervisor, test_runner
 from core.telemetry import store as telemetry
 from providers.base import AgentTask, ProviderResult
@@ -1832,3 +1833,113 @@ def test_a_run_with_no_project_records_no_project_policy(
     with telemetry.connect(fake_repo) as con:
         metadata = con.execute("SELECT metadata FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0]
     assert "project_id" not in json.loads(metadata)
+
+
+# --- hard budgets (issue #27) ---
+
+
+def _budgeted(fake_repo: Path, body: str) -> None:
+    (fake_repo / "config" / "platform.yaml").write_text(
+        PLATFORM_YAML + body, encoding="utf-8"
+    )
+
+
+def test_a_soft_budget_never_blocks_a_run(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The interactive default. Refusing to run is worse than running
+    expensively for someone sitting at a terminal."""
+    _budgeted(fake_repo, "budgets:\n  mode: soft\n  classes:\n    standard: {max_run_tokens: 1}\n")
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", project=_project(("modify", "test")))
+
+    assert report.summary == "done"
+
+
+def test_a_strict_budget_stops_the_run_before_the_call(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The point of a hard limit: the run stops rather than overrunning, and
+    the refusal names which limit and by how much."""
+    _budgeted(fake_repo, "budgets:\n  mode: strict\n  classes:\n    standard: {max_run_tokens: 1}\n")
+    called: list = []
+    _patch_provider(monkeypatch, lambda task: called.append(task.agent) or _multi_stage_run()(task))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    with pytest.raises(budget.BudgetExceeded) as caught:
+        supervisor.run(fake_repo, fake_repo, "add oauth2", project=_project(("modify", "test")))
+
+    assert called == []  # refused before any provider was reached
+    assert caught.value.decision.limit == "max_run_tokens"
+    assert caught.value.decision.ceiling == 1
+
+
+def test_a_run_with_no_declared_budget_is_ungated(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    assert report.summary == "done"
+    assert report.budget.limit == 0
+
+
+def test_a_run_reports_reserved_consumed_and_remaining(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _budgeted(
+        fake_repo,
+        "budgets:\n  mode: soft\n  classes:\n    standard: {max_run_tokens: 100000000}\n",
+    )
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", project=_project(("modify", "test")))
+
+    assert report.budget.calls > 0
+    assert report.budget.reserved > 0
+    assert report.budget.limit == 100000000
+    assert report.budget.remaining > 0
+
+
+def test_every_provider_call_in_a_run_is_reserved(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """"No adapter can bypass the common budget gate" — checked by counting
+    reservations against calls actually made, not by reading the code."""
+    _budgeted(
+        fake_repo,
+        "budgets:\n  mode: soft\n  classes:\n    standard: {max_run_tokens: 100000000}\n",
+    )
+    calls: list = []
+    _patch_provider(monkeypatch, lambda task: calls.append(task.agent) or _multi_stage_run()(task))
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", project=_project(("modify", "test")))
+
+    assert report.budget.calls == len(calls)
+
+
+def test_a_project_selects_its_own_budget_class(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The allowlist says which budget a repository belongs to; the amounts
+    live with the rest of the tuning policy."""
+    _budgeted(
+        fake_repo,
+        "budgets:\n  mode: soft\n  classes:\n"
+        "    standard: {max_run_tokens: 111}\n    generous: {max_run_tokens: 999999999}\n",
+    )
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    project = registry.Project(
+        id="mine", path=Path("/unused"), allowed_actions=("modify", "test"), budget_class="generous"
+    )
+
+    report = supervisor.run(fake_repo, fake_repo, "add oauth2", project=project)
+
+    assert report.budget.limit == 999999999

@@ -21,6 +21,7 @@ import git
 from rich.console import Console
 
 from core.context.manager import ContextManager, SelectedContext
+from core.jobs import budget
 from core.errors import ConfigError
 from core.orchestrator import (
     checkpoint,
@@ -107,6 +108,9 @@ class RunReport:
     """How many test/review-failure -> corrector -> re-check passes actually
     ran (see planner.Plan.max_correction_attempts). 0 means either nothing
     failed, or nothing failed *and had files to fix* — see run()."""
+    budget: "budget.Report" = field(default_factory=lambda: budget.Report())
+    """Reserved, consumed and remaining for this run, with the mode that
+    governed it (issue #27). Empty when no budget was declared."""
 
 
 def format_totals(totals: dict) -> str:
@@ -215,6 +219,8 @@ def _run_stage_in_worktree(
     completed_snapshot: list[StageResult],
     config: target_config.TargetConfig,
     platform_config: platform_config_module.PlatformConfig,
+    budget_limits: budget.Limits,
+    run_key: str,
     complexity: str = router.DEFAULT_COMPLEXITY,
     recorder: telemetry.RunRecorder | None = None,
 ) -> tuple[StageResult, Path | None, str | None]:
@@ -265,6 +271,8 @@ def _run_stage_in_worktree(
             engine_root=engine_root,
             complexity=complexity,
             platform_config=platform_config,
+            budget_limits=budget_limits,
+            run_key=run_key,
         )
 
         worktree_repo = git.Repo(worktree_path)
@@ -658,6 +666,24 @@ def run(
             )
             report_progress(run_id=recorder.run_id)
 
+        # The budget this run is admitted against (issue #27). Resolved once,
+        # here, like every other policy: the class comes from the project's
+        # registry entry and the amounts from platform.yaml, so the allowlist
+        # says which budget a repository belongs to without restating it.
+        #
+        # `run_key` ties reservations to the telemetry run, so budget and
+        # history describe the same thing. A dry run has no recorder and
+        # therefore no key — correct, since it makes no calls to pay for.
+        budget_limits = platform_config.limits_for(
+            project.budget_class if project else registry.DEFAULT_BUDGET_CLASS
+        )
+        run_key = f"run-{recorder.run_id}" if recorder is not None else ""
+        if budget_limits.declared:
+            console.print(
+                f"[bold]Budget:[/bold] {budget_limits.max_run_tokens:,} tokens this run, "
+                f"mode {platform_config.budget_mode}"
+            )
+
         complexity = router.DEFAULT_COMPLEXITY
         if run_state is not None:
             # Restored, not re-decided. Calling the decomposer again would be a
@@ -693,6 +719,8 @@ def run(
                 engine_root=engine_root,
                 complexity="routine",
                 platform_config=platform_config,
+                budget_limits=budget_limits,
+                run_key=run_key,
             )
             chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
             classified = (
@@ -829,6 +857,8 @@ def run(
                         snapshot,
                         config,
                         platform_config,
+                        budget_limits,
+                        run_key,
                         complexity,
                         recorder,
                     )
@@ -943,6 +973,8 @@ def run(
             engine_root=engine_root,
             complexity=complexity,
             platform_config=platform_config,
+            budget_limits=budget_limits,
+            run_key=run_key,
         )
         review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
         review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
@@ -989,6 +1021,8 @@ def run(
                     engine_root=engine_root,
                     complexity=complexity,
                     platform_config=platform_config,
+                    budget_limits=budget_limits,
+                    run_key=run_key,
                 )
                 corrected_files = git_ops.commit_all(
                     integration_repo, f"correction {attempt}: {correction_result.summary or request}"
@@ -1026,6 +1060,8 @@ def run(
                     engine_root=engine_root,
                     complexity=complexity,
                     platform_config=platform_config,
+                    budget_limits=budget_limits,
+                    run_key=run_key,
                 )
                 review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
                 review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
@@ -1066,6 +1102,17 @@ def run(
             totals = telemetry.run_totals(engine_root, recorder.run_id)
             console.print(f"[bold]Usage:[/bold] {format_totals(totals)}")
 
+        # Reserved, consumed and remaining, with the policy that governed them.
+        # The gap between reserved and consumed is the estimation error, which
+        # is the only number that says whether the heuristic in
+        # core.jobs.budget is calibrated for the work this engine really does.
+        budget_report = budget.Report()
+        if run_key and budget_limits.declared:
+            budget_report = budget.report(
+                engine_root, budget_limits, run_key=run_key, mode=platform_config.budget_mode
+            )
+            console.print(f"[bold]Budget:[/bold] {budget_report.line()}")
+
         if correction_attempts:
             console.print(f"[bold]Corrections:[/bold] {correction_attempts} attempt(s)")
         console.print(f"[bold]Summary:[/bold] {summary}")
@@ -1083,4 +1130,5 @@ def run(
             summary=summary,
             totals=totals,
             correction_attempts=correction_attempts,
+            budget=budget_report,
         )

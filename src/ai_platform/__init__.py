@@ -404,6 +404,18 @@ def show_config() -> None:
         # -- it gets parsed and silently stripped rather than shown.
         table.add_row(f"quota: {name}", f"{budget.tokens:,} tokens / {budget.window_hours:g}h")
 
+    table.add_row("budgets.mode", config.budget_mode)
+    for name, limits in sorted(config.budget_classes.items()):
+        # Shown per class rather than only naming them: an unknown class
+        # resolves to unlimited on purpose (a run must not die mid-DAG for a
+        # typo in a file it never reads), so this listing is where a misspelled
+        # class is meant to be caught.
+        table.add_row(
+            f"budget: {name}",
+            f"{limits.max_run_tokens:,}/run · {limits.max_stage_tokens:,}/stage · "
+            f"{limits.max_run_calls} calls · {limits.max_window_tokens:,}/{limits.window_hours:g}h",
+        )
+
     console.print(table)
     console.print(f"[dim]{pc.PLATFORM_CONFIG_PATH} at {ENGINE_ROOT}[/dim]")
 

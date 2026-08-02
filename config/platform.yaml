@@ -48,6 +48,25 @@ context:
 # Escape hatch: overrides merged onto the resolved context preset, for a
 # project that needs different relevance floors without editing the shipped
 # preset files. Uncomment and adjust only if you have a specific reason to.
+budgets:
+  # Hard spending limits, checked before each provider call (issue #27).
+  #   soft           - record and report, never block (the interactive default)
+  #   strict         - refuse the call and pause the run for a human decision
+  #   local_fallback - move the work to a local model, or wait if none is
+  #                    eligible. No local adapter exists yet (#37), so today it
+  #                    waits rather than quietly spending on a paid provider.
+  mode: soft
+  classes:
+    # Which class a repository belongs to is declared in config/projects.yaml;
+    # the amounts live here, with the rest of the tuning policy.
+    standard:
+      max_run_tokens: 4000000
+      max_stage_tokens: 900000
+      max_run_calls: 60
+      max_window_tokens: 16000000
+      window_hours: 24
+
+
 # advanced:
 #   context:
 #     min_similarity: 0.20

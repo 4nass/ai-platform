@@ -47,7 +47,19 @@ Remote unattended execution requires hard admission and runtime budgets independ
 - optional currency ceiling for API-backed providers;
 - explicit behavior when estimates are unavailable.
 
-The admission decision must occur before claiming expensive work, and the worker must stop when a hard limit is reached. This is tracked by [#27](https://github.com/4nass/ai-platform/issues/27).
+Delivered in `core/jobs/budget.py` (issue [#27](https://github.com/4nass/ai-platform/issues/27)). Limits are declared per class in `config/platform.yaml` (`max_run_tokens`, `max_stage_tokens`, `max_run_calls`, `max_window_tokens` over a rolling window) and a project selects its class in `config/projects.yaml`, so the allowlist says which budget a repository belongs to without restating the amounts.
+
+**Reservations, not just accounting.** Checking consumption after each call cannot bound anything: by the time the number moves the tokens are spent, and two concurrent runs each see the other's spending only once it is over. Capacity is reserved before dispatch and reconciled with the real figure afterwards, and admission sums held reservations as well as settled ones — which is what stops two jobs each admitting a call the budget can afford once.
+
+**One gate, structurally.** `PROVIDERS[...]` is dispatched on a single line of `scheduler.run_task` and nowhere else in the engine, so "no adapter can bypass the budget gate" is a property of the shape of the code rather than a rule every adapter has to remember.
+
+**Failure is not free.** A failed call is *settled* at its real cost, not released: a provider that errored after processing a 200k-token prompt spent those tokens, and making failures free is backwards for a loop that retries them. Only a call that never reached a provider is released. A provider that reports no usage settles at the estimate, since silence is not evidence of being free.
+
+**Modes.** `soft` records and reports without blocking (the interactive default). `strict` refuses the call and moves the job to `waiting_approval` — paused, not failed, because what stopped it is a policy ceiling and the answer is a human decision. `local_fallback` is selectable and currently equivalent to `strict` in effect: no local adapter exists yet ([#37](https://github.com/4nass/ai-platform/issues/37)), so it waits rather than quietly spending on a paid provider.
+
+**Estimates are labelled as estimates.** No local tokenizer covers a subscription CLI, so the pre-call figure is a documented character heuristic plus a fixed output allowance, deliberately biased to over-reserve — an over-large reservation delays a call, an under-large one permits a call the budget could not afford, and only the first is recoverable. The run report shows reserved *and* consumed; the gap between them is the only number that says whether the heuristic is calibrated for the work this engine actually does.
+
+Reservations held by a crashed run are reclaimed on age by the same reconciliation that marks jobs interrupted. Left held they would shrink every later run's window forever — a budget that tightens itself every time something crashes.
 
 ## Durable jobs
 
