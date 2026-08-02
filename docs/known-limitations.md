@@ -6,7 +6,7 @@ This page records gaps that affect design or operations. Issue priority remains 
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| No authenticated, authorized, idempotent API | Messaging retries and unauthorized calls are unsafe | [#26](https://github.com/4nass/ai-platform/issues/26) |
+| No authenticated transport | Identity and idempotency are enforced engine-side, but nothing yet authenticates a non-local caller, so there is no remote principal to enforce them for | [#26](https://github.com/4nass/ai-platform/issues/26), [#30](https://github.com/4nass/ai-platform/issues/30) |
 | Quota is advisory, not a hard budget | Unattended runs cannot guarantee cost/token bounds | [#27](https://github.com/4nass/ai-platform/issues/27) |
 | No durable approval gate | Push, deploy, secrets, and destructive actions cannot be safely delegated | [#28](https://github.com/4nass/ai-platform/issues/28) |
 | Sandbox can fail open when Bubblewrap is absent | Untrusted target tests can execute with host access | security prerequisite |

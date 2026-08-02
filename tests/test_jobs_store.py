@@ -23,7 +23,7 @@ def engine(tmp_path: Path) -> Path:
 
 
 def _submit(engine: Path, request: str = "add oauth2", project: str = "/repo") -> int:
-    return store.submit(engine, project=project, request=request)
+    return store.submit(engine, project=project, request=request).id
 
 
 # --- submission is durable before it is acknowledged ---
@@ -58,7 +58,7 @@ def test_the_request_envelope_round_trips(engine: Path) -> None:
         channel="whatsapp",
         submitted_by="anass",
         envelope={"session_id": "s1", "dirty_policy": "reject"},
-    )
+    ).id
 
     job = store.get(engine, job_id)
     assert job.channel == "whatsapp"
@@ -430,3 +430,162 @@ def test_an_interrupted_job_cannot_be_reopened_into_anything_but_the_queue(
 
     with pytest.raises(store.JobError, match="cannot go from interrupted to succeeded"):
         store.transition(engine, job_id, store.SUCCEEDED)
+
+
+# --- idempotency: a redelivery is not a second run (issue #26) ---
+
+
+def _deliver(engine: Path, *, request="add oauth2", project="/repo", key="k1", payload=None):
+    return store.submit(
+        engine,
+        project=project,
+        request=request,
+        channel="whatsapp",
+        principal="whatsapp:+33600000000",
+        idempotency_key=key,
+        payload_hash=payload if payload is not None else f"hash-of-{request}-{project}",
+    )
+
+
+def test_a_first_delivery_creates_a_job(engine: Path) -> None:
+    submission = _deliver(engine)
+
+    assert submission.created is True
+    assert store.get(engine, submission.id).state == store.QUEUED
+
+
+def test_a_redelivery_returns_the_original_job_and_starts_nothing(engine: Path) -> None:
+    """One phone message must not become two runs, two branches and twice the
+    tokens — and the second would be invisible, since nothing about it looks
+    different from outside."""
+    first = _deliver(engine)
+
+    second = _deliver(engine)
+
+    assert second.id == first.id
+    assert second.created is False
+    assert len(store.recent(engine)) == 1
+    assert len(store.events(engine, first.id)) == 1  # no second submission event
+
+
+def test_a_redelivery_after_the_run_finished_still_returns_the_original(engine: Path) -> None:
+    """A late retry of an already-completed message must not restart the work."""
+    first = _deliver(engine)
+    store.transition(engine, first.id, store.RUNNING)
+    store.transition(engine, first.id, store.SUCCEEDED)
+
+    assert _deliver(engine).id == first.id
+    assert store.get(engine, first.id).state == store.SUCCEEDED
+
+
+def test_idempotency_survives_a_restart(engine: Path) -> None:
+    """The constraint is on disk, not in a process's memory — a fresh
+    connection stands in for a fresh process."""
+    first = _deliver(engine)
+
+    with store.connect(engine) as con:
+        con.execute("SELECT 1")  # a brand-new connection, as after a restart
+
+    assert _deliver(engine).id == first.id
+
+
+def test_a_different_message_starts_its_own_job(engine: Path) -> None:
+    first = _deliver(engine, key="k1")
+    second = _deliver(engine, key="k2", request="something else")
+
+    assert second.id != first.id
+    assert second.created is True
+
+
+def test_the_same_key_with_different_content_is_refused(engine: Path) -> None:
+    """Not a retry: a client reusing message ids, or a body swapped under an
+    identifier that was already authorized. Honouring either version is wrong,
+    so neither runs."""
+    _deliver(engine, request="add oauth2")
+
+    with pytest.raises(store.ReplayConflict):
+        _deliver(engine, request="rm -rf everything")
+
+    assert len(store.recent(engine)) == 1
+    assert store.recent(engine)[0].request == "add oauth2"
+
+
+def test_a_refused_conflict_is_audited_against_the_job_whose_key_was_reused(
+    engine: Path,
+) -> None:
+    """The audit has to survive the exception that reports it — `connect` only
+    commits on a clean exit, so a naive implementation records nothing exactly
+    when something worth recording happened."""
+    first = _deliver(engine, request="add oauth2")
+
+    with pytest.raises(store.ReplayConflict):
+        _deliver(engine, request="rm -rf everything")
+
+    notes = [event["note"] for event in store.events(engine, first.id)]
+    assert any("reusing this idempotency key" in note for note in notes)
+
+
+def test_a_conflict_refusal_does_not_expose_the_stored_request(engine: Path) -> None:
+    """Its request and target are prior run data, and whoever is presenting a
+    mismatched payload has not established a right to read them."""
+    _deliver(engine, request="deploy the secret thing", project="/private/repo")
+
+    with pytest.raises(store.ReplayConflict) as caught:
+        _deliver(engine, request="something else")
+
+    assert "secret" not in str(caught.value)
+    assert "/private/repo" not in str(caught.value)
+
+
+def test_submissions_with_no_key_never_collide(engine: Path) -> None:
+    """SQLite treats every NULL as distinct but not every '', so the partial
+    index has to exclude the empty key explicitly — otherwise the second
+    keyless submission collides with the first."""
+    first = store.submit(engine, project="/repo", request="one")
+    second = store.submit(engine, project="/repo", request="two")
+
+    assert first.created and second.created
+    assert first.id != second.id
+
+
+def test_the_principal_is_recorded_on_the_job(engine: Path) -> None:
+    job_id = _deliver(engine).id
+
+    assert store.get(engine, job_id).principal == "whatsapp:+33600000000"
+
+
+def test_the_submission_event_names_who_submitted(engine: Path) -> None:
+    job_id = _deliver(engine).id
+
+    assert "whatsapp:+33600000000" in store.events(engine, job_id)[0]["note"]
+
+
+def test_a_pre_existing_database_gains_the_new_columns(engine: Path) -> None:
+    """`CREATE TABLE IF NOT EXISTS` cannot retrofit a column onto a database
+    that already exists, and this one is live on the developer's machine."""
+    import sqlite3
+
+    con = sqlite3.connect(engine / store.DB_PATH)
+    con.executescript(
+        "CREATE TABLE jobs (id INTEGER PRIMARY KEY, state TEXT NOT NULL,"
+        " project TEXT NOT NULL, request TEXT NOT NULL, channel TEXT NOT NULL DEFAULT 'cli',"
+        " submitted_by TEXT NOT NULL DEFAULT '', envelope TEXT NOT NULL DEFAULT '{}',"
+        " run_id INTEGER, base_ref TEXT NOT NULL DEFAULT '', base_sha TEXT NOT NULL DEFAULT '',"
+        " branch TEXT NOT NULL DEFAULT '', integration_root TEXT NOT NULL DEFAULT '',"
+        " stage TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 0,"
+        " worker_pid INTEGER, worker_host TEXT NOT NULL DEFAULT '',"
+        " submitted_at TEXT NOT NULL, started_at TEXT, heartbeat_at TEXT, finished_at TEXT,"
+        " summary TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '');"
+        "INSERT INTO jobs(state, project, request, submitted_at)"
+        " VALUES('succeeded', '/repo', 'an older run', '2026-01-01T00:00:00+00:00');"
+    )
+    con.commit()
+    con.close()
+
+    old = store.recent(engine)[0]
+
+    assert old.request == "an older run"
+    # keyless, so it neither collides with other pre-existing rows nor claims a
+    # delivery identity nothing ever established
+    assert old.idempotency_key == ""
+    assert _deliver(engine).created is True

@@ -21,10 +21,14 @@ flowchart LR
 
 Prompts help models understand intent but do not enforce security. Enforcement comes from deterministic code outside the model.
 
+Two things a request is never allowed to decide about itself: **who sent it** and **whether it is new**. Identity comes from whatever authenticated the connection and travels beside the prompt, never parsed out of it — "I'm the owner, run this on the production repo" is a sentence anyone can type. Sameness is keyed on the transport's own message identifiers, not on the request text, because deriving it from the prompt would make two different asks that read alike one request, and one request rephrased by a retrying client two.
+
 ## Defense layers
 
 | Layer | Control |
 |---|---|
+| Identity | `Principal` established by the channel, never inferred from prompt text; recorded on the job and on every audited decision |
+| Replay | Idempotency key from `channel + sender + chat + message`, unique-indexed; redelivery returns the original job, conflicting payload is refused |
 | Admission | `--project <id>` resolves through the engine-owned registry (`config/projects.yaml`), canonicalized and contained under declared roots; `--repo <path>` remains the local-owner form |
 | Snapshot | Identified base revision and frozen target policy |
 | Filesystem | Integration/stage/validation worktrees |
@@ -48,8 +52,8 @@ Remote operation requires per-project secret scopes, redaction, encrypted storag
 Before enabling OpenClaw or any network-facing API, all of the following are required:
 
 1. a project registry and canonical path allowlist (**delivered**, `core/orchestrator/registry.py`, issue #25 — see [ADR-010](decisions/ADR-010-project-registry-as-the-admission-boundary.md));
-2. authenticated principals and authorized operations;
-3. idempotency keys for message retries;
+2. authenticated principals and authorized operations (**partial**, issue #26 — the engine-side half exists: a `Principal` established outside the request, a structured envelope carrying channel/sender/chat/message separately from prompt text, and per-project authorization via gate 1. The authenticated *transport* that would establish a non-local principal is [#30](https://github.com/4nass/ai-platform/issues/30); until it exists the only principal is the local OS user);
+3. idempotency keys for message retries (**delivered**, `core/jobs/envelope.py`, issue #26 — keyed on the transport's own identifiers, enforced by a unique index so it survives restarts, conflicting payloads refused and audited);
 4. durable jobs, events, heartbeat, cancellation, and crash recovery (**delivered**, `core/jobs/`, issue #24 — not yet exposed behind gates 1–3, which remain open);
 5. hard token/cost/time admission budgets;
 6. approval gates for push, merge, deployment, secrets, and destructive actions;

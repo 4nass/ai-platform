@@ -28,7 +28,7 @@ from tests.test_supervisor import (
 def _queue(engine: Path, target: Path, request: str = "add oauth2", **envelope) -> int:
     return store.submit(
         engine, project=str(target), request=request, envelope=envelope or {}
-    )
+    ).id
 
 
 def test_run_job_executes_the_run_and_lands_succeeded(
@@ -317,7 +317,7 @@ def test_reconcile_survives_a_target_that_no_longer_exists(fake_repo: Path) -> N
     other interrupted jobs unreconciled."""
     from datetime import datetime, timedelta, timezone
 
-    job_id = store.submit(fake_repo, project="/nonexistent/repo", request="x")
+    job_id = store.submit(fake_repo, project="/nonexistent/repo", request="x").id
     store.claim(fake_repo, job_id, worker_pid=1)
     stale = (
         datetime.now(timezone.utc) - timedelta(seconds=store.STALE_AFTER_SECONDS + 60)

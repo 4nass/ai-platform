@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 DB_PATH = Path("jobs.sqlite")
 BUSY_TIMEOUT_SECONDS = 10.0
@@ -46,6 +47,13 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
+
+REJECTED = "rejected"
+"""Not a job state — a `job_events` note recorded *against* an existing job
+when a submission was refused before becoming one. Kept out of `TRANSITIONS`
+deliberately: nothing was created, so nothing transitioned, and the audit
+belongs on the job whose identifier was reused because that is where anyone
+investigating will look."""
 
 TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, CANCELLED, INTERRUPTED})
 ACTIVE_STATES = frozenset({QUEUED, RUNNING, WAITING_APPROVAL})
@@ -98,6 +106,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   channel          TEXT NOT NULL DEFAULT 'cli',
   submitted_by     TEXT NOT NULL DEFAULT '',
   envelope         TEXT NOT NULL DEFAULT '{}',
+  principal        TEXT NOT NULL DEFAULT '',
+  -- Derived from the transport's own identifiers, never from the prompt (see
+  -- core.jobs.envelope). Empty for channels that supply nothing to key on,
+  -- which is why the unique index below is partial: SQLite treats every NULL
+  -- as distinct but not every '', so the emptiness has to be excluded
+  -- explicitly or the second keyless submission collides with the first.
+  idempotency_key  TEXT NOT NULL DEFAULT '',
+  payload_hash     TEXT NOT NULL DEFAULT '',
 
   -- execution state, filled in as the run progresses
   run_id           INTEGER,
@@ -136,10 +152,51 @@ CREATE INDEX IF NOT EXISTS idx_jobs_project  ON jobs(project);
 CREATE INDEX IF NOT EXISTS idx_events_job    ON job_events(job_id);
 """
 
+IDEMPOTENCY_INDEX = """
+-- Idempotency enforced by the database, not by a read-then-write in Python.
+-- Two workers racing on a redelivered message resolve here, the same reason
+-- `claim` puts its guard in the UPDATE: a check followed by an insert lets
+-- both pass the check. Surviving a restart is free as a consequence -- the
+-- constraint is on disk, not in a process's memory.
+--
+-- Partial because SQLite treats every NULL as distinct but not every '': the
+-- emptiness a keyless channel produces has to be excluded explicitly, or the
+-- second CLI submission collides with the first.
+--
+-- Created in `_migrate`, not in SCHEMA above, because it indexes a column that
+-- `CREATE TABLE IF NOT EXISTS` cannot add to a database that already exists.
+-- Run from SCHEMA it fails outright on any pre-existing jobs.sqlite -- which
+-- is every developer machine this has ever run on.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
+  ON jobs(idempotency_key) WHERE idempotency_key <> '';
+"""
+
 
 class JobError(Exception):
     """An illegal lifecycle operation — an unknown job, or a transition the
     state machine doesn't allow."""
+
+
+class Submission(NamedTuple):
+    """The outcome of a submit: which job covers the request, and whether this
+    call is what created it.
+
+    `created=False` is a redelivery that was absorbed — the id is the original
+    job's, nothing new was queued, and the caller must not start a worker for
+    it a second time.
+    """
+
+    id: int
+    created: bool
+
+
+class ReplayConflict(JobError):
+    """An idempotency key reused with different content.
+
+    Its own type because the correct response differs from every other job
+    error: not "retry", not "fix your request", but "someone is reusing an
+    identifier and one of these two payloads is not what was authorized".
+    """
 
 
 @dataclass(frozen=True)
@@ -155,6 +212,9 @@ class Job:
     channel: str
     submitted_by: str
     envelope: dict
+    principal: str
+    idempotency_key: str
+    payload_hash: str
     run_id: int | None
     base_ref: str
     base_sha: str
@@ -197,6 +257,26 @@ def _job(row: sqlite3.Row) -> Job:
     return Job(**data)
 
 
+def _migrate(con: sqlite3.Connection) -> None:
+    """Adds columns `CREATE TABLE IF NOT EXISTS` cannot retrofit onto a
+    database that already exists. No-op on a fresh one, idempotent on repeat —
+    same pattern as core.telemetry.store._migrate.
+
+    Pre-existing rows get an empty `idempotency_key`, which is correct rather
+    than merely convenient: they were submitted before any key was derived, so
+    claiming one for them retroactively would assert a delivery identity
+    nothing ever established. The partial unique index excludes exactly that
+    value, so they neither collide with each other nor with new submissions.
+    """
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(jobs)")}
+    for column in ("principal", "idempotency_key", "payload_hash"):
+        if column not in columns:
+            con.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+
+    # Only now can this be created — see IDEMPOTENCY_INDEX.
+    con.executescript(IDEMPOTENCY_INDEX)
+
+
 @contextmanager
 def connect(engine_root: Path):
     """Opens the job database, creating it and its schema on first use.
@@ -211,6 +291,7 @@ def connect(engine_root: Path):
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
         con.executescript(SCHEMA)
+        _migrate(con)
         yield con
         con.commit()
     finally:
@@ -225,33 +306,115 @@ def submit(
     channel: str = "cli",
     submitted_by: str = "",
     envelope: dict | None = None,
-) -> int:
+    principal: str = "",
+    idempotency_key: str = "",
+    payload_hash: str = "",
+) -> Submission:
     """Persists a submission and returns its id. Contacts no provider.
 
     This is the whole point of the durable lifecycle: the caller gets an
     identifier it can come back to, before anything expensive, revocable or
     failable has been attempted.
+
+    With an `idempotency_key`, it is also the point where a redelivery stops.
+    Messaging platforms retry: one phone message would otherwise become two
+    runs, two branches and twice the tokens, and the second would be invisible
+    because nothing about it looks different from the outside. A repeat of a
+    key already on file returns the **original** job id — no second row, no
+    second event, nothing started.
+
+    The insert is attempted first and the collision caught, rather than
+    checking and then inserting. A check followed by an insert lets two
+    concurrent redeliveries both pass the check; the unique index resolves
+    them in SQLite, which is also what makes the guarantee survive a restart —
+    the constraint is on disk, not in a process's memory.
+
+    Returns a `Submission`, not a bare id: "which job is this" and "did I just
+    start one" are different questions, and a caller that has to infer the
+    second by comparing fields will eventually infer it wrong and spawn a
+    worker for a run that is already going.
     """
+    payload_hash = payload_hash or ""
     with connect(engine_root) as con:
-        cursor = con.execute(
-            "INSERT INTO jobs(state, project, request, channel, submitted_by, envelope, submitted_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (
-                QUEUED,
-                project,
-                request,
-                channel,
-                submitted_by,
-                json.dumps(envelope or {}),
-                _now(),
-            ),
-        )
+        try:
+            cursor = con.execute(
+                "INSERT INTO jobs(state, project, request, channel, submitted_by, envelope,"
+                " principal, idempotency_key, payload_hash, submitted_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    QUEUED,
+                    project,
+                    request,
+                    channel,
+                    submitted_by,
+                    json.dumps(envelope or {}),
+                    principal,
+                    idempotency_key,
+                    payload_hash,
+                    _now(),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            if not idempotency_key:
+                raise  # collided on something else entirely
+            return Submission(id=_existing(con, idempotency_key, payload_hash, exc), created=False)
+
         job_id = cursor.lastrowid
         con.execute(
             "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
-            (job_id, None, QUEUED, _now(), f"submitted via {channel}"),
+            (job_id, None, QUEUED, _now(), f"submitted via {channel} by {principal or 'unknown'}"),
         )
-        return job_id
+        return Submission(id=job_id, created=True)
+
+
+def _existing(
+    con: sqlite3.Connection,
+    idempotency_key: str,
+    payload_hash: str,
+    collision: sqlite3.IntegrityError,
+) -> int:
+    """Resolves a submission that collided with one already on file.
+
+    Same key, same payload is a retry, and the original job id is the right
+    and only answer. Same key, *different* payload is not a retry — it is a
+    client reusing message ids, or a body swapped under an identifier that was
+    already authorized — and neither version may run: honouring the first
+    silently discards the second, honouring the second lets an identifier
+    launder new content through an old authorization.
+
+    The refusal deliberately describes nothing about the stored job. Its
+    request text and target are prior run data, and whoever is presenting a
+    mismatched payload has not established a right to read them.
+    """
+    row = con.execute(
+        "SELECT id, payload_hash FROM jobs WHERE idempotency_key = ?", (idempotency_key,)
+    ).fetchone()
+    if row is None:
+        raise collision  # the unique index that fired was some other one
+
+    if row["payload_hash"] == payload_hash:
+        return int(row["id"])
+
+    con.execute(
+        "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
+        (
+            row["id"],
+            None,
+            REJECTED,
+            _now(),
+            "refused a submission reusing this idempotency key with different content",
+        ),
+    )
+    # Committed here, explicitly, because the exception below would otherwise
+    # roll back the very record that explains it: `connect` only commits on a
+    # clean exit. An audit entry that disappears whenever something worth
+    # auditing happens is worse than none, since it reads as "nothing
+    # occurred".
+    con.commit()
+    raise ReplayConflict(
+        "This request id has already been used for different content. Refusing both: "
+        "resubmit with a new id if the change is intended."
+    )
 
 
 def get(engine_root: Path, job_id: int) -> Job:

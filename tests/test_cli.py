@@ -315,12 +315,16 @@ def test_cli_submit_carries_the_envelope(monkeypatch: pytest.MonkeyPatch, engine
         ],
     )
 
-    assert store.recent(engine)[0].envelope == {
-        "session_id": "s1",
-        "dirty_policy": "reject",
-        # submitted by path, so no allowlisted id to re-check at claim time
-        "project_id": None,
-    }
+    job = store.recent(engine)[0]
+    assert job.envelope["session_id"] == "s1"
+    assert job.envelope["dirty_policy"] == "reject"
+    # submitted by path, so no allowlisted id to re-check at claim time
+    assert job.envelope["project_id"] is None
+    # identity comes from the process, not from the request text
+    assert job.envelope["channel"] == "cli"
+    assert job.principal.startswith("cli:")
+    # no transport to redeliver a CLI submission, so nothing to key on
+    assert job.idempotency_key == ""
 
 
 def test_cli_status_reads_a_job_submitted_elsewhere(engine, tmp_path) -> None:
@@ -328,7 +332,7 @@ def test_cli_status_reads_a_job_submitted_elsewhere(engine, tmp_path) -> None:
     long gone by the time anyone asks."""
     from core.jobs import store
 
-    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=4242)
     store.record_progress(engine, job_id, branch="engine/x", base_sha="abc123def456", stage="backend")
 
@@ -371,7 +375,7 @@ def test_cli_jobs_reports_nothing_when_the_queue_is_empty(engine) -> None:
 def test_cli_cancel_stops_a_queued_job(engine, tmp_path) -> None:
     from core.jobs import store
 
-    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
 
     result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
 
@@ -382,7 +386,7 @@ def test_cli_cancel_stops_a_queued_job(engine, tmp_path) -> None:
 def test_cli_cancel_refuses_a_running_job(engine, tmp_path) -> None:
     from core.jobs import store
 
-    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=1)
 
     result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
@@ -399,7 +403,7 @@ def test_cli_reconciles_abandoned_jobs_on_a_read(engine, tmp_path) -> None:
 
     from core.jobs import store
 
-    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=1)
     stale = (datetime.now(timezone.utc) - timedelta(seconds=store.STALE_AFTER_SECONDS + 60)).isoformat()
     with store.connect(engine) as con:
@@ -415,7 +419,7 @@ def test_cli_reconciles_abandoned_jobs_on_a_read(engine, tmp_path) -> None:
 def test_cli_work_runs_a_specific_job(monkeypatch: pytest.MonkeyPatch, engine, tmp_path) -> None:
     from core.jobs import store, worker
 
-    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     monkeypatch.setattr(worker, "run_job", lambda root, jid: "succeeded")
 
     result = runner.invoke(ai_platform.app, ["work", "--job", str(job_id)])
@@ -434,7 +438,7 @@ def test_cli_work_on_an_empty_queue_says_so(engine) -> None:
 def _interrupted(engine, project) -> int:
     from core.jobs import store
 
-    job_id = store.submit(engine, project=str(project), request="add oauth2")
+    job_id = store.submit(engine, project=str(project), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=4242)
     store.record_progress(engine, job_id, branch="engine/add-oauth2")
     store.transition(engine, job_id, store.INTERRUPTED, note="worker presumed gone")
@@ -501,7 +505,7 @@ def test_cli_resume_lists_the_stages_it_will_skip(
 def test_cli_resume_refuses_a_job_that_reached_a_verdict(engine, tmp_path) -> None:
     from core.jobs import store
 
-    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2")
+    job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=1)
     store.transition(engine, job_id, store.FAILED)
 
@@ -642,3 +646,58 @@ def test_cli_submit_records_the_project_id_for_the_worker_to_recheck(
     job = store.recent(engine)[0]
     assert job.envelope["project_id"] == "mine"
     assert job.project == str(target.resolve())
+
+
+# --- idempotent submission (issue #26) ---
+
+
+def test_cli_submit_with_a_message_id_absorbs_a_redelivery(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """A messaging platform retrying a webhook must not buy a second run."""
+    from core.jobs import store, worker
+
+    spawned: list = []
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: spawned.append(a) or 1)
+    args = ["submit", "add oauth2", "--repo", str(tmp_path), "--message-id", "m1", "--chat-id", "c1"]
+
+    first = runner.invoke(ai_platform.app, args)
+    second = runner.invoke(ai_platform.app, args)
+
+    assert first.exit_code == 0 and second.exit_code == 0
+    assert len(store.recent(engine)) == 1
+    assert "already covers this request" in second.stdout
+    assert len(spawned) == 1  # and no second worker
+
+
+def test_cli_submit_without_a_message_id_queues_each_time(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """Two `ai-platform submit` invocations are two deliberate acts. Collapsing
+    them would make the CLI unable to ask for the same thing twice."""
+    from core.jobs import store, worker
+
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 1)
+    args = ["submit", "add oauth2", "--repo", str(tmp_path), "--no-detach"]
+
+    runner.invoke(ai_platform.app, args)
+    runner.invoke(ai_platform.app, args)
+
+    assert len(store.recent(engine)) == 2
+
+
+def test_cli_submit_refuses_a_reused_message_id_with_new_content(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    from core.jobs import store, worker
+
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 1)
+    base = ["submit", "--repo", str(tmp_path), "--message-id", "m1", "--chat-id", "c1"]
+
+    runner.invoke(ai_platform.app, ["submit", "add oauth2", *base[1:]])
+    result = runner.invoke(ai_platform.app, ["submit", "delete everything", *base[1:]])
+
+    assert result.exit_code == 1
+    assert "already been used for different content" in result.stdout
+    assert len(store.recent(engine)) == 1
+    assert store.recent(engine)[0].request == "add oauth2"

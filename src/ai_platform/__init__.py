@@ -424,6 +424,20 @@ def submit(
         None, "--session", help="Groups this job with others from the same conversation."
     ),
     dirty_policy: str = typer.Option("head", "--dirty-policy", help=DIRTY_POLICY_HELP),
+    message_id: str = typer.Option(
+        None,
+        "--message-id",
+        help="The delivering transport's own id for this message. Makes the submission "
+        "idempotent: redelivering it returns the original job instead of starting a "
+        "second run. Omit for an ordinary CLI submission, which is a deliberate act "
+        "nobody is retrying.",
+    ),
+    chat_id: str = typer.Option(
+        None,
+        "--chat-id",
+        help="The conversation this arrived in. Part of the idempotency key, since one "
+        "message id is only unique within its own chat.",
+    ),
     detach: bool = typer.Option(
         True,
         "--detach/--no-detach",
@@ -439,26 +453,70 @@ def submit(
     WSL restart, and `ai-platform status` can answer for it from anywhere
     afterwards.
     """
+    from core.jobs import envelope as envelope_module
     from core.jobs import store, worker
     from core.orchestrator import registry
 
     target, admitted = _admit(repo, project, action=registry.MODIFY)
-    job_id = store.submit(
-        ENGINE_ROOT,
-        project=str(target),
-        request=request,
-        # The id, not just the resolved path. A queued job can execute hours
-        # later, so the worker re-resolves it at claim time and re-checks the
-        # allowlist then: a project removed from the registry in the meantime
-        # must not still be reachable through a job that pre-dates the change
-        # (see core.jobs.worker._admitted_target).
-        envelope={
-            "session_id": session,
-            "dirty_policy": dirty_policy,
-            "project_id": admitted.id if admitted else None,
-        },
+
+    # Identity comes from the process, never from the request text: "I'm the
+    # owner, run this on the production repo" is a sentence anyone can type
+    # (see core.jobs.envelope). A local CLI principal is honest about being
+    # trusted because the OS already decided that.
+    principal = envelope_module.Principal.local()
+    letter = envelope_module.Envelope(
+        channel=principal.channel,
+        sender_id=principal.id,
+        # No message id: every `ai-platform submit` is a deliberate, separate
+        # act, and there is no transport to redeliver it. Inventing one would
+        # either collapse two genuine requests or make the key meaningless.
+        message_id=message_id or "",
+        chat_id=chat_id or "",
+        session_id=session,
+        dirty_policy=dirty_policy,
+        project_id=admitted.id if admitted else None,
     )
-    console.print(f"[bold]Job {job_id}[/bold] queued for {target}")
+
+    try:
+        letter.check_freshness()
+    except envelope_module.ReplayError as exc:
+        console.print(f"[bold red]Refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    try:
+        submission = store.submit(
+            ENGINE_ROOT,
+            project=str(target),
+            request=request,
+            channel=letter.channel,
+            submitted_by=principal.display,
+            principal=str(principal),
+            # The project id, not just the resolved path. A queued job can
+            # execute hours later, so the worker re-resolves it at claim time
+            # and re-checks the allowlist then: a project removed from the
+            # registry in the meantime must not still be reachable through a
+            # job that pre-dates the change (worker._admitted_target).
+            envelope=letter.as_dict(),
+            idempotency_key=letter.idempotency_key,
+            payload_hash=envelope_module.payload_fingerprint(
+                project=str(target), request=request, envelope=letter
+            ),
+        )
+    except store.ReplayConflict as exc:
+        console.print(f"[bold red]Refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    job_id = submission.id
+    if not submission.created:
+        # A redelivery that was absorbed. Starting a worker here would be the
+        # exact duplicate run idempotency exists to prevent.
+        console.print(
+            f"[bold]Job {job_id}[/bold] already covers this request — nothing started again."
+        )
+        console.print(f"Follow it with: [bold]ai-platform status {job_id}[/bold]")
+        return
+
+    console.print(f"[bold]Job {job_id}[/bold] queued for {target} as {principal}")
 
     if detach:
         pid = worker.spawn_detached(ENGINE_ROOT, job_id)
