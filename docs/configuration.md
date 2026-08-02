@@ -5,6 +5,7 @@
 | File | Scope | Purpose |
 |---|---|---|
 | `config/platform.yaml` | engine | The five knobs a user actually tunes: profile, quotas, routing gates, workflow mode/parallelism/correction bound, context mode |
+| `config/projects.yaml` | engine | Which repositories may be reached by id, and what may be done to each — the admission allowlist |
 | `config/presets/profiles/<name>.yaml` | engine | Ordered provider/model/effort profiles per role and complexity — calibrated policy, versioned with the engine |
 | `config/presets/workflow/<name>.yaml` | engine | DAG shape (task ids, roles, dependencies) |
 | `config/presets/context/<name>.yaml` | engine | Retrieval sources, relevance floors, injection mode, budget |
@@ -14,6 +15,38 @@
 Engine policy governs orchestration. Target policy governs how a particular repository is validated. The target policy is frozen from the base revision for a run; `platform.yaml` and the presets it selects are loaded once per run and threaded through, so the whole run is judged against one consistent snapshot (`core/orchestrator/platform_config.py`, [ADR-008](decisions/ADR-008-platform-config-and-presets.md)).
 
 Run `ai-platform config` to see the resolved policy — which preset is active and its numbers — without spending a token.
+
+## `config/projects.yaml`
+
+Separate from `platform.yaml` on purpose ([ADR-010](decisions/ADR-010-project-registry-as-the-admission-boundary.md)): that file is tuning, where a mistake changes how well runs go; this one is an allowlist, where a mistake changes what can be reached at all.
+
+```yaml
+roots:
+  - ~/workspace          # every project path must resolve to somewhere under one of these
+
+projects:
+  ai-platform:
+    path: ~/workspace/ai-platform
+    remote: https://github.com/4nass/ai-platform.git   # optional; verified when set
+    base_branch: main                                   # optional; verified when set
+    allowed_actions: [inspect, modify, test]
+    budget_class: standard
+```
+
+| Action | Grants |
+|---|---|
+| `inspect` | Read-only: context selection, routing explanation, history. The default when nothing is declared. |
+| `modify` | Run the DAG — branches, worktrees, agent writes, commits. |
+| `test` | Execute the target's own declared test command. A separate grant because it is arbitrary code execution on this machine, not a consequence of being writable. |
+| `open_pr` | Push and open a pull request. Declarable but not implemented ([#33](https://github.com/4nass/ai-platform/issues/33)) — so a project can withhold it before it exists. |
+
+```bash
+uv run ai-platform run "Add a health endpoint" --project ai-platform
+```
+
+`--project <id>` is the only form anything arriving over a wire may use: the caller names an id and the engine decides what it refers to. `--repo <path>` remains for local interactive use, where the person running the command could already `cd` there. Passing both is refused.
+
+Paths are resolved (symlinks followed, `..` collapsed) and must land under a declared root; a registry with projects but no `roots` is refused outright. The declared remote and base branch are checked against the repository actually on disk, because a path is not an identity. For a queued job the whole check runs **again at claim time**, so withdrawing a project takes effect for work already in the queue.
 
 ## `config/platform.yaml`
 

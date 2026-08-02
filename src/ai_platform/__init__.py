@@ -34,8 +34,51 @@ REPO_OPTION = typer.Option(
 )
 
 
+PROJECT_OPTION = typer.Option(
+    None,
+    "--project",
+    "-p",
+    help="Allowlisted project id from config/projects.yaml, instead of a path. "
+    "The only form a remote caller may use — see docs/security.md.",
+)
+
+
 def _target_root(repo: Path | None) -> Path:
     return (repo or Path.cwd()).resolve()
+
+
+def _admit(repo: Path | None, project_id: str | None, *, action: str):
+    """Resolves what a command may operate on, and returns (path, project).
+
+    Two admission paths on purpose, because there are two trust contexts.
+    `--repo <path>` is someone at their own workstation naming a directory
+    they can already `cd` into; the engine adds nothing by second-guessing it.
+    `--project <id>` is the form anything arriving over a wire must use: the
+    caller supplies a name, and the engine — not the caller — decides what it
+    refers to, whether it is reachable, and what may be done to it
+    (`core.orchestrator.registry`, issue #25).
+
+    Called before anything is indexed and before any provider is chosen, so a
+    refusal costs nothing and leaks nothing.
+    """
+    from core.orchestrator import registry
+
+    if project_id and repo:
+        console.print(
+            "[bold red]Error:[/bold red] --project and --repo name the same thing two ways. "
+            "Use --project for an allowlisted id, --repo for a local path."
+        )
+        raise typer.Exit(1)
+
+    if not project_id:
+        return _target_root(repo), None
+
+    try:
+        project = registry.resolve(ENGINE_ROOT, project_id, action=action)
+    except registry.RegistryError as exc:
+        console.print(f"[bold red]Refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+    return project.path, project
 
 
 @app.callback()
@@ -47,6 +90,7 @@ def callback() -> None:
 def run(
     request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
     repo: Path = REPO_OPTION,
+    project: str = PROJECT_OPTION,
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -66,16 +110,23 @@ def run(
     ),
 ) -> None:
     """Indexes the repo, selects relevant context, and runs the workflow DAG (see `ai-platform config`)."""
-    from core.orchestrator import supervisor
+    from core.orchestrator import registry, supervisor
+
+    # A dry run indexes and decomposes but writes nothing, so it needs only
+    # `inspect`. Asking for `modify` here would make a project that is
+    # deliberately read-only unable to even be inspected.
+    action = registry.INSPECT if dry_run else registry.MODIFY
+    target, admitted = _admit(repo, project, action=action)
 
     try:
         report = supervisor.run(
             ENGINE_ROOT,
-            _target_root(repo),
+            target,
             request,
             dry_run=dry_run,
             session_id=session,
             dirty_policy=dirty_policy,
+            project=admitted,
         )
     except Exception as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
@@ -92,6 +143,7 @@ def run(
 def context(
     request: str = typer.Argument(..., help="The request to select context for."),
     repo: Path = REPO_OPTION,
+    project: str = PROJECT_OPTION,
     show_dropped: bool = typer.Option(
         True, "--dropped/--no-dropped", help="Also list the candidates that were rejected."
     ),
@@ -106,7 +158,10 @@ def context(
 
     from core.context.manager import FULL, POINTERS, ContextManager
 
-    manager = ContextManager(_target_root(repo), engine_root=ENGINE_ROOT)
+    from core.orchestrator import registry
+
+    target, _ = _admit(repo, project, action=registry.INSPECT)
+    manager = ContextManager(target, engine_root=ENGINE_ROOT)
     manager.index_repo()
     selected = manager.select_context(request)
 
@@ -151,6 +206,7 @@ def context(
 @app.command()
 def history(
     repo: Path = REPO_OPTION,
+    project: str = PROJECT_OPTION,
     runs: int = typer.Option(20, "--runs", help="How many recent runs to show."),
     session: str = typer.Option(None, "--session", help="Only show runs from this session."),
 ) -> None:
@@ -162,10 +218,12 @@ def history(
     """
     from rich.table import Table
 
+    from core.orchestrator import registry
     from core.telemetry import store as telemetry
 
+    target, _ = _admit(repo, project, action=registry.INSPECT)
     rows = telemetry.recent_runs(
-        ENGINE_ROOT, limit=runs, session_id=session, target_repo=str(_target_root(repo))
+        ENGINE_ROOT, limit=runs, session_id=session, target_repo=str(target)
     )
     if not rows:
         console.print("No runs recorded yet.")
@@ -361,6 +419,7 @@ DIRTY_POLICY_HELP = (
 def submit(
     request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
     repo: Path = REPO_OPTION,
+    project: str = PROJECT_OPTION,
     session: str = typer.Option(
         None, "--session", help="Groups this job with others from the same conversation."
     ),
@@ -381,13 +440,23 @@ def submit(
     afterwards.
     """
     from core.jobs import store, worker
+    from core.orchestrator import registry
 
-    target = _target_root(repo)
+    target, admitted = _admit(repo, project, action=registry.MODIFY)
     job_id = store.submit(
         ENGINE_ROOT,
         project=str(target),
         request=request,
-        envelope={"session_id": session, "dirty_policy": dirty_policy},
+        # The id, not just the resolved path. A queued job can execute hours
+        # later, so the worker re-resolves it at claim time and re-checks the
+        # allowlist then: a project removed from the registry in the meantime
+        # must not still be reachable through a job that pre-dates the change
+        # (see core.jobs.worker._admitted_target).
+        envelope={
+            "session_id": session,
+            "dirty_policy": dirty_policy,
+            "project_id": admitted.id if admitted else None,
+        },
     )
     console.print(f"[bold]Job {job_id}[/bold] queued for {target}")
 

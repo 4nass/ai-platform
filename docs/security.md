@@ -25,7 +25,7 @@ Prompts help models understand intent but do not enforce security. Enforcement c
 
 | Layer | Control |
 |---|---|
-| Admission | Explicit target path today; registry/allowlist required remotely |
+| Admission | `--project <id>` resolves through the engine-owned registry (`config/projects.yaml`), canonicalized and contained under declared roots; `--repo <path>` remains the local-owner form |
 | Snapshot | Identified base revision and frozen target policy |
 | Filesystem | Integration/stage/validation worktrees |
 | Provider tools | Read-only modes for reviewer and security roles |
@@ -47,7 +47,7 @@ Remote operation requires per-project secret scopes, redaction, encrypted storag
 
 Before enabling OpenClaw or any network-facing API, all of the following are required:
 
-1. a project registry and canonical path allowlist;
+1. a project registry and canonical path allowlist (**delivered**, `core/orchestrator/registry.py`, issue #25 — see [ADR-010](decisions/ADR-010-project-registry-as-the-admission-boundary.md));
 2. authenticated principals and authorized operations;
 3. idempotency keys for message retries;
 4. durable jobs, events, heartbeat, cancellation, and crash recovery (**delivered**, `core/jobs/`, issue #24 — not yet exposed behind gates 1–3, which remain open);

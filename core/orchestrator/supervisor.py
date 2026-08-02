@@ -29,6 +29,7 @@ from core.orchestrator import (
     decomposer,
     git_ops,
     planner,
+    registry,
     review,
     router,
     scheduler,
@@ -158,9 +159,18 @@ def _print_test_result(result: test_runner.TestResult) -> None:
 
 
 def _verify(
-    integration_repo: git.Repo, branch: str, config: target_config.TargetConfig
+    integration_repo: git.Repo,
+    branch: str,
+    config: target_config.TargetConfig,
+    project: registry.Project | None = None,
 ) -> test_runner.TestResult:
     """Runs the target's test command in a throwaway checkout of `branch`.
+
+    A project may withhold the `test` action (issue #25). Executing a target's
+    own declared command is arbitrary code execution on this machine, so it is
+    a separate grant from "may be modified" — and refusing it has to be
+    distinguishable in the report from "nothing to run", which is why it comes
+    back `skipped` with the reason rather than as a pass.
 
     The test command is the one actor guaranteed to litter — pytest writes
     `.pytest_cache/`, coverage writes `.coverage`, Python writes
@@ -170,6 +180,13 @@ def _verify(
     one waiting to be missed. A worktree deleted immediately afterwards
     keeps that noise out of the branch under review entirely.
     """
+    if project is not None and not project.permits(registry.TEST):
+        return test_runner.TestResult(
+            passed=True,
+            skipped=True,
+            output=f"project {project.id!r} does not permit the {registry.TEST!r} action",
+        )
+
     if config.test_command is None:
         return test_runner.run_tests(Path(integration_repo.working_tree_dir), config)
 
@@ -430,6 +447,7 @@ def run(
     dirty_policy: str = DIRTY_HEAD,
     progress: Callable[..., None] | None = None,
     resume: Resume | None = None,
+    project: registry.Project | None = None,
 ) -> RunReport:
     """`engine_root` is the ai-platform install (config/, prompts/, the
     shared telemetry.sqlite); `target_root` is the repo this run actually
@@ -472,6 +490,16 @@ def run(
     left there, and the stages already merged onto its branch are skipped. See
     core.orchestrator.checkpoint for what is and isn't restored, and why
     verification and review are deliberately re-run.
+
+    `project` is the resolved registry entry when this run was admitted by
+    project id rather than by path (issue #25). Passed already resolved, never
+    resolved here: admission has to fail before anything is indexed or any
+    provider is chosen, which means it happens in the caller — the CLI, or the
+    job worker at claim time. What this function does with it is honour the
+    parts of the policy that only apply once a run is under way (the `test`
+    grant) and record the whole policy on the run, since the file can be
+    edited afterwards and a run is only interpretable against what was in
+    force when it started.
     """
     if resume is not None and dry_run:
         raise ConfigError(
@@ -620,6 +648,12 @@ def run(
                     "dirty_policy": dirty_policy,
                     "source_dirty": bool(excluded),
                     "excluded_local_modifications": len(excluded),
+                    # The admission policy this run was allowed under. Recorded
+                    # rather than looked up later: config/projects.yaml can be
+                    # edited afterwards, and "this run ran the target's tests"
+                    # means something different depending on whether that was
+                    # granted at the time (see registry.Project.snapshot).
+                    **(project.snapshot() if project else {}),
                 },
             )
             report_progress(run_id=recorder.run_id)
@@ -896,7 +930,7 @@ def run(
         any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
         report_progress(stage="verify")
-        test_result = _verify(integration_repo, branch, config)
+        test_result = _verify(integration_repo, branch, config, project)
         _print_test_result(test_result)
 
         report_progress(stage="review")
@@ -980,7 +1014,7 @@ def run(
                 all_files_changed.extend(corrected_files)
                 console.print(f"[bold]correction-{attempt}[/bold]: {git_ops.format_changed_files(corrected_files)}")
 
-                test_result = _verify(integration_repo, branch, config)
+                test_result = _verify(integration_repo, branch, config, project)
                 _print_test_result(test_result)
 
                 diff = git_ops.diff_since(integration_repo, base_sha)

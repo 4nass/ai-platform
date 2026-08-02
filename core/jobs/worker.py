@@ -109,15 +109,17 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
         store.record_progress(engine_root, job_id, **fields)
 
     try:
+        target, admitted = _admitted_target(engine_root, job)
         with _Heartbeat(engine_root, job_id):
             report = supervisor.run(
                 engine_root,
-                Path(job.project),
+                target,
                 job.request,
                 session_id=job.envelope.get("session_id"),
                 dirty_policy=job.envelope.get("dirty_policy", supervisor.DIRTY_HEAD),
                 progress=progress,
                 resume=_resume_state(job),
+                project=admitted,
             )
     except BaseException as exc:
         if _is_repo_busy(exc):
@@ -146,6 +148,34 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
     )
     _record_outcome(engine_root, job_id, report)
     return state
+
+
+def _admitted_target(engine_root: Path, job: store.Job):
+    """Re-checks the allowlist at execution time, and returns (path, project).
+
+    A job submitted by project id is *not* admitted once, at submission. A
+    queue exists precisely so work can execute long after it was asked for —
+    after the registry was edited, after a project was withdrawn, after a path
+    was repointed. Trusting the path recorded on the row would make the
+    allowlist a snapshot taken at the least useful moment, and a job queued
+    before a project was removed would still reach it.
+
+    The resolved path is also used in preference to the stored one, so a
+    project that legitimately moved is followed rather than half-followed.
+
+    A job submitted by raw path (`--repo`, local interactive use) has no
+    project id and is run as-is: it was admitted by someone who could already
+    reach that directory, which is a different trust context (see
+    `ai_platform._admit`).
+    """
+    from core.orchestrator import registry
+
+    project_id = job.envelope.get("project_id")
+    if not project_id:
+        return Path(job.project), None
+
+    project = registry.resolve(engine_root, project_id, action=registry.MODIFY)
+    return project.path, project
 
 
 def _resume_state(job: store.Job):

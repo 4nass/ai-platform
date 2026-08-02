@@ -10,7 +10,7 @@ import git
 import pytest
 
 from core.errors import ConfigError
-from core.orchestrator import checkpoint, git_ops, scheduler, supervisor, test_runner
+from core.orchestrator import checkpoint, git_ops, registry, scheduler, supervisor, test_runner
 from core.telemetry import store as telemetry
 from providers.base import AgentTask, ProviderResult
 
@@ -1751,3 +1751,84 @@ def test_a_resumed_stage_is_still_told_what_its_upstreams_produced(
     tests_prompt = descriptions["tests"]
     assert "backend done" in tests_prompt  # the skipped stage's own summary
     assert "backend.py" in tests_prompt  # and what it changed
+
+
+# --- per-project action policy (issue #25) ---
+
+
+def _project(actions: tuple[str, ...]) -> registry.Project:
+    return registry.Project(id="mine", path=Path("/unused"), allowed_actions=actions)
+
+
+def test_a_project_that_does_not_permit_tests_does_not_run_them(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Executing a target's own declared command is arbitrary code execution on
+    this machine, so it is a separate grant from "may be modified"."""
+    _patch_provider(monkeypatch, _multi_stage_run())
+    ran: list = []
+    monkeypatch.setattr(
+        test_runner,
+        "run_tests",
+        lambda root, config: ran.append(1) or test_runner.TestResult(passed=True, output="ok"),
+    )
+
+    report = supervisor.run(
+        fake_repo, fake_repo, "add oauth2", project=_project(("inspect", "modify"))
+    )
+
+    assert ran == []
+    assert "does not permit" in report.tests_output
+    assert report.summary == "done"  # withheld, not failed
+
+
+def test_a_project_that_permits_tests_still_runs_them(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _patch_provider(monkeypatch, _multi_stage_run())
+    ran: list = []
+    monkeypatch.setattr(
+        test_runner,
+        "run_tests",
+        lambda root, config: ran.append(1) or test_runner.TestResult(passed=True, output="ok"),
+    )
+
+    supervisor.run(
+        fake_repo, fake_repo, "add oauth2", project=_project(("inspect", "modify", "test"))
+    )
+
+    assert ran
+
+
+def test_the_project_policy_is_recorded_on_the_run(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """config/projects.yaml can be edited afterwards, so what a run was allowed
+    to do has to be recorded with the run, not looked up later."""
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(
+        fake_repo, fake_repo, "add oauth2", project=_project(("inspect", "modify"))
+    )
+
+    with telemetry.connect(fake_repo) as con:
+        metadata = con.execute("SELECT metadata FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0]
+    recorded = json.loads(metadata)
+    assert recorded["project_id"] == "mine"
+    assert recorded["project_allowed_actions"] == "inspect,modify"
+
+
+def test_a_run_with_no_project_records_no_project_policy(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """`--repo` is a different trust context and has no registry entry. An
+    invented one would claim a policy nobody declared."""
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+
+    supervisor.run(fake_repo, fake_repo, "add oauth2")
+
+    with telemetry.connect(fake_repo) as con:
+        metadata = con.execute("SELECT metadata FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert "project_id" not in json.loads(metadata)

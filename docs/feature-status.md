@@ -21,6 +21,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | Quota- and health-aware failover | Delivered | Advisory local usage and recent outcomes |
 | Integration, stage, and validation worktrees | Delivered | Delivery branch retained; checkout not switched |
 | Frozen target validation policy | Delivered | Read from the base revision |
+| Project registry and action allowlist | Delivered | `--project <id>`; canonicalized, contained, re-checked per job |
 | Sandboxed tests with Bubblewrap when available | Delivered | Falls back with a warning when unavailable |
 | Strict ignored-write policy | Delivered | Declared ephemeral paths are allowed |
 | Bounded review/correction loop | Delivered | Only eligible validation/review failures |
@@ -37,7 +38,7 @@ This page is the authoritative distinction between implemented behavior and targ
 |---|---|---:|---|
 | P0 | Safe ephemeral-write policy | [#23](https://github.com/4nass/ai-platform/issues/23) | Delivered; issue closed |
 | P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered; issue closed — including resuming an interrupted run |
-| P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Planned |
+| P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Delivered; `--project` resolves ids, re-checked at claim time |
 | P0 | Authentication, authorization, idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Planned |
 | P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Planned |
 | P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Planned |

@@ -413,3 +413,73 @@ def test_a_job_that_merged_stages_offers_them_back(
 
     assert resume is not None
     assert resume.branch == store.get(fake_repo, job_id).branch
+
+
+# --- the allowlist is re-checked at execution time, not at submission (#25) ---
+
+
+def _allowlist(engine: Path, target: Path, *, actions: str = "[inspect, modify, test]") -> None:
+    (engine / "config").mkdir(exist_ok=True)
+    (engine / "config" / "projects.yaml").write_text(
+        f"roots: [{target.parent}]\nprojects:\n  mine:\n    path: {target}\n"
+        f"    allowed_actions: {actions}\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_job_submitted_by_project_id_resolves_it_at_claim_time(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _allowlist(fake_repo, fake_repo)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    job_id = _queue(fake_repo, fake_repo, project_id="mine")
+
+    assert worker.run_job(fake_repo, job_id) == store.SUCCEEDED
+
+
+def test_a_project_withdrawn_after_submission_cannot_still_be_reached(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A queue exists so work can execute long after it was asked for. If the
+    allowlist were only consulted at submission, a job queued before a project
+    was removed would still reach it — the check would be a snapshot taken at
+    the least useful moment."""
+    _allowlist(fake_repo, fake_repo)
+    job_id = _queue(fake_repo, fake_repo, project_id="mine")
+
+    (fake_repo / "config" / "projects.yaml").write_text("roots: []\nprojects: {}\n", encoding="utf-8")
+    called: list = []
+    monkeypatch.setattr("core.orchestrator.planner.plan", lambda *a, **k: called.append(1))
+
+    with pytest.raises(Exception, match="No project 'mine'"):
+        worker.run_job(fake_repo, job_id)
+
+    assert called == []  # refused before any planning
+    assert store.get(fake_repo, job_id).state == store.FAILED
+
+
+def test_an_action_revoked_after_submission_stops_the_job(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    _allowlist(fake_repo, fake_repo)
+    job_id = _queue(fake_repo, fake_repo, project_id="mine")
+
+    _allowlist(fake_repo, fake_repo, actions="[inspect]")
+
+    with pytest.raises(Exception, match="does not permit 'modify'"):
+        worker.run_job(fake_repo, job_id)
+
+    assert store.get(fake_repo, job_id).state == store.FAILED
+
+
+def test_a_job_submitted_by_path_is_run_as_is(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """`--repo` is a different trust context: someone who could already `cd`
+    there. The registry is not consulted, and an empty one does not block it."""
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    job_id = _queue(fake_repo, fake_repo)
+
+    assert worker.run_job(fake_repo, job_id) == store.SUCCEEDED

@@ -1,0 +1,27 @@
+# Which repositories this engine may operate on, and what may be done to each.
+#
+# A remote caller (a phone message, eventually an OpenClaw tool call) names a
+# project *id* from this file. It never supplies a path — see
+# core/orchestrator/registry.py and ADR-010 for why that distinction is the
+# whole point. `--repo <path>` still works for local interactive use; it is a
+# different trust context, and it is the one this file exists to replace for
+# anything arriving over a wire.
+#
+# Every project path must resolve (symlinks followed, `..` collapsed) to
+# somewhere inside `roots`. Without a root declared, nothing can be resolved
+# by id at all: an allowlist with no boundary is just a list.
+
+roots:
+  - ~/workspace
+
+projects:
+  ai-platform:
+    path: ~/workspace/ai-platform
+    remote: https://github.com/4nass/ai-platform.git
+    base_branch: main
+    # inspect = read-only (context, routing, history)
+    # modify  = run the DAG: branches, worktrees, agent writes, commits
+    # test    = execute the target's own declared test command
+    # open_pr = push and open a pull request (not implemented yet, #33)
+    allowed_actions: [inspect, modify, test]
+    budget_class: standard

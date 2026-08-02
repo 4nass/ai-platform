@@ -29,7 +29,7 @@ def _report(summary: str) -> RunReport:
 def test_cli_exits_zero_when_summary_is_done(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "core.orchestrator.supervisor.run",
-        lambda engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head": _report("done"),
+        lambda engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head", **admission: _report("done"),
     )
 
     result = runner.invoke(ai_platform.app, ["run", "add a thing"])
@@ -40,7 +40,7 @@ def test_cli_exits_zero_when_summary_is_done(monkeypatch: pytest.MonkeyPatch) ->
 def test_cli_exits_nonzero_when_summary_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "core.orchestrator.supervisor.run",
-        lambda engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head": _report("needs attention"),
+        lambda engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head", **admission: _report("needs attention"),
     )
 
     result = runner.invoke(ai_platform.app, ["run", "add a thing"])
@@ -51,7 +51,7 @@ def test_cli_exits_nonzero_when_summary_needs_attention(monkeypatch: pytest.Monk
 def test_cli_dry_run_passes_flag_through_and_ignores_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
-    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head"):
+    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head", **admission):
         captured["dry_run"] = dry_run
         return _report("needs attention")
 
@@ -68,7 +68,7 @@ def test_cli_run_passes_the_repo_flag_through_as_target_root(
 ) -> None:
     captured: dict = {}
 
-    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head"):
+    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head", **admission):
         captured["engine_root"] = engine_root
         captured["target_root"] = target_root
         return _report("done")
@@ -88,7 +88,7 @@ def test_cli_defaults_the_dirty_policy_to_head(monkeypatch: pytest.MonkeyPatch) 
     anything: the flag exists to *opt out* of the default, not to enable it."""
     captured: dict = {}
 
-    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="x"):
+    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="x", **admission):
         captured["dirty_policy"] = dirty_policy
         return _report("done")
 
@@ -103,7 +103,7 @@ def test_cli_defaults_the_dirty_policy_to_head(monkeypatch: pytest.MonkeyPatch) 
 def test_cli_passes_the_dirty_policy_through(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
-    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head"):
+    def fake_run(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head", **admission):
         captured["dirty_policy"] = dirty_policy
         return _report("done")
 
@@ -116,7 +116,7 @@ def test_cli_passes_the_dirty_policy_through(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_cli_exits_nonzero_and_prints_clean_error_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    def raise_error(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head"):
+    def raise_error(engine_root, target_root, request, dry_run=False, session_id=None, dirty_policy="head", **admission):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("core.orchestrator.supervisor.run", raise_error)
@@ -315,7 +315,12 @@ def test_cli_submit_carries_the_envelope(monkeypatch: pytest.MonkeyPatch, engine
         ],
     )
 
-    assert store.recent(engine)[0].envelope == {"session_id": "s1", "dirty_policy": "reject"}
+    assert store.recent(engine)[0].envelope == {
+        "session_id": "s1",
+        "dirty_policy": "reject",
+        # submitted by path, so no allowlisted id to re-check at claim time
+        "project_id": None,
+    }
 
 
 def test_cli_status_reads_a_job_submitted_elsewhere(engine, tmp_path) -> None:
@@ -512,3 +517,128 @@ def test_cli_status_points_an_interrupted_job_at_resume(engine, tmp_path) -> Non
 
     assert result.exit_code == 0
     assert "ai-platform resume" in result.stdout
+
+
+# --- admission by project id (issue #25) ---
+
+
+def _registry(engine, tmp_path, *, actions="[inspect, modify, test]") -> Path:
+    """An allowlisted project, in the throwaway engine the `engine` fixture
+    points ENGINE_ROOT at."""
+    import git
+
+    target = tmp_path / "roots" / "mine"
+    target.mkdir(parents=True)
+    repo = git.Repo.init(target)
+    with repo.config_writer() as writer:
+        writer.set_value("user", "name", "Test")
+        writer.set_value("user", "email", "test@example.com")
+    (target / "f.txt").write_text("x", encoding="utf-8")
+    repo.index.add(["f.txt"])
+    repo.index.commit("initial")
+
+    (engine / "config").mkdir(exist_ok=True)
+    (engine / "config" / "projects.yaml").write_text(
+        f"roots: [{tmp_path / 'roots'}]\nprojects:\n  mine:\n    path: {target}\n"
+        f"    allowed_actions: {actions}\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def test_cli_run_resolves_a_project_id_to_its_allowlisted_path(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    target = _registry(engine, tmp_path)
+    captured: dict = {}
+
+    def fake_run(engine_root, target_root, request, **kwargs):
+        captured["target"] = target_root
+        captured["project"] = kwargs.get("project")
+        return _report("done")
+
+    monkeypatch.setattr("core.orchestrator.supervisor.run", fake_run)
+
+    result = runner.invoke(ai_platform.app, ["run", "add a thing", "--project", "mine"])
+
+    assert result.exit_code == 0
+    assert captured["target"] == target.resolve()
+    assert captured["project"].id == "mine"
+
+
+def test_cli_run_refuses_an_unknown_project_without_calling_the_supervisor(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """"Fail before context indexing or provider selection" is the criterion —
+    so the supervisor must not be reached at all."""
+    _registry(engine, tmp_path)
+    called: list = []
+    monkeypatch.setattr(
+        "core.orchestrator.supervisor.run", lambda *a, **k: called.append(1)
+    )
+
+    result = runner.invoke(ai_platform.app, ["run", "add a thing", "--project", "theirs"])
+
+    assert result.exit_code == 1
+    assert "Refused" in result.stdout
+    assert called == []
+
+
+def test_cli_run_refuses_a_project_that_may_only_be_inspected(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    _registry(engine, tmp_path, actions="[inspect]")
+    called: list = []
+    monkeypatch.setattr(
+        "core.orchestrator.supervisor.run", lambda *a, **k: called.append(1)
+    )
+
+    result = runner.invoke(ai_platform.app, ["run", "add a thing", "--project", "mine"])
+
+    assert result.exit_code == 1
+    assert "does not permit 'modify'" in result.stdout
+    assert called == []
+
+
+def test_cli_dry_run_only_needs_inspect(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """A read-only project must still be inspectable — a dry run writes
+    nothing, so requiring `modify` for it would make the grant meaningless."""
+    _registry(engine, tmp_path, actions="[inspect]")
+    monkeypatch.setattr("core.orchestrator.supervisor.run", lambda *a, **k: _report("dry-run"))
+
+    result = runner.invoke(
+        ai_platform.app, ["run", "add a thing", "--project", "mine", "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+
+
+def test_cli_refuses_a_project_and_a_repo_together(engine, tmp_path) -> None:
+    _registry(engine, tmp_path)
+
+    result = runner.invoke(
+        ai_platform.app, ["run", "x", "--project", "mine", "--repo", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "name the same thing two ways" in result.stdout
+
+
+def test_cli_submit_records_the_project_id_for_the_worker_to_recheck(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """The id, not only the resolved path: a queued job can execute hours
+    later, and the allowlist has to be checked then too."""
+    from core.jobs import store, worker
+
+    target = _registry(engine, tmp_path)
+    monkeypatch.setattr(worker, "spawn_detached", lambda *a: 1)
+
+    result = runner.invoke(ai_platform.app, ["submit", "add oauth2", "--project", "mine"])
+
+    assert result.exit_code == 0
+    job = store.recent(engine)[0]
+    assert job.envelope["project_id"] == "mine"
+    assert job.project == str(target.resolve())
