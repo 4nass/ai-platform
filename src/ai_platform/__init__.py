@@ -734,6 +734,94 @@ def _completed_stages(job) -> list[str]:
 
 
 @app.command()
+def approvals(
+    show_all: bool = typer.Option(
+        False, "--all", help="Also show decided and expired requests."
+    ),
+) -> None:
+    """Lists actions waiting on a decision.
+
+    A remote request buys one thing: the run. Anything whose consequences
+    outlive it — a push, a deployment, an overrun of the token budget — is a
+    separate decision, and this is where those queue up (issue #28).
+    """
+    from rich.table import Table
+
+    from core.jobs import approvals as approvals_store
+
+    # Deterministic rather than lazy: a request past its expiry that still read
+    # `pending` would say "waiting for you", which is the one thing it is not.
+    expired = approvals_store.expire_stale(ENGINE_ROOT)
+    if expired:
+        console.print(f"[dim]{expired} request(s) expired without a decision[/dim]")
+
+    rows = approvals_store.pending(ENGINE_ROOT)
+    if not rows and not show_all:
+        console.print("Nothing waiting for a decision.")
+        return
+
+    table = Table(title="Approvals")
+    for column in ("id", "state", "requested", "what", "by", "expires"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            str(row.id),
+            row.state,
+            row.requested_at[:19].replace("T", " "),
+            row.describe(),
+            row.requested_by or "-",
+            row.expires_at[:19].replace("T", " "),
+        )
+    console.print(table)
+    console.print("Decide with: [bold]ai-platform approve <id>[/bold] or [bold]deny <id>[/bold]")
+
+
+@app.command()
+def approve(
+    approval_id: int = typer.Argument(..., help="Approval to grant."),
+    note: str = typer.Option("", "--note", help="Recorded with the decision."),
+) -> None:
+    """Grants one pending action — that action, with the inputs it was shown
+    against. A later change to the diff, target, command or amount needs a new
+    decision."""
+    _decide(approval_id, approved=True, note=note)
+
+
+@app.command()
+def deny(
+    approval_id: int = typer.Argument(..., help="Approval to refuse."),
+    note: str = typer.Option("", "--note", help="Recorded with the decision."),
+) -> None:
+    """Refuses one pending action. Terminal: a denial is a decision, not a
+    pause."""
+    _decide(approval_id, approved=False, note=note)
+
+
+def _decide(approval_id: int, *, approved: bool, note: str) -> None:
+    from core.jobs import approvals as approvals_store
+    from core.jobs.envelope import Principal
+
+    try:
+        decided = approvals_store.decide(
+            ENGINE_ROOT,
+            approval_id,
+            approved=approved,
+            principal=str(Principal.local()),
+            note=note,
+        )
+    except approvals_store.ApprovalError as exc:
+        console.print(f"[bold red]Refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    verb = "Approved" if approved else "Denied"
+    console.print(f"[bold]{verb} {decided.id}[/bold]: {decided.describe()}")
+    if approved and decided.job_id:
+        console.print(
+            f"Resume its job with: [bold]ai-platform resume {decided.job_id}[/bold]"
+        )
+
+
+@app.command()
 def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:
     """Cancels a job that hasn't started executing yet."""
     from core.jobs import store

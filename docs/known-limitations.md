@@ -8,7 +8,7 @@ This page records gaps that affect design or operations. Issue priority remains 
 |---|---|---|
 | No authenticated transport | Identity and idempotency are enforced engine-side, but nothing yet authenticates a non-local caller, so there is no remote principal to enforce them for | [#26](https://github.com/4nass/ai-platform/issues/26), [#30](https://github.com/4nass/ai-platform/issues/30) |
 | Budget limits cover tokens and calls, not time or currency | An unattended run is bounded in spend but not in wall-clock duration | [#27](https://github.com/4nass/ai-platform/issues/27) |
-| No durable approval gate | Push, deploy, secrets, and destructive actions cannot be safely delegated | [#28](https://github.com/4nass/ai-platform/issues/28) |
+| Approvals exist but the actions they gate mostly do not | `open_pr`, deploy and migration are declarable and gateable, and none is implemented yet — so today the gate is exercised by budget overruns | [#28](https://github.com/4nass/ai-platform/issues/28), [#33](https://github.com/4nass/ai-platform/issues/33) |
 | Sandbox can fail open when Bubblewrap is absent | Untrusted target tests can execute with host access | security prerequisite |
 
 ## P1 — correctness and operability

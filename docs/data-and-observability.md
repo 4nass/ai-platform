@@ -7,7 +7,7 @@ The platform uses different stores for different lifecycles.
 | Store | Location | Purpose | Status |
 |---|---|---|---|
 | `telemetry.sqlite` | engine root | Append-oriented run and provider analytics | Delivered |
-| `jobs.sqlite` | engine root | Mutable asynchronous job lifecycle | Delivered |
+| `jobs.sqlite` | engine root | Job lifecycle, budget reservations, approvals | Delivered |
 | Qdrant `vector/` | target `.ai-platform/` | Semantic chunks and embeddings | Delivered |
 | `graph.json` | target `.ai-platform/` | Dependency/co-change graph cache | Delivered |
 | Git branches | target repository | Durable code delivery artifact | Delivered |

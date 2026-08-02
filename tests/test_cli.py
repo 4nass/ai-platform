@@ -701,3 +701,101 @@ def test_cli_submit_refuses_a_reused_message_id_with_new_content(
     assert "already been used for different content" in result.stdout
     assert len(store.recent(engine)) == 1
     assert store.recent(engine)[0].request == "add oauth2"
+
+
+# --- approvals (issue #28) ---
+
+
+def _unwrapped(text: str) -> str:
+    """Rich hard-wraps console output at the terminal width, so a phrase can
+    be split across lines. Tests assert on meaning, not on layout."""
+    return " ".join(text.split())
+
+
+def test_cli_approvals_says_when_nothing_is_waiting(engine) -> None:
+    result = runner.invoke(ai_platform.app, ["approvals"])
+
+    assert result.exit_code == 0
+    assert "Nothing waiting" in result.stdout
+
+
+def test_cli_approvals_lists_what_needs_a_decision(engine) -> None:
+    from core.jobs import approvals as store
+
+    store.request(engine, action="open_pr", target="engine/x", detail={"diff_sha": "abc"})
+
+    result = runner.invoke(ai_platform.app, ["approvals"])
+
+    # Rich wraps and truncates table cells at the test terminal's width, so
+    # assert on fragments that survive it rather than on the whole line.
+    assert "open_pr" in result.stdout
+    assert "pending" in result.stdout
+
+
+def test_cli_approve_grants_one_action(monkeypatch: pytest.MonkeyPatch, engine) -> None:
+    from core.jobs import approvals as store
+
+    monkeypatch.setattr("getpass.getuser", lambda: "anass")
+    approval = store.request(engine, action="open_pr", target="engine/x", requested_by="cli:anass")
+
+    result = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
+
+    assert result.exit_code == 0
+    assert store.get(engine, approval.id).state == "approved"
+
+
+def test_cli_deny_is_terminal(monkeypatch: pytest.MonkeyPatch, engine) -> None:
+    from core.jobs import approvals as store
+
+    monkeypatch.setattr("getpass.getuser", lambda: "anass")
+    approval = store.request(engine, action="open_pr", target="engine/x", requested_by="cli:anass")
+
+    runner.invoke(ai_platform.app, ["deny", str(approval.id)])
+    again = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
+
+    assert store.get(engine, approval.id).state == "denied"
+    assert again.exit_code == 1
+    assert "already denied" in again.stdout
+
+
+def test_cli_approve_refuses_a_request_from_someone_else(
+    monkeypatch: pytest.MonkeyPatch, engine
+) -> None:
+    from core.jobs import approvals as store
+
+    monkeypatch.setattr("getpass.getuser", lambda: "anass")
+    approval = store.request(engine, action="deploy", requested_by="whatsapp:+33600000000")
+
+    result = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
+
+    assert result.exit_code == 1
+    assert "requested by someone else" in _unwrapped(result.stdout)
+
+
+def test_cli_approvals_expires_stale_requests_on_read(engine) -> None:
+    from core.jobs import approvals as store
+
+    approval = store.request(engine, action="deploy", ttl_seconds=-1)
+
+    result = runner.invoke(ai_platform.app, ["approvals"])
+
+    assert "expired without a decision" in result.stdout
+    assert store.get(engine, approval.id).state == "expired"
+
+
+def test_cli_approving_a_budget_pause_points_at_resume(
+    monkeypatch: pytest.MonkeyPatch, engine, tmp_path
+) -> None:
+    """A paused job needs a way back. Approving the overrun without saying how
+    to continue leaves the run stopped for a reason nobody can clear."""
+    from core.jobs import approvals as store
+
+    monkeypatch.setattr("getpass.getuser", lambda: "anass")
+    approval = store.request(
+        engine, action="budget", target="job-7", detail={"extra_tokens": 5000},
+        job_id=7, requested_by="cli:anass",
+    )
+
+    result = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
+
+    assert "ai-platform resume 7" in result.stdout

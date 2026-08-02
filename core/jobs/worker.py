@@ -125,8 +125,7 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
         # Paused, not failed. The run is well-formed and its work so far is on
         # a branch; what stopped it is a policy ceiling, and the answer is a
         # human decision (raise the limit, or let it go) rather than a retry.
-        # `waiting_approval` is the state that says exactly that, and #28's
-        # approval flow is what leaves it.
+        _request_budget_approval(engine_root, job, exc)
         store.transition(
             engine_root,
             job_id,
@@ -161,6 +160,37 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
     )
     _record_outcome(engine_root, job_id, report)
     return state
+
+
+def _request_budget_approval(engine_root: Path, job: store.Job, exc) -> None:
+    """Turns a budget refusal into something a person can act on.
+
+    Without this the job would sit in `waiting_approval` with nothing to
+    approve — a state that describes a wait nobody can end. The request carries
+    the exact amount, so approving it authorizes *that* overrun and not a
+    standing licence to exceed the budget (see core.jobs.approvals).
+
+    Best-effort: the pause itself is the safety property, and failing to file
+    the paperwork must not turn a paused run into a crashed one.
+    """
+    from core.jobs import approvals
+
+    try:
+        approvals.request(
+            engine_root,
+            action="budget",
+            target=f"job-{job.id}",
+            detail={
+                "extra_tokens": max(0, exc.decision.would_total - exc.decision.ceiling),
+                "limit": exc.decision.limit,
+                "ceiling": exc.decision.ceiling,
+            },
+            job_id=job.id,
+            run_key=f"run-{job.run_id}" if job.run_id else "",
+            requested_by=job.principal,
+        )
+    except Exception:
+        pass
 
 
 def _admitted_target(engine_root: Path, job: store.Job):

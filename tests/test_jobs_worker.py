@@ -527,3 +527,57 @@ def test_reconciliation_reclaims_budget_a_dead_run_still_holds(fake_repo: Path) 
 
     limits = budget.Limits(max_window_tokens=1_000_000)
     assert budget.usage(fake_repo, limits, run_key="crashed").window_tokens == 0
+
+
+def test_a_paused_job_files_an_approval_someone_can_act_on(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A job in `waiting_approval` with nothing to approve is a state that
+    describes a wait nobody can end (issue #28)."""
+    from core.jobs import approvals
+
+    platform = fake_repo / "config" / "platform.yaml"
+    platform.write_text(
+        platform.read_text(encoding="utf-8")
+        + "budgets:\n  mode: strict\n  classes:\n    standard: {max_run_tokens: 1}\n",
+        encoding="utf-8",
+    )
+    _allowlist(fake_repo, fake_repo)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    job_id = _queue(fake_repo, fake_repo, project_id="mine")
+
+    worker.run_job(fake_repo, job_id)
+
+    waiting = approvals.pending(fake_repo)
+    assert len(waiting) == 1
+    assert waiting[0].action == "budget"
+    assert waiting[0].job_id == job_id
+    assert waiting[0].detail["limit"] == "max_run_tokens"
+    # the exact overrun, so approving authorizes that amount and not a standing
+    # licence to exceed the budget
+    assert waiting[0].detail["extra_tokens"] > 0
+
+
+def test_filing_the_approval_cannot_turn_a_pause_into_a_crash(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """The pause is the safety property; failing to file the paperwork must not
+    cost it."""
+    from core.jobs import approvals
+
+    platform = fake_repo / "config" / "platform.yaml"
+    platform.write_text(
+        platform.read_text(encoding="utf-8")
+        + "budgets:\n  mode: strict\n  classes:\n    standard: {max_run_tokens: 1}\n",
+        encoding="utf-8",
+    )
+    _allowlist(fake_repo, fake_repo)
+    _patch_provider(monkeypatch, _multi_stage_run())
+    _patch_tests(monkeypatch, passed=True, output="ok")
+    monkeypatch.setattr(
+        approvals, "request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down"))
+    )
+    job_id = _queue(fake_repo, fake_repo, project_id="mine")
+
+    assert worker.run_job(fake_repo, job_id) == store.WAITING_APPROVAL

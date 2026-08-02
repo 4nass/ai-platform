@@ -79,9 +79,19 @@ Quota is a local estimate from recorded tokens versus declared rolling-window al
 
 ## Durable jobs
 
-`submit`, `status`, `jobs`, `cancel`, and `work` (issue [#24](https://github.com/4nass/ai-platform/issues/24)) are delivered and tested against `core/jobs/`. That is a statement about the local CLI/queue contract, not about remote exposure — no authentication, project allowlist, or hard budget exists yet (see [Security](security.md)), so these commands are not yet a safe surface for an untrusted remote caller.
+`submit`, `status`, `jobs`, `cancel`, and `work` (issue [#24](https://github.com/4nass/ai-platform/issues/24)) are delivered and tested against `core/jobs/`. That is a statement about the local CLI/queue contract, not about remote exposure. A project allowlist, idempotent submission, hard budgets and approval gates now exist (issues #25–#28), but nothing yet *authenticates* a non-local caller — see gate 2 in [Security](security.md) and [#30](https://github.com/4nass/ai-platform/issues/30) — so these commands are still not a safe surface for an untrusted remote caller.
 
 `submit` persists the request and starts a detached worker; `status <id>` and `jobs` are readable from any process, including after the submitting terminal is closed. A job whose worker dies is reconciled to `interrupted` on the next `jobs`/`status`/`work` call, keeping its branch, base revision, and integration-worktree path. `work [--job ID]` runs one job or drains the whole queue in the foreground — the entry point a managed service unit would call once [#40](https://github.com/4nass/ai-platform/issues/40) exists.
+
+When a run stops for a decision rather than a fault — today, a `strict` budget overrun — it lands in `waiting_approval` with a request attached:
+
+```bash
+uv run ai-platform approvals
+uv run ai-platform approve 3
+uv run ai-platform resume 7
+```
+
+An approval is bound to the exact inputs it was shown against, is single-use and expires (default one hour). If the diff, target, command or amount has changed since, it no longer applies and a new decision is asked for — which is the point.
 
 `resume <id>` continues an interrupted job rather than starting it over:
 

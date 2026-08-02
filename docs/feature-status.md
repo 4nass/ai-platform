@@ -28,6 +28,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | Bounded review/correction loop | Delivered | Only eligible validation/review failures |
 | SQLite telemetry and cost estimates | Delivered | Analytical history, not a hard budget |
 | Hard budgets with reservations | Delivered | `soft`/`strict`/`local_fallback`; gate in `scheduler.run_task` |
+| Scoped approvals for privileged actions | Delivered | Fingerprint-bound, single-use, expiring; audited |
 | Durable jobs, detached worker, and crash recovery | Delivered | `core/jobs/`; heartbeat + reconciliation mark abandoned runs `interrupted`, not `failed` |
 | Resuming an interrupted run | Delivered | `ai-platform resume <id>`; per-stage checkpoint, merged stages are not re-run |
 | Dirty-tree snapshot mode | Known limitation | Declared policy is not fully implemented |
@@ -43,7 +44,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Delivered; `--project` resolves ids, re-checked at claim time |
 | P0 | Authentication, authorization, idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine-side delivered; authenticated transport is [#30](https://github.com/4nass/ai-platform/issues/30) |
 | P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Delivered; token/call limits with reservations. Time and currency ceilings not implemented |
-| P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Planned |
+| P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Delivered; `approvals`/`approve`/`deny`, bound to inputs, single-use |
 | P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned |
 | P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Planned |
 | P1 | Provider failover hardening | [#31](https://github.com/4nass/ai-platform/issues/31) | Planned |

@@ -37,8 +37,9 @@ Two things a request is never allowed to decide about itself: **who sent it** an
 | Budget | Reservation before every provider call, summed across concurrent runs; `strict` pauses rather than overruns |
 | Validation | Disposable checkout, timeout, optional no-network Bubblewrap |
 | Workflow | Fixed DAG, bounded complexity, bounded correction |
+| Approval | Consequential actions classified automatic/denied/approval-required per project; approval bound to the exact inputs shown, single-use, expiring |
 | Delivery | No automatic merge or push |
-| Audit | Provider/model/effort/outcome telemetry |
+| Audit | Provider/model/effort/outcome telemetry, plus an append-only trail of every submission, refusal, approval and denial |
 
 Repository context is wrapped as untrusted data and known structured control words such as `VERDICT`, `TASKS`, and `COMPLEXITY` are mechanically defanged where relevant. This reduces accidental parser confusion but is not a prompt-injection solution.
 
@@ -57,7 +58,7 @@ Before enabling OpenClaw or any network-facing API, all of the following are req
 3. idempotency keys for message retries (**delivered**, `core/jobs/envelope.py`, issue #26 — keyed on the transport's own identifiers, enforced by a unique index so it survives restarts, conflicting payloads refused and audited);
 4. durable jobs, events, heartbeat, cancellation, and crash recovery (**delivered**, `core/jobs/`, issue #24 — not yet exposed behind gates 1–3, which remain open);
 5. hard token/cost/time admission budgets (**delivered**, `core/jobs/budget.py`, issue #27 — reservations before dispatch, one un-bypassable gate, `strict` pauses the run for a decision; elapsed-time and currency ceilings are not implemented);
-6. approval gates for push, merge, deployment, secrets, and destructive actions;
+6. approval gates for push, merge, deployment, secrets, and destructive actions (**delivered**, `core/jobs/approvals.py`, issue #28 — fingerprint-bound, single-use, expiring, decided by the requesting principal; see [ADR-011](decisions/ADR-011-admission-authorization-and-approval.md));
 7. a fail-closed execution sandbox;
 8. secrets isolation and retention policy;
 9. immutable artifact references and auditable preview deployments.
