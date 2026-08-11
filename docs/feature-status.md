@@ -27,11 +27,13 @@ This page is the authoritative distinction between implemented behavior and targ
 | Strict ignored-write policy | Delivered | Declared ephemeral paths are allowed |
 | Bounded review/correction loop | Delivered | Only eligible validation/review failures |
 | SQLite telemetry and cost estimates | Delivered | Analytical history, not a financial ceiling |
-| Hard budgets with reservations | Engine delivered | Token/call gate is real; time/currency ceilings remain |
-| Scoped approvals for privileged actions | Engine delivered | Fingerprint-bound and audited; external actions remain |
+| Hard budgets with reservations | Engine delivered | Token/call gate is real; time/currency ceilings remain in #45 |
+| Scoped approvals for privileged actions | Engine delivered | Fingerprint-bound and audited; external actions remain in #46 |
 | Durable jobs, detached worker and crash recovery | Delivered | Heartbeat and reconciliation mark abandoned runs `interrupted` |
 | Resuming an interrupted run | Delivered | `ai-platform resume <id>` skips merged stages |
-| Structured progress events and cooperative cancellation | Planned | Local job state exists; remote event/cancel contract is #29 |
+| Structured progress events and cooperative cancellation | Planned | Remote event/cancel contract is #29 |
+| REST/SSE remote API | Planned | Narrow authenticated transport is #47; OpenClaw consumer is #30 |
+| Constrained local-model provider tier | Planned | Adapter direction is #37; MVP role policy/evaluation is #48 |
 | Dirty-tree snapshot mode | Known limitation | Default `head` policy excludes uncommitted changes |
 | Cross-machine run locking | Known limitation | Current lock is intra-machine only |
 | Truly read-only target checkout | Known limitation | Target-local context artifacts can still be written |
@@ -43,31 +45,36 @@ This page is the authoritative distinction between implemented behavior and targ
 | P0 | Safe ephemeral-write policy | [#23](https://github.com/4nass/ai-platform/issues/23) | Delivered; issue closed |
 | P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered; issue closed |
 | P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Engine delivered; issue closed |
-| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine half delivered; authenticated transport is tracked in #44 and consumed by #30 |
-| P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings remain in #45 |
-| P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate delivered; the audited external executor is #46 and actions remain in #33/#34 |
-| P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned |
-| P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Planned |
+| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine half delivered; transport auth is #44 and API consumption is #30/#47 |
+| P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings are #45 |
+| P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate delivered; audited external actions are #46 |
+| P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned; required by API/OpenClaw |
+| P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Planned; consumes #44 and #47 |
 | P1 | Provider failover hardening | [#31](https://github.com/4nass/ai-platform/issues/31) | Planned |
 | P1 | Quality-aware routing | [#32](https://github.com/4nass/ai-platform/issues/32) | Planned |
-| P1 | Base synchronization and remote delivery | [#33](https://github.com/4nass/ai-platform/issues/33) | Planned |
-| P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Planned |
-| P1 | Secrets isolation and retention | [#35](https://github.com/4nass/ai-platform/issues/35) | Planned |
+| P1 | Base synchronization and remote delivery | [#33](https://github.com/4nass/ai-platform/issues/33) | Planned; uses #46 for consequential actions |
+| P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Planned; uses #46 for deployment approval |
+| P1 | Secrets isolation and retention | [#35](https://github.com/4nass/ai-platform/issues/35) | Planned; required by #49 |
 | P1 | Multi-turn run references | [#36](https://github.com/4nass/ai-platform/issues/36) | Planned |
-| P1 | Local-model provider | [#37](https://github.com/4nass/ai-platform/issues/37) | Planned |
+| P1 | Local-model provider | [#37](https://github.com/4nass/ai-platform/issues/37) | Planned; MVP policy/evaluation is #48 |
 | P2 | Attachments and rich artifacts | [#38](https://github.com/4nass/ai-platform/issues/38) | Planned |
 | P2 | Incremental context indexing | [#39](https://github.com/4nass/ai-platform/issues/39) | Planned |
 | P2 | Reliable WSL service mode | [#40](https://github.com/4nass/ai-platform/issues/40) | Planned |
 | P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Delivered; issue closed |
 | P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Planned |
+| P1 | REST/SSE remote API | [#47](https://github.com/4nass/ai-platform/issues/47) | Planned; MVP gateway transport |
+| P1 | Local-model MVP policy and evaluation | [#48](https://github.com/4nass/ai-platform/issues/48) | Planned; constrained roles only |
+| P0 | Remote exposure security readiness gate | [#49](https://github.com/4nass/ai-platform/issues/49) | Planned; final go/no-go evidence |
 
 ## MVP gate
 
-The first phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). It requires the remote admission/lifecycle contract (#29/#30, with transport auth in #44), synchronized delivery and immutable artifacts (#33), authenticated previews (#34), secrets/retention (#35), and a reliable worker/notification path (#40/#42). Local engine delivery of #25-#28 is a prerequisite, not a substitute for those remote gates.
+The first expanded phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). It requires authenticated transport (#44), REST/SSE plus lifecycle events (#29/#30/#47), constrained local-model execution (#37/#48), synchronized delivery and immutable artifacts (#33), authenticated previews (#34), secrets/retention (#35), approved external actions (#46), the security readiness gate (#49), and a reliable worker/notification path (#40/#42).
+
+Local engine delivery of #25-#28 is a prerequisite, not a substitute for the remote gates. Local models are included in this MVP only for explicitly allowed low-risk roles and only after the evaluation policy in #48 passes.
 
 ## Tracking reconciliation
 
-GitHub still lists #26-#28 as open because their remote halves are intentionally unfinished. Do not close those issues merely because the engine-side modules are merged; the residuals are now split into #44 (transport auth), #45 (time/currency budgets) and #46 (audited external actions). Close a parent only when its full end-to-end contract is delivered.
+GitHub keeps #26-#28 open because their remote halves are unfinished. The residuals are split into #44 (transport auth), #45 (time/currency budgets) and #46 (audited external actions). New MVP scope is tracked in #47 (REST/SSE), #48 (local-model policy) and #49 (security readiness). Close a parent only when its full end-to-end contract is delivered.
 
 ## Release rule
 
