@@ -13,6 +13,7 @@ status probes used by the adapters; no model call is made.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -67,7 +68,55 @@ def _python_check() -> Check:
     return Check("Python >= 3.11", "FAIL", f"{version} is too old", "Install Python 3.11 or newer")
 
 
+def _uv_candidates() -> tuple[Path, ...]:
+    """Common install locations checked when ``uv`` is not in PATH."""
+    home = Path.home()
+    return (
+        home / ".local" / "bin" / "uv",
+        home / ".cargo" / "bin" / "uv",
+        Path("/usr/local/bin/uv"),
+        Path("/usr/bin/uv"),
+    )
+
+
+def _uv_check() -> Check:
+    ok, detail = _command_version("uv")
+    if ok:
+        return Check("uv", "PASS", detail)
+
+    if not shutil.which("uv"):
+        installed = next(
+            (path for path in _uv_candidates() if path.is_file() and os.access(path, os.X_OK)),
+            None,
+        )
+        if installed is not None:
+            directory = str(installed.parent)
+            export = f'export PATH="{directory}:$PATH"'
+            persist = f"echo '{export}' >> ~/.bashrc\nsource ~/.bashrc"
+            return Check(
+                "uv",
+                "FAIL",
+                f"uv is installed at {installed}, but that directory is not in PATH",
+                f"Current shell: {export}\nPersist Bash/WSL: {persist}",
+            )
+        return Check(
+            "uv",
+            "FAIL",
+            "uv is not in PATH and no common installation was found",
+            "Install: curl -LsSf https://astral.sh/uv/install.sh | sh\nThen open a new shell and rerun `ai-platform doctor`",
+        )
+
+    return Check(
+        "uv",
+        "FAIL",
+        detail,
+        "Repair or reinstall uv, then rerun `uv --version`",
+    )
+
+
 def _tool_check(command: str, *, required: bool = True) -> Check:
+    if command == "uv":
+        return _uv_check()
     ok, detail = _command_version(command)
     if ok:
         return Check(command, "PASS", detail)

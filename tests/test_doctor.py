@@ -29,6 +29,31 @@ def test_missing_required_tool_is_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "PATH" in check.detail
 
 
+def test_uv_outside_path_prints_exact_bash_fix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    uv = tmp_path / "uv"
+    uv.touch()
+    uv.chmod(0o755)
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+    monkeypatch.setattr(doctor, "_uv_candidates", lambda: (uv,))
+
+    check = doctor._tool_check("uv")
+
+    assert check.status == "FAIL"
+    assert f"installed at {uv}" in check.detail
+    assert f'export PATH="{tmp_path}:$PATH"' in check.remediation
+    assert "source ~/.bashrc" in check.remediation
+
+
+def test_uv_missing_prints_install_fix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+    monkeypatch.setattr(doctor, "_uv_candidates", lambda: ())
+
+    check = doctor._tool_check("uv")
+
+    assert check.status == "FAIL"
+    assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in check.remediation
+
+
 def test_missing_optional_tool_is_warn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
 

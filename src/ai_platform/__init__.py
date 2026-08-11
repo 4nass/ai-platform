@@ -113,7 +113,7 @@ def doctor(
         style = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}[check.status]
         detail = check.detail
         if check.remediation:
-            detail = f"{detail} ({check.remediation})"
+            detail = f"{detail}\nFix: {check.remediation}"
         table.add_row(f"[{style}]{check.status}[/{style}]", check.name, detail)
     console.print(table)
 
