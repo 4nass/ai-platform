@@ -26,10 +26,10 @@ The local CLI can run synchronous work or submit a durable job. It can select co
 
 | Gate | Exit criterion | Tracking |
 |---|---|---|
-| Admission | A remote caller authenticates as a principal; only an allowlisted project id and authorized operation are accepted; retries are idempotent | Engine half delivered in #25/#26; transport in #30 |
+| Admission | A remote caller authenticates as a principal; only an allowlisted project id and authorized operation are accepted; retries are idempotent | Engine half delivered in #25/#26; transport auth in #44 and typed tools in #30 |
 | Lifecycle | Submit, status, progress events, cancellation, approval and artifact references work without a live terminal | #29, #30 |
 | Execution | The run starts from a synchronized, pinned base revision and produces a remote delivery branch without mutating the user's checkout | #33 |
-| Safety | Token/call/time/currency ceilings, secret redaction/retention, fail-closed sandbox policy and auditable approvals are enforced | #27, #28, #35; time/currency and external actions remain |
+| Safety | Token/call/time/currency ceilings, secret redaction/retention, fail-closed sandbox policy and auditable approvals are enforced | #27, #28, #35, #45, #46 |
 | Validation | A successful delivery revision is deployed by CI/CD to an authenticated, ephemeral preview URL with expiry and teardown | #34 |
 | Operability | The worker starts as a managed WSL service, survives restart, exposes health/backup status and emits a compact result view/notification | #40, #42 |
 
@@ -39,7 +39,7 @@ The MVP is complete only when every gate has an end-to-end test through the remo
 
 ### Now - remote control loop (P0/P1)
 
-1. **#30 - typed authenticated OpenClaw tools:** submit, status, events, cancel, approve/deny and fetch-artifact. Keep the API narrow and idempotent.
+1. **#30 - typed authenticated OpenClaw tools:** submit, status, events, cancel, approve/deny and fetch-artifact. Keep the API narrow and idempotent; consume the authenticated transport contract from #44.
 2. **#29 - structured progress and cooperative cancellation:** make stage, provider, budget, validation, review and approval transitions observable.
 3. **#33 - Git synchronization and delivery:** pin the base ref, define divergence policy, push the delivery branch and record immutable commit/artifact ids.
 4. **#34 - preview environments:** let CI/CD build the committed delivery revision, deploy a short-lived authenticated subdomain and tear it down deterministically.

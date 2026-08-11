@@ -43,9 +43,9 @@ This page is the authoritative distinction between implemented behavior and targ
 | P0 | Safe ephemeral-write policy | [#23](https://github.com/4nass/ai-platform/issues/23) | Delivered; issue closed |
 | P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered; issue closed |
 | P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Engine delivered; issue closed |
-| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine half delivered; authenticated transport remains in #30 |
-| P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings remain |
-| P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate delivered; external push/deploy actions remain in #33/#34 |
+| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine half delivered; authenticated transport is tracked in #44 and consumed by #30 |
+| P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings remain in #45 |
+| P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate delivered; the audited external executor is #46 and actions remain in #33/#34 |
 | P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned |
 | P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Planned |
 | P1 | Provider failover hardening | [#31](https://github.com/4nass/ai-platform/issues/31) | Planned |
@@ -63,11 +63,11 @@ This page is the authoritative distinction between implemented behavior and targ
 
 ## MVP gate
 
-The first phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). It requires the remote admission/lifecycle contract (#29/#30), synchronized delivery and immutable artifacts (#33), authenticated previews (#34), secrets/retention (#35), and a reliable worker/notification path (#40/#42). Local engine delivery of #25-#28 is a prerequisite, not a substitute for those remote gates.
+The first phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). It requires the remote admission/lifecycle contract (#29/#30, with transport auth in #44), synchronized delivery and immutable artifacts (#33), authenticated previews (#34), secrets/retention (#35), and a reliable worker/notification path (#40/#42). Local engine delivery of #25-#28 is a prerequisite, not a substitute for those remote gates.
 
 ## Tracking reconciliation
 
-GitHub still lists #26-#28 as open because their remote halves are intentionally unfinished. Do not close those issues merely because the engine-side modules are merged; close or split them only when the corresponding end-to-end transport/action contract is delivered.
+GitHub still lists #26-#28 as open because their remote halves are intentionally unfinished. Do not close those issues merely because the engine-side modules are merged; the residuals are now split into #44 (transport auth), #45 (time/currency budgets) and #46 (audited external actions). Close a parent only when its full end-to-end contract is delivered.
 
 ## Release rule
 
