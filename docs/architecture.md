@@ -106,7 +106,7 @@ flowchart TD
     CHANNEL --> GATEWAY["OpenClaw personal gateway"]
     GATEWAY --> API["Authenticated engineering job API"]
     API --> REG["Project registry and policy"]
-    API --> JOBS["Durable jobs, events, approvals"]
+    API --> JOBS["Durable jobs, lifecycle state and approvals"]
     JOBS --> ENGINE["AI engineering engine"]
     ENGINE --> CONTEXT["Context engineering"]
     ENGINE --> ROUTING["Provider routing and budgets"]
@@ -120,7 +120,7 @@ flowchart TD
 
 OpenClaw is an interaction gateway, not an execution sandbox or source of engineering truth. The platform must expose narrow idempotent operations and durable state before the gateway is enabled. Preview deployment consumes a committed delivery revision and returns an immutable URL; it must not run from an agent's mutable worktree.
 
-The `JOBS` node's local half — durable state, atomic claim, heartbeat, crash reconciliation — is delivered (`core/jobs/`, issue #24); the rest of this diagram (`GATEWAY`, `API`, `REG`, `PREVIEW`, `NOTIFY`) remains target architecture with no delivered end-to-end capability.
+The local JOBS half - durable state, atomic claim, heartbeat, crash reconciliation and resume - is delivered in core/jobs/. Structured events, cancellation, GATEWAY, API, PREVIEW and NOTIFY remain target architecture with no delivered end-to-end capability.
 
 ## Architectural invariants
 

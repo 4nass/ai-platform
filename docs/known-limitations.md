@@ -1,6 +1,7 @@
 # Known limitations
 
 This page records gaps that affect design or operations. Issue priority remains authoritative in GitHub.
+The local engine is usable for one owner on one workstation. The blockers below are specifically what prevents the phone-driven OpenClaw loop from being an MVP; do not treat a delivered local primitive as a remote security guarantee.
 
 ## P0 — blocks safe remote use
 

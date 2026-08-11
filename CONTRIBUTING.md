@@ -1,5 +1,7 @@
 # Contributing
 
+## Documentation and ADRs
+Documentation is part of the product contract. Changes to behavior must update the matching page under [docs](docs/README.md), [feature status](docs/feature-status.md) and, when a boundary changes, an ADR. Keep README focused on product positioning and quick start; put operational detail in docs.
 ## Running the test suite
 
 Install dependencies (including the `dev` group, which provides `pytest`) and run:
