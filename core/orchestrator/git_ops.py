@@ -85,7 +85,9 @@ def _unused_branch_name(repo: git.Repo, base_name: str) -> str:
     return f"{base_name}-{suffix}"
 
 
-def create_integration_worktree(repo: git.Repo, request: str) -> tuple[Path, str]:
+def create_integration_worktree(
+    repo: git.Repo, request: str, base_ref: str = "HEAD"
+) -> tuple[Path, str]:
     """The run's own checkout of a fresh `engine/<slug>` branch.
 
     Replaces checking that branch out in the caller's working tree, which
@@ -95,7 +97,8 @@ def create_integration_worktree(repo: git.Repo, request: str) -> tuple[Path, str
     stage's worktree branches from here, and every merge/commit/diff for the
     run happens here — the target repo's own checkout is never written to.
 
-    Branched from the repo's current HEAD, not from its working tree: a
+    Branched from the pinned `base_ref` (HEAD by default), not from its working
+    tree: a
     worktree checkout only ever contains committed state, so uncommitted
     work in the target is invisible to the run. That's what makes running
     against a dirty tree safe — and, since `supervisor.run` now also builds
@@ -105,7 +108,7 @@ def create_integration_worktree(repo: git.Repo, request: str) -> tuple[Path, str
     branch_name = _unused_branch_name(repo, f"engine/{_slugify(request)}")
     worktree_path = Path(tempfile.mkdtemp(prefix="engine-run-"))
     worktree_path.rmdir()  # `git worktree add` needs to create this path itself
-    repo.git.worktree("add", str(worktree_path), "-b", branch_name, "HEAD")
+    repo.git.worktree("add", str(worktree_path), "-b", branch_name, base_ref)
     return worktree_path, branch_name
 
 

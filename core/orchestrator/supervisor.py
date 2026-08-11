@@ -29,6 +29,7 @@ from core.orchestrator import (
     correction,
     decomposer,
     git_ops,
+    git_remote,
     planner,
     registry,
     review,
@@ -550,15 +551,35 @@ def run(
         run_state = _adopt_interrupted_run(resume) if resume is not None else None
         if run_state is not None:
             integration_root, branch = resume.integration_root, run_state.branch
-            # From the checkpoint, never re-derived: the target's HEAD may have
-            # moved since the interrupted run started, and reviewing against a
-            # different base would describe changes this run never made.
-            base_sha = run_state.base_sha
+            # From the checkpoint, never re-derived: the target's HEAD or the
+            # remote may have moved since the interrupted run started.
+            base_snapshot = git_remote.BaseSnapshot(
+                base_ref=run_state.base_ref or run_state.base_sha,
+                base_sha=run_state.base_sha,
+                remote_url=run_state.remote_url,
+                remote_name=run_state.remote_name,
+                remote_ref=run_state.remote_ref,
+                remote_sha=run_state.remote_sha,
+                base_branch=run_state.base_branch,
+                fetch_timestamp=run_state.fetch_timestamp,
+                sync_policy=run_state.sync_policy,
+                sync_status=run_state.sync_status,
+            )
         else:
-            base_sha = git_ops.current_commit(repo)
-            integration_root, branch = git_ops.create_integration_worktree(repo, request)
+            # Fetching updates only remote-tracking refs. It happens before the
+            # integration worktree exists, and the selected SHA is immutable
+            # for the lifetime of this run.
+            base_snapshot = git_remote.synchronize_base(repo, project)
+            integration_root, branch = git_ops.create_integration_worktree(
+                repo, request, base_snapshot.base_ref
+            )
 
-        report_progress(base_ref=git_ops.current_ref(repo), base_sha=base_sha)
+        base_sha = base_snapshot.base_sha
+        report_progress(base_ref=base_snapshot.base_ref, base_sha=base_sha)
+        console.print(
+            f"[bold]Git base:[/bold] {base_snapshot.base_ref} @ {base_sha[:12]} "
+            f"({base_snapshot.sync_status}, checked {base_snapshot.fetch_timestamp})"
+        )
         # The run's policy, frozen. Read from the base commit rather than from
         # any working tree, and never re-read: roles without an artifact
         # contract can write .ai-platform.yml, and re-reading it after they run
@@ -626,6 +647,7 @@ def run(
                 session_id=session_id,
                 engine_commit=git_ops.current_commit(repo),
                 metadata={
+                    **base_snapshot.metadata(),
                     "profile": platform_config.profile,
                     "use_graph": context_manager.config.use_graph,
                     "use_vector_db": context_manager.config.use_vector_db,
@@ -770,6 +792,15 @@ def run(
                 branch=branch,
                 request=request,
                 complexity=complexity,
+                base_ref=base_snapshot.base_ref,
+                remote_url=base_snapshot.remote_url,
+                remote_name=base_snapshot.remote_name,
+                remote_ref=base_snapshot.remote_ref,
+                remote_sha=base_snapshot.remote_sha,
+                base_branch=base_snapshot.base_branch,
+                fetch_timestamp=base_snapshot.fetch_timestamp,
+                sync_policy=base_snapshot.sync_policy,
+                sync_status=base_snapshot.sync_status,
                 task_ids=[t.id for t in workflow.tasks],
             )
             checkpoint.save(integration_root, run_state)

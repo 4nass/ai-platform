@@ -81,6 +81,12 @@ git diff <base>...engine/<slug>
 
 Inspect and test the delivery branch before manually merging or pushing. The platform does neither automatically.
 
+### Git base synchronization and delivery
+
+The project registry's `sync_policy` determines how a run chooses its base. `offline` is the safe local default. `fetch` refreshes only `refs/remotes/<remote>/<base>` and pins that immutable SHA for the integration worktree. `require_up_to_date` fails admission when the local base is behind, ahead, or otherwise diverged. Force-pushed bases, missing branches, and network/credential failures are reported as explicit admission errors; the user's checkout is not changed.
+
+The run records `base_ref`, `base_sha`, `remote_url`, `remote_ref`, `remote_sha`, `fetch_timestamp`, `sync_policy` and `sync_status` in telemetry and its checkpoint. A later delivery must verify that the recorded remote base is still current. Pushing is an approval-only operation and is not invoked by the run until the external-action executor (#46) and PR/API surface (#30/#47) are available.
+
 ## Telemetry, quota and budgets
 
 History is shared at the engine root but normally filtered by target. Requested model and effective model are separate. Use the effective value when the provider reports it, while retaining the requested profile for audit.

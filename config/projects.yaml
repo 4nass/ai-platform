@@ -19,6 +19,7 @@ projects:
     path: ~/workspace/ai-platform
     remote: https://github.com/4nass/ai-platform.git
     base_branch: main
+    sync_policy: offline  # offline | fetch | require_up_to_date
     # inspect = read-only (context, routing, history)
     # modify  = run the DAG: branches, worktrees, agent writes, commits
     # test    = execute the target's own declared test command

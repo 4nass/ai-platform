@@ -69,6 +69,18 @@ class Checkpoint:
     branch: str
     request: str
     complexity: str
+    """The decomposer's classification, kept so a resume does not have to
+    call it again."""
+
+    base_ref: str = ""
+    remote_url: str = ""
+    remote_name: str = ""
+    remote_ref: str = ""
+    remote_sha: str = ""
+    base_branch: str = ""
+    fetch_timestamp: str = ""
+    sync_policy: str = "offline"
+    sync_status: str = "offline"
     """The decomposer's classification, kept so a resume does not have to call
     it again — a provider call whose answer could differ from the one the
     completed stages were actually routed under."""
@@ -121,6 +133,15 @@ def record_stage(
         branch=state.branch,
         request=state.request,
         complexity=state.complexity,
+        base_ref=state.base_ref,
+        remote_url=state.remote_url,
+        remote_name=state.remote_name,
+        remote_ref=state.remote_ref,
+        remote_sha=state.remote_sha,
+        base_branch=state.base_branch,
+        fetch_timestamp=state.fetch_timestamp,
+        sync_policy=state.sync_policy,
+        sync_status=state.sync_status,
         task_ids=state.task_ids,
         stages=[*state.stages, stage],
     )
