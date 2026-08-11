@@ -67,6 +67,18 @@ not a number, so the amounts live with the rest of the budget policy and a
 project only says which class it belongs to."""
 
 
+SYNC_OFFLINE = "offline"
+"""Use the local checkout as-is; no network access is attempted."""
+
+SYNC_FETCH = "fetch"
+"""Fetch the configured base branch and permit a local checkout behind it."""
+
+SYNC_REQUIRE_UP_TO_DATE = "require_up_to_date"
+"""Fetch the configured base branch and reject any local/remote drift."""
+
+SYNC_POLICIES = (SYNC_OFFLINE, SYNC_FETCH, SYNC_REQUIRE_UP_TO_DATE)
+
+
 class RegistryError(ConfigError):
     """An unknown project, a disallowed action, or a target that no longer
     matches what the registry says it is.
@@ -89,6 +101,7 @@ class Project:
 
     remote: str = ""
     base_branch: str = ""
+    sync_policy: str = SYNC_OFFLINE
     allowed_actions: tuple[str, ...] = DEFAULT_ACTIONS
     budget_class: str = DEFAULT_BUDGET_CLASS
     approval_required: tuple[str, ...] = ()
@@ -110,6 +123,7 @@ class Project:
             "project_id": self.id,
             "project_remote": self.remote,
             "project_base_branch": self.base_branch,
+            "project_sync_policy": self.sync_policy,
             "project_allowed_actions": ",".join(self.allowed_actions),
             "project_budget_class": self.budget_class,
             "project_approval_required": ",".join(self.approval_required),
@@ -188,11 +202,29 @@ def _project(project_id: str, raw: dict, roots: tuple[Path, ...]) -> Project:
             "if those differ, a symlink or `..` in the path is the reason."
         )
 
+    remote = str(raw.get("remote") or "")
+    base_branch = str(raw.get("base_branch") or "")
+    sync_policy = str(raw.get("sync_policy") or SYNC_OFFLINE)
+    if sync_policy not in SYNC_POLICIES:
+        raise RegistryError(
+            f"Project {project_id!r}: unknown sync_policy {sync_policy!r}. "
+            f"Valid: {', '.join(SYNC_POLICIES)}"
+        )
+    if sync_policy != SYNC_OFFLINE and not remote:
+        raise RegistryError(
+            f"Project {project_id!r}: sync_policy {sync_policy!r} requires a remote"
+        )
+    if sync_policy != SYNC_OFFLINE and not base_branch:
+        raise RegistryError(
+            f"Project {project_id!r}: sync_policy {sync_policy!r} requires base_branch"
+        )
+
     return Project(
         id=project_id,
         path=path,
-        remote=str(raw.get("remote") or ""),
-        base_branch=str(raw.get("base_branch") or ""),
+        remote=remote,
+        base_branch=base_branch,
+        sync_policy=sync_policy,
         allowed_actions=_as_tuple(
             raw.get("allowed_actions", list(DEFAULT_ACTIONS)),
             field_name="allowed_actions",

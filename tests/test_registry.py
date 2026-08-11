@@ -197,8 +197,35 @@ def _allowlisted(engine: Path, tmp_path: Path, *, actions: str = "[inspect, modi
         lines.append(f"    remote: {extra['remote']}")
     if extra.get("base_branch"):
         lines.append(f"    base_branch: {extra['base_branch']}")
+    if extra.get("sync_policy"):
+        lines.append(f"    sync_policy: {extra['sync_policy']}")
     _write(engine, "\n".join(lines) + "\n")
     return path
+
+
+def test_sync_policy_defaults_to_offline_and_is_snapshotted(engine: Path, tmp_path: Path) -> None:
+    _allowlisted(engine, tmp_path)
+
+    project = registry.resolve(engine, "mine")
+
+    assert project.sync_policy == registry.SYNC_OFFLINE
+    assert project.snapshot()["project_sync_policy"] == registry.SYNC_OFFLINE
+
+
+def test_remote_sync_policy_requires_remote_and_base_branch(engine: Path, tmp_path: Path) -> None:
+    path = tmp_path / "roots" / "mine"
+    _repo(path)
+    _write(engine, f"roots: [{tmp_path / 'roots'}]\nprojects:\n  mine:\n    path: {path}\n    sync_policy: fetch\n")
+
+    with pytest.raises(RegistryError, match="requires a remote"):
+        registry.load(engine)
+
+
+def test_unknown_sync_policy_is_refused(engine: Path, tmp_path: Path) -> None:
+    _allowlisted(engine, tmp_path, sync_policy="never")
+
+    with pytest.raises(RegistryError, match="unknown sync_policy"):
+        registry.load(engine)
 
 
 def test_resolve_returns_an_allowlisted_project(engine: Path, tmp_path: Path) -> None:

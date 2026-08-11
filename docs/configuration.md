@@ -29,6 +29,7 @@ projects:
     path: ~/workspace/ai-platform
     remote: https://github.com/4nass/ai-platform.git   # optional; verified when set
     base_branch: main                                   # optional; verified when set
+    sync_policy: offline                                # offline | fetch | require_up_to_date
     allowed_actions: [inspect, modify, test]
     budget_class: standard
 ```
@@ -47,6 +48,14 @@ uv run ai-platform run "Add a health endpoint" --project ai-platform
 `--project <id>` is the only form anything arriving over a wire may use: the caller names an id and the engine decides what it refers to. `--repo <path>` remains for local interactive use, where the person running the command could already `cd` there. Passing both is refused.
 
 Paths are resolved (symlinks followed, `..` collapsed) and must land under a declared root; a registry with projects but no `roots` is refused outright. The declared remote and base branch are checked against the repository actually on disk, because a path is not an identity. For a queued job the whole check runs **again at claim time**, so withdrawing a project takes effect for work already in the queue.
+
+`sync_policy` controls the Git base admitted for a run:
+
+- `offline` (default) never contacts the network and pins the configured local base branch, or the current `HEAD` when no branch is configured.
+- `fetch` fetches only the configured remote-tracking base ref. The checkout is never reset or switched. A remote-ahead base is accepted and pinned; local/remote divergence is rejected.
+- `require_up_to_date` performs the same fetch but rejects a local checkout that is behind or ahead of the remote, so it is suitable for strict unattended runs.
+
+Every admitted run records the selected ref and SHA, remote identity, fetch timestamp, policy and outcome. Delivery is deliberately separate: the branch push helper re-checks that the recorded remote base has not moved and requires an explicit approval. No run silently pushes or changes the user's checkout.
 
 ## `config/platform.yaml`
 
