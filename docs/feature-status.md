@@ -46,7 +46,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P0 | Safe ephemeral-write policy | [#23](https://github.com/4nass/ai-platform/issues/23) | Delivered; issue closed |
 | P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered; issue closed |
 | P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Engine delivered; issue closed |
-| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine half delivered; transport auth is #44 and API consumption is #30/#47 |
+| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine delivered: signed transport verifier and durable replay ledger in #44; authenticated API consumption remains #30/#47/#49 |
 | P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings are #45 |
 | P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate delivered; audited external actions are #46 |
 | P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned; required by API/OpenClaw |
