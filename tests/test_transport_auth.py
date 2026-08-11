@@ -275,11 +275,11 @@ def test_verified_principal_and_idempotency_are_persisted_on_the_job(tmp_path: P
 
     first = submit_verified(
         tmp_path, project="/allowlisted/ai-platform", project_id="ai-platform",
-        request="run tests", authenticated=authenticated,
+        request="run tests", body=BODY, authenticated=authenticated,
     )
     second = submit_verified(
         tmp_path, project="/allowlisted/ai-platform", project_id="ai-platform",
-        request="run tests", authenticated=authenticated,
+        request="run tests", body=BODY, authenticated=authenticated,
     )
 
     assert first.created is True
@@ -300,5 +300,21 @@ def test_verified_submission_rejects_a_project_id_mismatch(tmp_path: Path) -> No
     with pytest.raises(AuthenticationError, match="project"):
         submit_verified(
             tmp_path, project="/allowlisted/other", project_id="other",
-            request="run tests", authenticated=authenticated,
+            request="run tests", body=BODY, authenticated=authenticated,
+        )
+
+
+
+def test_verified_submission_rejects_text_not_present_in_signed_body(tmp_path: Path) -> None:
+    credential = _credential()
+    auth = _auth(tmp_path, credential)
+    authenticated = auth.verify(
+        method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+        timestamp=NOW, nonce=NONCE, signature=_signature(credential), envelope=_envelope(),
+    )
+
+    with pytest.raises(AuthenticationError, match="text"):
+        submit_verified(
+            tmp_path, project="/allowlisted/ai-platform", project_id="ai-platform",
+            request="different request", body=BODY, authenticated=authenticated,
         )
