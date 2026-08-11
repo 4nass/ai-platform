@@ -14,6 +14,8 @@ claude --version
 
 `doctor` distinguishes `PASS` (valid prerequisite), `WARN` (optional or degraded capability), and `FAIL` (a reliable run is blocked). It exits non-zero if any check is `FAIL`. To include a target repository, pass `--repo <path>` or `--project <id>`; the default target is the current directory.
 
+When `uv` is installed but missing from `PATH`, doctor prints the exact `export PATH=...` command for the current shell and the Bash/WSL commands to persist it in `~/.bashrc`.
+
 Authenticate at least one delivered CLI provider:
 
 ```bash
