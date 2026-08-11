@@ -46,3 +46,5 @@ The current implementation is the local execution half of that loop. The remote 
 ## Documentation contract
 
 When code and documentation disagree, code and tests describe current behavior. Correct the documentation in the same change. A document must not describe a roadmap feature as implemented; use the status labels defined in [Feature status](feature-status.md).
+
+- [Hard budget policy: tokens, time and currency](budget-policy.md)

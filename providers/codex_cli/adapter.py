@@ -189,7 +189,7 @@ def run(task: AgentTask) -> ProviderResult:
                 cwd=task.repo_root,
                 capture_output=True,
                 text=True,
-                timeout=TIMEOUT_SECONDS,
+                timeout=(min(TIMEOUT_SECONDS, task.timeout_seconds) if task.timeout_seconds else TIMEOUT_SECONDS),
                 # Without this codex blocks waiting on stdin ("Reading
                 # additional input from stdin..."), which in a worker thread
                 # is an invisible hang rather than an error.

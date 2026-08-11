@@ -40,6 +40,7 @@ class AgentTask:
     model: str | None = None
     reasoning_effort: str | None = None
     complexity: str = "complex"
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.engine_root is None:

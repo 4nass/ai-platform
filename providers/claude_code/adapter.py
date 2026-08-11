@@ -157,7 +157,7 @@ def run(task: AgentTask) -> ProviderResult:
             cwd=task.repo_root,
             capture_output=True,
             text=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=(min(TIMEOUT_SECONDS, task.timeout_seconds) if task.timeout_seconds else TIMEOUT_SECONDS),
         )
     except FileNotFoundError:
         return ProviderResult(

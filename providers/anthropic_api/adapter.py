@@ -124,7 +124,7 @@ def run(task: AgentTask) -> ProviderResult:
     context_note = f"\n\nContext:\n{task.context_render}" if task.context_render else ""
     user_prompt = f"Request:\n{task.description}{context_note}"
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=task.timeout_seconds) if task.timeout_seconds else anthropic.Anthropic()
     response = client.messages.parse(
         model=model_id,
         max_tokens=max_tokens,
