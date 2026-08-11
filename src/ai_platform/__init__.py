@@ -87,6 +87,41 @@ def callback() -> None:
 
 
 @app.command()
+def doctor(
+    repo: Path = REPO_OPTION,
+    project: str = PROJECT_OPTION,
+) -> None:
+    """Checks whether the engine and target can execute a reliable run.
+
+    ``PASS`` is a usable prerequisite, ``WARN`` is an optional or degraded
+    capability, and ``FAIL`` blocks a reliable run. The command is read-only
+    and exits non-zero when any check is ``FAIL``.
+    """
+    from rich.table import Table
+
+    from core import doctor as diagnostics
+    from core.orchestrator import registry
+
+    target, _ = _admit(repo, project, action=registry.INSPECT)
+    report = diagnostics.run(ENGINE_ROOT, target)
+
+    table = Table(title="ai-platform doctor")
+    table.add_column("status", style="bold")
+    table.add_column("check")
+    table.add_column("detail")
+    for check in report.checks:
+        style = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}[check.status]
+        detail = check.detail
+        if check.remediation:
+            detail = f"{detail} ({check.remediation})"
+        table.add_row(f"[{style}]{check.status}[/{style}]", check.name, detail)
+    console.print(table)
+
+    if report.failed:
+        raise typer.Exit(1)
+
+
+@app.command()
 def run(
     request: str = typer.Argument(..., help="Natural-language request to carry out on the repo."),
     repo: Path = REPO_OPTION,

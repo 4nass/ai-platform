@@ -44,6 +44,8 @@ Requirements: Python 3.11+, `uv`, Git, and at least one authenticated provider C
 
 ```bash
 uv sync --frozen
+uv run ai-platform doctor
+
 codex login
 claude auth login
 
@@ -75,6 +77,14 @@ uv run ai-platform route architect --complexity critical
 uv run ai-platform quota
 uv run ai-platform history --repo /path/to/project
 ```
+
+Before the first run, use `ai-platform doctor` to check the local prerequisites. It prints one row per check:
+
+- `PASS`: the prerequisite is valid;
+- `WARN`: an optional capability is missing or degraded;
+- `FAIL`: a reliable run is blocked, and the command exits with status 1.
+
+Use `--repo /path/to/project` (or `--project <id>`) to include a target repository in the preflight.
 
 A target repository declares its validation policy in `.ai-platform.yml`:
 
