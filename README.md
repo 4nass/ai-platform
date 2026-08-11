@@ -104,6 +104,7 @@ Start with the [technical documentation index](docs/README.md).
 - [Product scope and terminology](docs/product-scope.md)
 - [MVP objectives and trajectory](docs/mvp-trajectory.md)
 - [Architecture](docs/architecture.md)
+- [REST/SSE API contract](docs/api-contract.md)
 - [Technology stack](docs/technology-stack.md)
 - [Feature status and roadmap](docs/feature-status.md)
 - [Configuration reference](docs/configuration.md)
