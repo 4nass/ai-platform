@@ -6,11 +6,13 @@ Run from the engine root:
 
 ```bash
 uv sync --frozen
-uv run ai-platform --help
+uv run ai-platform doctor
 git --version
 codex --version
 claude --version
 ```
+
+`doctor` distinguishes `PASS` (valid prerequisite), `WARN` (optional or degraded capability), and `FAIL` (a reliable run is blocked). It exits non-zero if any check is `FAIL`. To include a target repository, pass `--repo <path>` or `--project <id>`; the default target is the current directory.
 
 Authenticate at least one delivered CLI provider:
 

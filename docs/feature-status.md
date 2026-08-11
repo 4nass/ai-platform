@@ -14,6 +14,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | Capability | Status | Notes |
 |---|---|---|
 | CLI run, context, route, quota and history commands | Delivered | Synchronous local interface |
+| `ai-platform doctor` preflight diagnostics | Delivered | PASS/WARN/FAIL checks for engine, providers and target validation |
 | Semantic, graph, Git-diff and memory context | Delivered | Target-local index and graph |
 | Fixed prunable workflow DAG | Delivered | Decomposer selects a bounded subset and complexity |
 | Claude Code and Codex CLI execution | Delivered | Subscription-backed local sessions |
