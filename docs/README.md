@@ -14,8 +14,9 @@ The current implementation is the local execution half of that loop. The remote 
 2. [Feature status](feature-status.md) - implemented, in progress, and planned capabilities.
 3. [MVP objectives and trajectory](mvp-trajectory.md) - exit criteria and ordered next features.
 4. [Architecture](architecture.md) - component boundaries and end-to-end flows.
-5. [Security model](security.md) - trust boundaries and enforcement layers.
-6. [Operations](operations.md) - how to run and troubleshoot it.
+5. [REST/SSE API contract](api-contract.md) - stable interface for OpenClaw, browser and CLI adapters.
+6. [Security model](security.md) - trust boundaries and enforcement layers.
+7. [Operations](operations.md) - how to run and troubleshoot it.
 
 ## Component documentation
 
@@ -30,6 +31,7 @@ The current implementation is the local execution half of that loop. The remote 
 | Tests and target policy | [Validation and sandboxing](validation.md) | `.ai-platform.yml`, `target_config.py`, `test_runner.py` |
 | Telemetry, jobs, tokens, quotas | [Data, telemetry, and budgets](data-and-observability.md) | `core/telemetry/`, `core/jobs/`, SQLite files |
 | Configuration | [Configuration reference](configuration.md) | `config/*.yaml`, `.ai-platform.yml` |
+| Remote interface | [REST/SSE API contract](api-contract.md) | Planned API surface for #47/#30 |
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
 
 ## Governance and history
