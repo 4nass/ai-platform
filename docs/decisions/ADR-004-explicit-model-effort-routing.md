@@ -17,7 +17,7 @@ If every candidate is gated, the first declared profile runs and the reason is r
 
 Architecture, security, review, and critical correction can receive stronger reasoning while routine tests and documentation use economical profiles. Both Claude and Codex paths remain explicit and testable. Model identifiers and CLI effort support must be maintained over time.
 
-Quota pressure remains advisory until hard budgets exist.
+Quota pressure remains advisory for routing; hard token/call admission budgets are now a separate delivered engine gate, while time/currency ceilings remain planned.
 
 ## Alternatives
 

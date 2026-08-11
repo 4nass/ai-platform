@@ -1,12 +1,20 @@
 # AI Software Engineering Platform
 
-Local, single-user engineering orchestration for running a specialized AI team on real Git repositories.
+AI Platform is a personal engineering backend: it turns a request into a bounded, evidence-driven change on a real Git repository. It is local-first and single-user today, and is designed to become the execution plane behind a phone-accessible OpenClaw gateway.
 
-The platform selects relevant project context, plans a bounded workflow, routes each role to a Claude or Codex execution profile, isolates changes in Git worktrees, runs project tests, reviews the result, and records token usage and outcomes. It is designed as the engineering backend behind a future personal mobile gateway, not as a multi-tenant SaaS.
+The platform selects relevant project context, plans a bounded workflow, routes each role to a Claude or Codex execution profile, isolates changes in Git worktrees, runs project tests, reviews the result, and records token usage and outcomes.
+
+The product differentiates itself in five ways:
+
+- **Context with provenance:** semantic, graph, Git-diff and memory evidence is selected with relevance gates, rendered for the provider, and taken from the same revision the agents modify.
+- **Explicit model governance:** every role receives a provider, model and effort profile. Quota pressure and recent outcomes influence failover without letting an agent silently choose an ungoverned model.
+- **Git-native isolation:** each run has an integration worktree and each writable stage has its own worktree. The user's checkout is not moved, and the delivery branch is the review boundary.
+- **Durability with bounded spend:** asynchronous jobs survive terminal/WSL restarts, reconcile crashes, resume from merged-stage checkpoints, and reserve token/call budgets before dispatch.
+- **Human-controlled delivery:** tests, review, approvals, previews and eventual Git delivery are explicit stages; prompts are never treated as a security boundary.
 
 ## Current status
 
-The synchronous engineering engine is operational:
+The local engineering engine is operational and tested. The delivered surface includes:
 
 - semantic and graph-assisted context selection;
 - fixed, prunable workflow DAG with specialized roles;
@@ -17,9 +25,18 @@ The synchronous engineering engine is operational:
 - bounded test/review correction loop;
 - SQLite telemetry, token accounting, and quota pressure;
 - dirty-working-tree policies with context built from the run snapshot;
-- durable asynchronous jobs, detached worker, heartbeat, and crash reconciliation.
+- durable asynchronous jobs, detached worker, heartbeat, crash reconciliation and resume;
+- project registry/action allowlist, idempotent replay-safe envelopes, hard token/call admission budgets and scoped approvals for the local job path.
 
-OpenClaw, project registry, authentication, approvals, hard admission budgets, preview deployments, and local-model execution remain roadmap items — the job queue above has no authentication, allowlist, or budget in front of it yet, so it is not a safe surface for an untrusted remote caller. The exact status is maintained in [Feature status](docs/feature-status.md).
+
+The remote product is not delivered yet. There is no authenticated transport/API for OpenClaw, structured event stream, remote Git synchronization, preview deployment, or secrets-retention contract. Therefore the queue is safe for the documented local-owner boundary, not for an untrusted network caller. The exact split between engine-delivered capabilities and the remote roadmap is maintained in [Feature status](docs/feature-status.md).
+
+## MVP target
+The MVP is not a general-purpose SaaS or autonomous deployment system. It is a personal loop that can be used from a phone:
+
+message -> authenticated OpenClaw tool -> durable job -> progress/approval -> tested delivery branch -> ephemeral preview URL -> human validation
+
+The exit criteria and issue mapping are in [MVP trajectory](docs/mvp-trajectory.md). Until the MVP gates are complete, use the CLI locally and do not expose the worker to the Internet.
 
 ## Quick start
 
@@ -75,6 +92,7 @@ allowed_ephemeral_writes:
 Start with the [technical documentation index](docs/README.md).
 
 - [Product scope and terminology](docs/product-scope.md)
+- [MVP objectives and trajectory](docs/mvp-trajectory.md)
 - [Architecture](docs/architecture.md)
 - [Technology stack](docs/technology-stack.md)
 - [Feature status and roadmap](docs/feature-status.md)

@@ -17,6 +17,7 @@ ADRs preserve durable technical decisions, their context, and trade-offs. Compon
 | [ADR-009](ADR-009-resumable-runs-and-git-owned-checkpoints.md) | Resumable runs, checkpointed in git rather than in the queue | Accepted |
 | [ADR-010](ADR-010-project-registry-as-the-admission-boundary.md) | A project registry, not a path, is the admission boundary | Accepted |
 | [ADR-011](ADR-011-admission-authorization-and-approval.md) | Admission, authorization and approval as one layered boundary | Accepted |
+| [ADR-012](ADR-012-mvp-remote-control-loop.md) | Remote control loop as the MVP boundary | Proposed |
 
 The older CLI dry-run decision remains in [memory/adr/ADR-001](../../memory/adr/ADR-001-cli-dry-run-flag.md). It predates this documentation structure and is retained for history.
 

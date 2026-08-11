@@ -2,55 +2,62 @@
 
 ## Purpose
 
-AI Platform is a local, single-user engineering backend. It receives a software change request, selects relevant repository context, chooses a bounded agent workflow, routes each role to an available model profile, isolates modifications, validates the result, and leaves a delivery branch for human approval.
+AI Platform is a local-first, single-user engineering backend. It receives a software change request, selects relevant repository context, chooses a bounded agent workflow, routes each role to an available provider/model/effort profile, isolates modifications, validates the result, and leaves a delivery branch for human approval.
 
-Its long-term role is the engineering platform behind a personal gateway reachable from a phone. The gateway handles messaging, identity, interaction, and notifications; this repository remains responsible for engineering execution.
+Its long-term role is the engineering platform behind a personal gateway reachable from a phone. The gateway handles messaging, identity, interaction, and notifications; this repository remains responsible for engineering execution, policy, artifacts and audit.
+
+## Why this product exists
+
+The differentiator is control over the engineering loop, not another chat interface: context is evidence-ranked and snapshot-consistent; model choice is explicit and quota-aware; every mutation is Git-isolated; budgets and approvals are deterministic; and delivery is reproducible from a committed revision. The result is a personal control plane that can be inspected and stopped, rather than an agent process that happens to edit a checkout.
 
 ## Product boundaries
 
 ### Current product
 
-The current product is a command-line engine that runs against a local Git repository. It supports synchronous *and* durable asynchronous execution (`run` vs. `submit`/`status`/`jobs`/`cancel`/`work`, `core/jobs/`), Claude Code and Codex CLI providers, context retrieval, worktree isolation, target tests, review/correction, and telemetry. The job queue survives a disconnect or restart, reconciles an abandoned run to `interrupted`, and can resume one onto its own branch without re-running what it already merged; it has no authentication, project allowlist, or hard budget in front of it yet, so it is not a safe surface for an untrusted remote caller.
+The current product is a command-line engine that runs against a local Git repository. It supports synchronous and durable asynchronous execution (`run` versus `submit`/`status`/`jobs`/`cancel`/`work`/`resume`), Claude Code and Codex CLI providers, context retrieval, worktree isolation, target tests, review/correction, telemetry, project admission, idempotent envelopes, token/call budgets and scoped approvals. The job queue is durable and restart-aware, but it has no authenticated network transport; it is not a safe surface for an untrusted remote caller.
 
-### Target product
+### MVP target
 
-The target architecture adds an authenticated, idempotent gateway API in front of the existing job queue, a project registry, approvals, hard budgets, preview environments, notifications, and an OpenClaw integration. Those capabilities are not considered delivered until their issue is closed and their status changes in [Feature status](feature-status.md).
+The target product adds a narrow authenticated OpenClaw tool/API in front of the existing queue, structured progress events and cooperative cancellation, synchronized Git delivery, authenticated per-run previews, secrets/retention controls, managed service health, and compact notifications. The target sequence and exit criteria are maintained in [MVP trajectory](mvp-trajectory.md).
 
-### Explicit non-goals today
+### Explicit non-goals
 
 - multi-tenant SaaS operation;
-- direct public exposure of the CLI;
+- direct public exposure of the CLI or worker;
+- unrestricted shell access from OpenClaw;
 - autonomous merge or push to a protected branch;
 - treating prompt instructions as a security boundary;
 - guaranteeing provider subscription quota from local estimates;
-- executing arbitrary repositories remotely without an admission and secrets policy.
+- executing arbitrary repositories remotely without admission and secrets policy;
+- local models, rich attachments and dynamic workflow composition as MVP prerequisites.
 
 ## Users and interfaces
 
-| Actor | Current interface | Target interface |
+| Actor | Current interface | MVP/target interface |
 |---|---|---|
-| Owner/developer | `ai-platform` CLI | phone, browser, and CLI |
+| Owner/developer | `ai-platform` CLI | phone, browser, messenger and CLI |
 | Personal gateway | none | authenticated OpenClaw tools/API |
-| Provider | Claude Code or Codex CLI | CLI, API, and local adapters |
-| Target project | local Git checkout | registered repository plus execution policy |
-| Reviewer | terminal report and delivery branch | approval UI, preview URL, and notifications |
+| Provider | Claude Code or Codex CLI | CLI, API and local adapters |
+| Target project | local Git checkout or allowlisted project id | registered repository plus execution policy |
+| Reviewer | terminal report and delivery branch | approval action, preview URL and notification |
 
 ## Core terminology
 
-- **Engine root**: this repository. It contains shared prompts, routing policy, and cross-project telemetry.
-- **Target root**: the repository supplied with `--repo`. It owns code, target policy, local context index, and generated worktrees.
-- **Base revision**: the commit captured as the intended starting point of a run.
-- **Integration worktree**: the run-level checkout where successful stage branches are merged.
-- **Stage worktree**: a temporary checkout dedicated to one writable DAG stage.
-- **Validation worktree**: a disposable checkout used to run target tests without polluting the delivery tree.
-- **Delivery branch**: the retained `engine/<slug>` branch containing the run result. It is never pushed or merged automatically.
-- **Role**: a specialized responsibility such as architect, backend, tests, or security.
-- **Profile**: an ordered `provider + model + effort` routing candidate.
-- **Run**: one orchestration attempt and its stage results.
-- **Job**: the durable asynchronous lifecycle around a run — `queued`/`running`/`waiting_approval`/`succeeded`/`failed`/`cancelled`/`interrupted` (`core/jobs/`, delivered). Distinct from a `Run`: a queued or cancelled job never became one.
-- **Target policy**: the base-revision `.ai-platform.yml` used for validation and ephemeral-write rules.
-- **Context snapshot**: information selected from the same checkout the agents can modify.
+- **Engine root:** this repository. It contains shared prompts, routing policy, presets and cross-project telemetry.
+- **Target root:** the repository supplied with `--repo` or resolved by `--project`. It owns code, target policy, local context index and generated worktrees.
+- **Base revision:** the commit captured as the intended starting point of a run.
+- **Integration worktree:** the run-level checkout where successful stage branches are merged.
+- **Stage worktree:** a temporary checkout dedicated to one writable DAG stage.
+- **Validation worktree:** a disposable checkout used to run target tests without polluting the delivery tree.
+- **Delivery branch:** the retained `engine/<slug>` branch containing the run result. It is never pushed or merged automatically.
+- **Role:** a specialized responsibility such as architect, backend, tests or security.
+- **Profile:** an ordered `provider + model + effort` routing candidate.
+- **Run:** one orchestration attempt and its stage results.
+- **Job:** the durable asynchronous lifecycle around a run - `queued`/`running`/`waiting_approval`/`succeeded`/`failed`/`cancelled`/`interrupted`. A queued or cancelled job never became a run.
+- **Principal:** the identity established by an authenticated transport. Today the local CLI uses the local owner boundary; the remote principal is not implemented yet.
+- **Target policy:** the base-revision `.ai-platform.yml` used for validation and ephemeral-write rules.
+- **Context snapshot:** information selected from the same checkout the agents can modify.
 
 ## Success criteria
 
-A successful run must be reproducible from an identified base revision, keep the user's checkout untouched, contain only authorized changes, pass configured validation when one exists, complete review, record resource usage, and produce a branch a human can inspect. Remote operation adds durable state, authentication, idempotency, hard budgets, cancellation, approval gates, and auditable artifact delivery.
+A successful local run must be reproducible from an identified base revision, keep the user's checkout untouched, contain only authorized changes, pass configured validation when one exists, complete review, record resource usage, and produce a branch a human can inspect. The remote MVP adds authenticated durable state, idempotency, hard budgets, cancellation, approval policy, synchronized delivery, immutable artifacts and a preview URL.
