@@ -50,11 +50,15 @@ TEST = "test"
 """Execute the target's own declared test command (see target_config)."""
 
 OPEN_PR = "open_pr"
-"""Publish: push a branch and open a pull request. Not implemented yet — it is
-declarable so a project can withhold it before the capability exists, rather
-than being granted it retroactively the day it ships."""
+"""Publish: push a branch and open a pull request. It is explicitly allowlisted."""
 
-ACTIONS = (INSPECT, MODIFY, TEST, OPEN_PR)
+GIT_PUSH = "git_push"
+"""Push a delivery branch without force; guarded by base revalidation."""
+
+PREVIEW_DEPLOY = "preview_deploy"
+"""Deploy an immutable delivery commit to an isolated preview."""
+
+ACTIONS = (INSPECT, MODIFY, TEST, OPEN_PR, GIT_PUSH, PREVIEW_DEPLOY)
 
 DEFAULT_ACTIONS = (INSPECT,)
 """What a project gets by declaring nothing. Read-only on purpose: an entry
