@@ -55,7 +55,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P1 | Quality-aware routing | [#32](https://github.com/4nass/ai-platform/issues/32) | Planned |
 | P1 | Base synchronization and remote delivery | [#33](https://github.com/4nass/ai-platform/issues/33) | Engine delivered: pinned base, fetch/divergence policy and approval-only push guard; end-to-end PR delivery remains #30/#46/#47 |
 | P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Planned; uses #46 for deployment approval |
-| P1 | Secrets isolation and retention | [#35](https://github.com/4nass/ai-platform/issues/35) | Planned; required by #49 |
+| P1 | Secrets isolation and retention | [#35](https://github.com/4nass/ai-platform/issues/35) | Engine redaction, SQLite retention and tombstone deletion delivered; artifact stores remain #38 and readiness review #49 |
 | P1 | Multi-turn run references | [#36](https://github.com/4nass/ai-platform/issues/36) | Planned |
 | P1 | Local-model provider | [#37](https://github.com/4nass/ai-platform/issues/37) | Planned; MVP policy/evaluation is #48 |
 | P2 | Attachments and rich artifacts | [#38](https://github.com/4nass/ai-platform/issues/38) | Planned |

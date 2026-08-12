@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from core.jobs.store import connect
+from core import security
 
 PENDING = "pending"
 APPROVED = "approved"
@@ -211,7 +212,10 @@ def request(
     unapproved action and a performed one.
     """
     now = datetime.now(timezone.utc)
-    detail = detail or {}
+    redactor = security.redactor(engine_root)
+    target = redactor.text(target)
+    requested_by = redactor.text(requested_by)
+    detail = redactor.value(detail or {})
     with connect(engine_root) as con:
         _ensure(con)
         cursor = con.execute(

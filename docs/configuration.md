@@ -165,6 +165,12 @@ allowed_ephemeral_writes:
 
 Use a command array. Keep allowed patterns narrow and repository-relative. Commit this file so the effective policy can be read from the run's base revision. If absent, target validation is explicitly skipped.
 
+## Redaction and retention
+
+The optional `security` block in `config/platform.yaml` defines deterministic secret redaction and retention: `redaction_patterns` adds project-independent regular expressions, while `retention` accepts `runs_days`, `calls_days`, `events_days`, `diffs_days` and `attachments_days`. A target may add `redaction_patterns` in `.ai-platform.yml`. Built-in token, bearer, JWT, private-key and credential-assignment formats are always covered. Values are replaced before SQLite persistence, diagnostics, console summaries and future mobile payloads.
+
+`telemetry.purge_expired()` applies the configured retention to stores that exist today. `delete_run`, `delete_session` and `delete_project` remove telemetry rows and leave non-sensitive tombstones for audit. Diff/attachment counts remain zero until those artifact stores are introduced. SQLite files are created with owner-only permissions; backups must preserve those permissions and be encrypted when leaving the workstation.
+
 ## Authentication and sensitive values
 
 Subscription adapters rely on `codex login` and `claude auth login`. API adapters use provider environment credentials and separate billing. Never store secrets in YAML policy or prompts.

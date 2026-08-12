@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from core import untrusted
+from core import untrusted, security
 from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
 from core.jobs import budget
@@ -170,8 +170,10 @@ def run_task(
 
     started_at = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()
+    redactor = security.redactor(engine_root, repo_root)
     try:
         result = provider.run(agent_task)
+        result = redactor.result(result)
     except BaseException:
         # Nothing was spent that anyone can attribute, so the capacity goes
         # back. Settling this at the estimate would charge the budget for a

@@ -85,6 +85,6 @@ Verifying this against a real SIGKILL'd worker surfaced a genuine defect, since 
 
 ## Retention and privacy
 
-There is no complete retention policy today. Before remote use, define per-store retention, deletion, backup, encryption, and redaction. Requests, context metadata, provider output, repository-derived embeddings, and error logs can all reveal confidential source information.
+Telemetry/jobs now apply deterministic redaction before persistence and expose configurable SQLite retention plus tombstone deletion by run, session and project. Diff and attachment stores do not exist yet; their retention remains part of #38. Backups must preserve owner-only SQLite permissions and be encrypted before leaving the workstation. Requests, context metadata, provider output, repository-derived embeddings, and error logs can all reveal confidential source information.
 
 Schema changes should use explicit migrations before the databases become a supervised long-running service.
