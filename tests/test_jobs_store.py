@@ -289,17 +289,14 @@ def test_cancel_stops_a_queued_job(engine: Path) -> None:
     assert store.get(engine, job_id).state == store.CANCELLED
 
 
-def test_cancel_refuses_a_running_job_rather_than_pretending(engine: Path) -> None:
-    """Nothing can stop a run mid-DAG yet (issue #29). Marking the row
-    `cancelled` while provider calls kept spending quota would be a lie the
-    queue tells about itself."""
+def test_cancel_running_job_is_idempotent_and_durable(engine: Path) -> None:
     job_id = _submit(engine)
     store.claim(engine, job_id, worker_pid=1)
-
-    with pytest.raises(store.JobError, match="cannot be stopped mid-run"):
-        store.cancel(engine, job_id)
-
-    assert store.get(engine, job_id).state == store.RUNNING
+    assert store.cancel(engine, job_id) is True
+    assert store.cancel(engine, job_id) is False
+    assert store.get(engine, job_id).state == store.CANCELLED
+    events = store.events_page(engine, job_id)["events"]
+    assert events[-1]["event_type"] == "run.cancelled"
 
 
 def test_cancel_reports_nothing_to_do_for_a_finished_job(engine: Path) -> None:
@@ -589,3 +586,16 @@ def test_a_pre_existing_database_gains_the_new_columns(engine: Path) -> None:
     # delivery identity nothing ever established
     assert old.idempotency_key == ""
     assert _deliver(engine).created is True
+
+def test_events_resume_from_cursor_without_duplicates(engine: Path) -> None:
+    job_id = _submit(engine)
+    first = store.events_page(engine, job_id, limit=1)
+    cursor = first["next_cursor"]
+    store.emit_event(engine, job_id, "stage.started", stage_id="backend", attempt=1,
+                     payload={"agent": "backend"})
+    page = store.events_page(engine, job_id, after=cursor, limit=10)
+    assert len(page["events"]) == 1
+    assert page["events"][0]["event_type"] == "stage.started"
+    assert page["events"][0]["stage_id"] == "backend"
+    assert page["events"][0]["payload"] == {"agent": "backend"}
+    assert store.events_page(engine, job_id, after=page["next_cursor"])["events"] == []

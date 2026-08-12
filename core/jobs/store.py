@@ -144,7 +144,13 @@ CREATE TABLE IF NOT EXISTS job_events (
   from_state TEXT,
   to_state   TEXT NOT NULL,
   at         TEXT NOT NULL,
-  note       TEXT NOT NULL DEFAULT ''
+  note       TEXT NOT NULL DEFAULT '',
+  version    INTEGER NOT NULL DEFAULT 1,
+  event_type TEXT NOT NULL DEFAULT 'job.state_changed',
+  run_id     INTEGER,
+  stage_id   TEXT NOT NULL DEFAULT '',
+  attempt    INTEGER NOT NULL DEFAULT 0,
+  payload    TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state    ON jobs(state);
@@ -170,6 +176,10 @@ IDEMPOTENCY_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
   ON jobs(idempotency_key) WHERE idempotency_key <> '';
 """
+
+
+class CancellationRequested(RuntimeError):
+    """A run was cancelled cooperatively; late provider output is discarded."""
 
 
 class JobError(Exception):
@@ -275,6 +285,17 @@ def _migrate(con: sqlite3.Connection) -> None:
 
     # Only now can this be created — see IDEMPOTENCY_INDEX.
     con.executescript(IDEMPOTENCY_INDEX)
+    event_columns = {row["name"] for row in con.execute("PRAGMA table_info(job_events)")}
+    for column, definition in (
+        ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("event_type", "TEXT NOT NULL DEFAULT 'job.state_changed'"),
+        ("run_id", "INTEGER"),
+        ("stage_id", "TEXT NOT NULL DEFAULT ''"),
+        ("attempt", "INTEGER NOT NULL DEFAULT 0"),
+        ("payload", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        if column not in event_columns:
+            con.execute(f"ALTER TABLE job_events ADD COLUMN {column} {definition}")
 
 
 @contextmanager
@@ -361,8 +382,10 @@ def submit(
 
         job_id = cursor.lastrowid
         con.execute(
-            "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
-            (job_id, None, QUEUED, _now(), f"submitted via {channel} by {principal or 'unknown'}"),
+            "INSERT INTO job_events(job_id, from_state, to_state, at, note, event_type, payload)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (job_id, None, QUEUED, _now(), f"submitted via {channel} by {principal or 'unknown'}",
+             "run.queued", json.dumps({"channel": channel}, sort_keys=True)),
         )
         return Submission(id=job_id, created=True)
 
@@ -459,8 +482,71 @@ def events(engine_root: Path, job_id: int) -> list[dict]:
         ]
 
 
+def events_page(engine_root: Path, job_id: int, *, after: int = 0, limit: int = 100) -> dict:
+    """Read a resumable page using the immutable event id as cursor."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    with connect(engine_root) as con:
+        rows = [
+            dict(row)
+            for row in con.execute(
+                "SELECT id, version, event_type, job_id, run_id, stage_id, attempt,"
+                " at, payload, note FROM job_events"
+                " WHERE job_id = ? AND id > ? ORDER BY id LIMIT ?",
+                (job_id, after, limit + 1),
+            )
+        ]
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    for row in rows:
+        try:
+            row["payload"] = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            row["payload"] = {}
+    return {
+        "events": rows,
+        "next_cursor": rows[-1]["id"] if rows else after,
+        "has_more": has_more,
+    }
+
+
+def events_since(engine_root: Path, job_id: int, cursor: int = 0, *, limit: int = 100) -> dict:
+    return events_page(engine_root, job_id, after=cursor, limit=limit)
+
+
+def emit_event(
+    engine_root: Path,
+    job_id: int,
+    event_type: str,
+    *,
+    payload: dict | None = None,
+    run_id: int | None = None,
+    stage_id: str = "",
+    attempt: int = 0,
+    note: str = "",
+    version: int = 1,
+) -> int:
+    """Append one versioned event and return its stable cursor id."""
+    with connect(engine_root) as con:
+        row = con.execute("SELECT run_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise JobError(f"No job {job_id}")
+        cursor = con.execute(
+            "INSERT INTO job_events(job_id, from_state, to_state, at, note, version,"
+            " event_type, run_id, stage_id, attempt, payload)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, None, event_type, _now(), note, version, event_type,
+             run_id if run_id is not None else row["run_id"], stage_id, attempt,
+             json.dumps(payload or {}, sort_keys=True)),
+        )
+        return int(cursor.lastrowid)
+
+
 def transition(
-    engine_root: Path, job_id: int, to_state: str, *, note: str = "", **fields
+    engine_root: Path, job_id: int, to_state: str, *, note: str = "",
+    event_type: str = "job.state_changed", payload: dict | None = None,
+    run_id: int | None = None, stage_id: str = "", attempt: int = 0,
+    version: int = 1, **fields
 ) -> bool:
     """Moves a job to `to_state`, or confirms it is already there.
 
@@ -477,10 +563,16 @@ def transition(
         raise JobError(f"Unknown job state {to_state!r}")
 
     with connect(engine_root) as con:
-        row = con.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        row = con.execute("SELECT state, run_id, attempt FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             raise JobError(f"No job {job_id}")
         current = row["state"]
+        if run_id is None:
+            run_id = row["run_id"]
+        if attempt == 0:
+            attempt = row["attempt"] or 0
+        if event_type == "job.state_changed":
+            event_type = {CANCELLED: "run.cancelled", SUCCEEDED: "run.completed", FAILED: "run.failed", WAITING_APPROVAL: "approval.required"}.get(to_state, event_type)
         if current == to_state:
             return False
         if to_state not in TRANSITIONS[current]:
@@ -491,6 +583,9 @@ def transition(
 
         now = _now()
         assignments, params = ["state = ?"], [to_state]
+        if run_id is not None:
+            assignments += ["run_id = ?"]
+            params.append(run_id)
         if to_state == RUNNING:
             # Re-set on every entry to `running`, not only the first: a requeued
             # job that starts again is a new attempt at execution, and a
@@ -513,8 +608,11 @@ def transition(
         params.append(job_id)
         con.execute(f"UPDATE jobs SET {', '.join(assignments)} WHERE id = ?", params)
         con.execute(
-            "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
-            (job_id, current, to_state, now, note),
+            "INSERT INTO job_events(job_id, from_state, to_state, at, note, version,"
+            " event_type, run_id, stage_id, attempt, payload)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, current, to_state, now, note, version, event_type,
+             run_id, stage_id, attempt, json.dumps(payload or {}, sort_keys=True)),
         )
     return True
 
@@ -544,8 +642,10 @@ def claim(engine_root: Path, job_id: int, *, worker_pid: int) -> Job | None:
         if cursor.rowcount != 1:
             return None
         con.execute(
-            "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
-            (job_id, QUEUED, RUNNING, now, f"claimed by pid {worker_pid}"),
+            "INSERT INTO job_events(job_id, from_state, to_state, at, note, event_type, payload)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (job_id, QUEUED, RUNNING, now, f"claimed by pid {worker_pid}",
+             "run.started", json.dumps({"worker_pid": worker_pid}, sort_keys=True)),
         )
         return _job(con.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
 
@@ -654,24 +754,18 @@ def resume(engine_root: Path, job_id: int) -> bool:
     )
 
 
-def cancel(engine_root: Path, job_id: int) -> bool:
-    """Cancels a job that hasn't started executing.
+def is_cancelled(engine_root: Path, job_id: int) -> bool:
+    with connect(engine_root) as con:
+        row = con.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return bool(row and row["state"] == CANCELLED)
 
-    Deliberately refuses a `running` job rather than pretending: nothing can
-    currently interrupt a run mid-DAG, and marking the row `cancelled` while
-    provider calls kept spending quota would be a lie the queue tells about
-    itself. Cooperative cancellation of an in-flight run is issue #29.
-    """
+
+def cancel(engine_root: Path, job_id: int) -> bool:
+    """Idempotently requests cancellation for queued or running work."""
     job = get(engine_root, job_id)
-    if job.is_terminal:
+    if job.is_terminal or job.state == CANCELLED:
         return False
-    if job.state == RUNNING:
-        raise JobError(
-            f"Job {job_id} is already running and cannot be stopped mid-run yet "
-            "(cooperative cancellation is issue #29). Let it finish, or kill its worker "
-            f"(pid {job.worker_pid}) and let reconciliation mark it interrupted."
-        )
-    return transition(engine_root, job_id, CANCELLED, note="cancelled before execution")
+    return transition(engine_root, job_id, CANCELLED, note="cancellation requested", event_type="run.cancelled", payload={"requested": True})
 
 
 def purge_older_than(engine_root: Path, *, days: float) -> int:

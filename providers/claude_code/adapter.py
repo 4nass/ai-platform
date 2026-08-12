@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt
+from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt, run_managed, ProviderCancelled
 
 TIMEOUT_SECONDS = 900
 READS_FILES = True  # the CLI opens files itself via its Read/Grep/Glob tools
@@ -152,12 +152,14 @@ def run(task: AgentTask) -> ProviderResult:
         cmd += ["--append-system-prompt", system_prompt]
 
     try:
-        proc = subprocess.run(
+        runner = run_managed if task.cancel_event is not None else subprocess.run
+        proc = runner(
             cmd,
             cwd=task.repo_root,
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
+            **({"cancel_event": task.cancel_event} if task.cancel_event is not None else {}),
         )
     except FileNotFoundError:
         return ProviderResult(

@@ -34,6 +34,26 @@ loaded machine — never crosses the staleness line; the gap between them is
 the tolerance, not the detection latency."""
 
 
+class _CancellationWatcher:
+    def __init__(self, engine_root: Path, job_id: int, event: threading.Event, interval: float = 0.2):
+        self.engine_root, self.job_id, self.event, self.interval = engine_root, job_id, event, interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._watch, daemon=True, name=f"cancel-{job_id}")
+    def _watch(self):
+        while not self._stop.wait(self.interval):
+            try:
+                if store.is_cancelled(self.engine_root, self.job_id):
+                    self.event.set()
+                    return
+            except Exception:
+                pass
+    def __enter__(self):
+        self._thread.start()
+        return self
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=self.interval * 2)
+
 class _Heartbeat:
     """Keeps a job's `heartbeat_at` fresh for as long as the run lasts.
 
@@ -108,9 +128,16 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
     def progress(**fields) -> None:
         store.record_progress(engine_root, job_id, **fields)
 
+    def emit(event_type, **kwargs) -> None:
+        try:
+            store.emit_event(engine_root, job_id, event_type, **kwargs)
+        except Exception:
+            pass
+
+    cancel_event = threading.Event()
     try:
         target, admitted = _admitted_target(engine_root, job)
-        with _Heartbeat(engine_root, job_id):
+        with _Heartbeat(engine_root, job_id), _CancellationWatcher(engine_root, job_id, cancel_event):
             report = supervisor.run(
                 engine_root,
                 target,
@@ -120,7 +147,11 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
                 progress=progress,
                 resume=_resume_state(job),
                 project=admitted,
+                cancel_event=cancel_event,
+                emit_event=emit,
             )
+    except store.CancellationRequested:
+        return store.CANCELLED
     except budget.BudgetExceeded as exc:
         # Paused, not failed. The run is well-formed and its work so far is on
         # a branch; what stopped it is a policy ceiling, and the answer is a
@@ -131,6 +162,7 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
             job_id,
             store.WAITING_APPROVAL,
             note=f"budget: {exc.decision.reason}",
+            payload={"reason": exc.decision.reason},
         )
         return store.WAITING_APPROVAL
     except BaseException as exc:
@@ -147,9 +179,12 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
             job_id,
             store.FAILED,
             note=f"{type(exc).__name__}: {exc}",
+            payload={"error": type(exc).__name__},
         )
         raise
 
+    if store.is_cancelled(engine_root, job_id):
+        return store.CANCELLED
     state = store.SUCCEEDED if report.summary == "done" else store.FAILED
     store.transition(
         engine_root,
@@ -157,6 +192,7 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
         state,
         note=report.summary,
         branch=report.branch,
+        payload={"summary": report.summary},
     )
     _record_outcome(engine_root, job_id, report)
     return state
