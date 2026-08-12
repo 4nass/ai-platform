@@ -65,7 +65,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     # git_ops.exclusive_run_lock). Returning it to the queue is the difference
     # between a queue and a fire-once trigger.
     RUNNING: frozenset({WAITING_APPROVAL, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED, QUEUED}),
-    WAITING_APPROVAL: frozenset({RUNNING, CANCELLED, FAILED, INTERRUPTED}),
+    WAITING_APPROVAL: frozenset({RUNNING, QUEUED, CANCELLED, FAILED, INTERRUPTED}),
     SUCCEEDED: frozenset(),
     FAILED: frozenset(),
     CANCELLED: frozenset(),

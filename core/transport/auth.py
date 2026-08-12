@@ -268,6 +268,7 @@ class Authenticator:
         signature: str,
         envelope: Envelope,
         scope: str | None = None,
+        require_delivery_identity: bool = True,
     ) -> AuthenticatedRequest:
         now = float(self.clock())
         timestamp_int = _parse_timestamp(timestamp)
@@ -293,7 +294,7 @@ class Authenticator:
 
         if envelope.channel != credential.channel or envelope.sender_id != credential.principal_id:
             raise AuthenticationError("signed envelope does not match its principal")
-        if not envelope.chat_id or not envelope.message_id:
+        if require_delivery_identity and (not envelope.chat_id or not envelope.message_id):
             raise AuthenticationError("authenticated submissions require chat_id and message_id")
 
         body_hash = hashlib.sha256(body).hexdigest()
