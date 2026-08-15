@@ -17,9 +17,9 @@ The local engine is usable for one owner on one workstation. The blockers below 
 | Limitation | Impact | Tracking |
 |---|---|---|
 | OpenClaw network gateway wiring is not deployed | Typed engine tools exist; TLS, rate limits and channel runtime remain deployment work | [#30](https://github.com/4nass/ai-platform/issues/30) |
-| No structured event stream/cancellation contract | Mobile clients cannot follow or stop a run robustly | [#29](https://github.com/4nass/ai-platform/issues/29) |
+| Production event/cancellation consumption is not deployed | Durable events, cursor replay and cooperative cancellation are implemented; a gateway still needs to consume the authenticated REST/SSE surface | [#29](https://github.com/4nass/ai-platform/issues/29), [#47](https://github.com/4nass/ai-platform/issues/47) |
 | No configured CI preview provider | The engine contract is delivered, but a deployment provider must be wired and configured | [#34](https://github.com/4nass/ai-platform/issues/34) |
-| No remote base sync/delivery policy | Branches can start from stale local state | [#33](https://github.com/4nass/ai-platform/issues/33) |
+| No automatic remote PR delivery | Base synchronization and approval-bound Git push are implemented; concrete PR creation/provider delivery remains | [#33](https://github.com/4nass/ai-platform/issues/33), [#46](https://github.com/4nass/ai-platform/issues/46) |
 | Secrets and data retention are incomplete | Remote operation risks credential and source leakage | [#35](https://github.com/4nass/ai-platform/issues/35) |
 | Provider health/quality routing is limited | Failover is deterministic but not deeply adaptive | [#31](https://github.com/4nass/ai-platform/issues/31), [#32](https://github.com/4nass/ai-platform/issues/32) |
 | Decomposer only prunes a fixed DAG | Novel workflows cannot be composed dynamically | [#18](https://github.com/4nass/ai-platform/issues/18) |

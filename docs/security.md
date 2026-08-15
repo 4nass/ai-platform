@@ -4,7 +4,7 @@
 
 The platform executes model-guided engineering against repositories that may contain malicious or misleading content. Untrusted inputs include the user request, source files, documentation, Git history, project memory, provider output, generated commands and upstream agent summaries.
 
-The current trust environment is one local owner on one workstation. It is not safe to expose directly to the Internet or a messaging gateway until the remote gates below are complete.
+The current trust environment is one local owner on one workstation. Authenticated transport and REST/SSE primitives exist, but direct Internet or messaging-gateway exposure remains unsafe until the #49 readiness gate and its dependencies are complete.
 
 ## Trust boundaries
 
@@ -40,7 +40,7 @@ A request is never allowed to decide who sent it or whether it is new. Identity 
 | Validation | Disposable checkout, timeout and optional no-network Bubblewrap |
 | Workflow | Fixed DAG, bounded complexity and bounded correction |
 | Approval | Consequential actions classified automatic, denied or approval-required; approval is fingerprint-bound, single-use and expiring |
-| Delivery | No automatic merge or push |
+| Delivery | No automatic merge; push is available only through the approval-bound audited executor |
 | Audit | Provider/model/effort/outcome telemetry plus append-only submission, refusal and approval events |
 
 Repository context is wrapped as untrusted data and control words such as `VERDICT`, `TASKS` and `COMPLEXITY` are mechanically defanged where relevant. This reduces parser confusion but is not a prompt-injection solution; containment comes from tool restrictions, contracts, the test sandbox and no automatic delivery.
@@ -56,9 +56,9 @@ Remote operation requires per-project secret scopes, redaction, encrypted storag
 Before enabling OpenClaw or any network-facing API, all of the following are required:
 
 1. a project registry and canonical path allowlist (**delivered**, `core/orchestrator/registry.py`, #25);
-2. an authenticated principal and authorized operations (**engine delivered**, #26/#44; REST/SSE exposure and final remote gate remain #47/#49);
+2. an authenticated principal and authorized operations (**engine delivered**, #26/#44/#47; production exposure and the final remote gate remain #49);
 3. idempotency keys for message retries (**delivered** in `core/jobs/envelope.py`, #26);
-4. durable jobs, heartbeat and crash recovery (**delivered** in `core/jobs/`, #24), plus structured progress events and cooperative cancellation (**planned**, #29);
+4. durable jobs, heartbeat and crash recovery (**delivered** in `core/jobs/`, #24), plus structured progress events and cooperative cancellation (**engine delivered**, #29);
 5. hard token/call admission budgets (**delivered** in `core/jobs/budget.py`, #27); elapsed-time and currency ceilings remain;
 6. approval gates plus one audited external-action executor (delivered in core/jobs/approvals.py and core/actions/executor.py, #28/#46); concrete PR/preview providers remain;
 7. a fail-closed execution sandbox;

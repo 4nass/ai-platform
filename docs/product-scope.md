@@ -14,11 +14,11 @@ The differentiator is control over the engineering loop, not another chat interf
 
 ### Current product
 
-The current product is a command-line engine that runs against a local Git repository. It supports synchronous and durable asynchronous execution (`run` versus `submit`/`status`/`jobs`/`cancel`/`work`/`resume`), Claude Code and Codex CLI providers, context retrieval, worktree isolation, target tests, review/correction, telemetry, project admission, idempotent envelopes, token/call budgets and scoped approvals. The job queue is durable and restart-aware, but it has no authenticated network transport; it is not a safe surface for an untrusted remote caller.
+The current product is a local-first engineering engine with a CLI and an authenticated remote engine surface. It supports synchronous and durable asynchronous execution, Claude Code and Codex CLI providers, context retrieval, worktree isolation, target tests, review/correction, telemetry, project admission, HMAC principals, idempotent envelopes, structured events, REST/SSE, token/call budgets and scoped approvals. The transport server and OpenClaw adapter are implemented and tested, but production exposure is still blocked by #49.
 
 ### MVP target
 
-The target product adds a narrow authenticated OpenClaw tool/API in front of the existing queue, structured progress events and cooperative cancellation, synchronized Git delivery, authenticated per-run previews, secrets/retention controls, managed service health, and compact notifications. The target sequence and exit criteria are maintained in [MVP trajectory](mvp-trajectory.md).
+The engine-side target capabilities are now present: narrow authenticated OpenClaw tools/API, structured progress events and cancellation, synchronized Git base policy, audited action plans, authenticated per-run preview lifecycle, managed service health and compact notification outbox. Remaining work is local-model policy/adapter support, complete secrets and budget ceilings, concrete gateway/provider deployment and the #49 exposure gate. The target sequence and exit criteria are maintained in [MVP trajectory](mvp-trajectory.md).
 
 ### Explicit non-goals
 
@@ -29,7 +29,7 @@ The target product adds a narrow authenticated OpenClaw tool/API in front of the
 - treating prompt instructions as a security boundary;
 - guaranteeing provider subscription quota from local estimates;
 - executing arbitrary repositories remotely without admission and secrets policy;
-- local models, rich attachments and dynamic workflow composition as MVP prerequisites.
+- unrestricted local-model fallback, rich attachments and dynamic workflow composition.
 
 ## Users and interfaces
 
@@ -54,7 +54,7 @@ The target product adds a narrow authenticated OpenClaw tool/API in front of the
 - **Profile:** an ordered `provider + model + effort` routing candidate.
 - **Run:** one orchestration attempt and its stage results.
 - **Job:** the durable asynchronous lifecycle around a run - `queued`/`running`/`waiting_approval`/`succeeded`/`failed`/`cancelled`/`interrupted`. A queued or cancelled job never became a run.
-- **Principal:** the identity established by an authenticated transport. Today the local CLI uses the local owner boundary; the remote principal is not implemented yet.
+- **Principal:** the identity established by an authenticated transport. Today the local CLI uses the local owner boundary; the remote principal is implemented by the signed transport verifier; production gateway deployment still remains.
 - **Target policy:** the base-revision `.ai-platform.yml` used for validation and ephemeral-write rules.
 - **Context snapshot:** information selected from the same checkout the agents can modify.
 

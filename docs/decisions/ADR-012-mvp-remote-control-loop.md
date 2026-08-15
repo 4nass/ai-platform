@@ -35,7 +35,7 @@ The full issue mapping and ordering live in [MVP trajectory](../mvp-trajectory.m
 
 The product has a concrete finish line that can be tested end-to-end from a phone and demonstrates a sovereign provider option without hiding quality or safety trade-offs. Security and delivery responsibilities are explicit, and OpenClaw cannot become an accidental unrestricted shell.
 
-The MVP still requires CI/provider integration, authenticated transport, artifact retention, service supervision, a browser-facing deployment path and an evaluation suite for local models. Rich attachments, dynamic workflow composition, adaptive quality routing and cross-machine locking remain later features.
+The engine-side foundations for authenticated transport, durable events, service supervision, Git delivery guards and provider-neutral previews are now implemented and tested. The MVP still requires production CI/provider integration, concrete gateway deployment, complete artifact/secrets retention evidence and an evaluation suite for local models. Rich attachments, dynamic workflow composition, adaptive quality routing and cross-machine locking remain later features.
 
 ## Alternatives
 

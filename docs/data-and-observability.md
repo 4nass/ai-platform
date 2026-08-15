@@ -71,7 +71,7 @@ Delivered:
 - a background heartbeat thread and stale-worker reconciliation, run on every read path (`jobs`, `status`, `work`) rather than requiring an operator to trigger it;
 - an append-only `job_events` table recording every transition — and every refusal, including a submission rejected for reusing an idempotency key with different content, which is committed explicitly so the exception reporting it cannot roll it back;
 - idempotent submission: a `Principal` and a structured envelope are stored alongside the request, and the key derived from the transport's own identifiers carries a unique index, so a redelivered message returns the original job id instead of starting a second run;
-- cancellation for jobs that have not started executing (a `running` job cannot yet be stopped mid-run — that is [#29](https://github.com/4nass/ai-platform/issues/29));
+- cooperative cancellation for queued and running jobs, with durable cancel_requested and terminal cancellation events ([#29](https://github.com/4nass/ai-platform/issues/29));
 - resumption of an interrupted job onto its own branch, keeping every stage it merged (`interrupted` is the one terminal state that can be left, and only to `queued`, and only via `resume`);
 - progress fields for run id, base ref/sha, branch, integration worktree, stage, and attempt, written as the run reaches them via a `progress` callback into `supervisor.run`;
 - a job whose target repository is locked by another run returns to `queued` rather than failing — one mutating run per repo is a scheduling conflict, not a defect in the job;

@@ -85,7 +85,7 @@ Inspect and test the delivery branch before manually merging or pushing. The pla
 
 The project registry's `sync_policy` determines how a run chooses its base. `offline` is the safe local default. `fetch` refreshes only `refs/remotes/<remote>/<base>` and pins that immutable SHA for the integration worktree. `require_up_to_date` fails admission when the local base is behind, ahead, or otherwise diverged. Force-pushed bases, missing branches, and network/credential failures are reported as explicit admission errors; the user's checkout is not changed.
 
-The run records `base_ref`, `base_sha`, `remote_url`, `remote_ref`, `remote_sha`, `fetch_timestamp`, `sync_policy` and `sync_status` in telemetry and its checkpoint. A later delivery must verify that the recorded remote base is still current. Pushing is an approval-only operation and is not invoked by the run until the external-action executor (#46) and PR/API surface (#30/#47) are available.
+The run records `base_ref`, `base_sha`, `remote_url`, `remote_ref`, `remote_sha`, `fetch_timestamp`, `sync_policy` and `sync_status` in telemetry and its checkpoint. A later delivery must verify that the recorded remote base is still current. Pushing is now available only through the approval-bound external-action executor (#46); the run still never pushes or opens a PR automatically. The REST/SSE and OpenClaw engine surfaces (#30/#47) provide the authenticated control path, while concrete gateway delivery remains deployment work.
 
 ## Telemetry, quota and budgets
 
@@ -95,7 +95,7 @@ Quota is a local estimate from recorded tokens versus declared rolling-window al
 
 ## Durable jobs
 
-`submit`, `status`, `jobs`, `cancel`, `work`, `resume`, `approvals`, `approve` and `deny` are delivered and tested against `core/jobs/`. This is the local CLI/queue contract, not remote exposure. Project allowlisting, idempotent submission, hard token/call budgets and scoped approvals exist in the engine; an authenticated non-local transport does not yet exist. See [Security](security.md), [MVP trajectory](mvp-trajectory.md), #29 and #30.
+`submit`, `status`, `jobs`, `cancel`, `work`, `resume`, `approvals`, `approve` and `deny` are delivered and tested against `core/jobs/`. This is the local CLI/queue contract plus the durable foundation used by the authenticated REST/SSE and OpenClaw adapters. Project allowlisting, idempotent submission, structured events, hard token/call budgets and scoped approvals exist in the engine; production network exposure is still blocked by #49.
 
 `submit` persists the request and starts a detached worker; `status <id>` and `jobs` are readable from any process, including after the submitting terminal is closed. A job whose worker dies is reconciled to `interrupted`, keeping its branch, base revision and integration-worktree path. `work [--job ID]` runs one job or drains the queue in the foreground, which is the entry point used by the managed service unit.
 
@@ -145,4 +145,4 @@ Use Linux-native Git, Python and uv for a repository inside WSL. Mixing Windows 
 
 ## Remote warning
 
-Concrete OpenClaw channel wiring, remote Git delivery, preview deployment and secrets retention are not delivered; the typed OpenClaw engine adapter and REST/SSE primitives are available. Do not expose the local worker to the Internet; follow the gates in [Security](security.md) and [MVP trajectory](mvp-trajectory.md).
+Concrete OpenClaw channel wiring, pull-request/cloud preview providers and complete secrets retention are not delivered. The typed OpenClaw adapter, authenticated REST/SSE API, Git base synchronization, audited action executor and provider-neutral preview lifecycle are available. Do not expose the local worker to the Internet; follow the gates in [Security](security.md) and [MVP trajectory](mvp-trajectory.md).

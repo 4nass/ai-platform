@@ -120,7 +120,7 @@ flowchart TD
 
 OpenClaw is an interaction gateway, not an execution sandbox or source of engineering truth. The platform must expose narrow idempotent operations and durable state before the gateway is enabled. Preview deployment consumes a committed delivery revision and returns an immutable URL; it must not run from an agent's mutable worktree.
 
-The local JOBS half - durable state, atomic claim, heartbeat, crash reconciliation and resume - is delivered in core/jobs/. Structured events and cancellation remain the event-stream foundation; the channel-neutral NOTIFY outbox is delivered in core/notifications.py, while concrete gateway delivery remains an adapter concern.
+The local JOBS half - durable state, atomic claim, heartbeat, crash reconciliation and resume - is delivered in core/jobs/. Structured events and cancellation are delivered as the event-stream foundation; the channel-neutral NOTIFY outbox is delivered in core/notifications.py, while concrete gateway delivery remains an adapter concern.
 
 ## Architectural invariants
 

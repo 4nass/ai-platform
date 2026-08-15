@@ -1,68 +1,71 @@
 # Remote security readiness gate
 
-Issue #49 ajoute une barrière explicite avant toute exposition de l API REST/SSE à un réseau distant. Le moteur ne considère pas une API fonctionnelle comme une API exploitable : chaque frontière de confiance doit produire une preuve locale.
+Issue #49 adds a deterministic barrier before exposing the REST/SSE API to a remote network. A working API is not sufficient evidence that the engineering engine is safe to expose: each trust boundary must produce local evidence.
 
-## Commande
+## Command
 
     ai-platform security-check
     ai-platform security-check --json
 
-La commande retourne 0 seulement lorsque la décision est GO ou RISK_ACCEPTED. Elle retourne 1 pour NO_GO. Le JSON est versionné (version v1) afin de pouvoir être archivé dans une CI ou attaché à une release. Les valeurs secrètes ne sont jamais imprimées.
+The command returns 0 only for GO or RISK_ACCEPTED and returns 1 for NO_GO. JSON output is versioned as v1 for CI or release evidence. Secret values are never printed.
 
-## Décisions
+## Decisions
 
-- GO : tous les contrôles bloquants sont PASS.
-- NO_GO : au moins un contrôle bloquant est FAIL; le service doit rester local ou désactivé.
-- RISK_ACCEPTED : un responsable a enregistré une exception temporaire; remote_ready reste false et l exception est visible dans le rapport. Cette décision ne supprime pas les contrôles et doit être revue avant expiration.
+- GO: every blocking control is PASS.
+- NO_GO: at least one blocking control is FAIL; keep the service local or disabled.
+- RISK_ACCEPTED: an owner has recorded a temporary exception; remote_ready remains false and all failed checks remain visible.
 
-Les statuts WARN sont informatifs et ne permettent pas de contourner un FAIL.
+WARN is informational and never bypasses a FAIL.
 
-## Matrice de preuves
+## Current implementation
 
-| Frontière | Preuve contrôlée | Échec typique |
+The gate checks:
+
+- transport credentials and required job scopes;
+- allowlisted projects, canonical roots and action names;
+- explicit remote enablement, non-loopback bind, TLS termination and rate limiting;
+- strict budget mode and declared classes;
+- the audited action executor and approval store;
+- Bubblewrap plus committed target sandbox policy;
+- redaction primitives and an explicit retention policy;
+- REST/SSE route scopes and durable jobs, events and telemetry;
+- a rollback/disable switch and a time-bounded risk-acceptance record.
+
+The server accepts localhost binds. Any non-loopback bind requires explicit remote enablement, TLS termination and rate limiting.
+
+## Evidence matrix
+
+| Boundary | Evidence | Current state |
 | --- | --- | --- |
-| Identité | identifiants de transport et scopes jobs:submit/read/cancel/approve | credentials absents ou incomplets |
-| Projet | config/projects.yaml, racines canoniques et actions allowlistées | projet inconnu, chemin absent ou action non déclarée |
-| Exposition | bind non-loopback explicite, TLS terminé, rate limit activé | écoute distante implicite |
-| Rejeu | contrat d authentification et store de replay du transport | nonce/requête réutilisable |
-| Budget | mode strict, classes déclarées, plafonds temps/coût | budget soft ou plafond non appliqué (#45) |
-| Actions | approbations et exécuteur audité | dispatch hors politique |
-| Sandbox | Bubblewrap et test_sandbox: true dans la configuration commitée | test non isolé ou bwrap absent |
-| Secrets | primitives de redaction + politique de rétention explicite (#35) | secret dans logs, événements, artefacts ou notifications |
-| API | endpoints REST/SSE et scopes authentifiés de #47 | route ou scope manquant |
-| Audit | événements jobs et télémétrie durables | action non traçable |
+| Identity and replay | HMAC principal, scopes, nonce ledger and idempotency | Engine delivered (#44) |
+| Project admission | Registry id, canonical path and allowed actions | Delivered (#25) |
+| API contract | Authenticated REST/SSE, status, events, cancel, approvals and artifacts | Engine delivered (#47) |
+| Lifecycle | Durable events, cursors and cooperative cancellation | Engine delivered (#29) |
+| OpenClaw | Typed submit/status/cancel/approve/diff/events adapter | Engine delivered (#30) |
+| Git delivery | Base synchronization, divergence policy and approval-bound push | Engine delivered (#33/#46) |
+| Preview | Immutable plan, capability URL, TTL and cleanup lifecycle | Engine delivered; concrete provider remains (#34) |
+| Budgets | Token/call reservations | Delivered; time/currency ceilings remain (#45) |
+| Secrets | Redaction and retention policy | Redaction primitives exist; complete policy/evidence remains (#35) |
+| Sandbox | Bubblewrap and committed target policy | Host-dependent; required for remote readiness |
+| Service/notifications | Managed local service and durable notification outbox | Engine delivered (#40/#42) |
+| Production exposure | TLS, rate limiting, secret manager and gateway process | Not deployed; blocks remote MVP (#49) |
 
-Le rapport vérifie les primitives disponibles; la revue de release doit conserver le JSON et compléter la vérification des sinks (logs, artefacts et notifications) avec un test d injection de secret.
+## Rollback and risk acceptance
 
-## Politique réseau et arrêt d urgence
+Set AI_PLATFORM_REMOTE_ENABLED=false and restart the managed local user service to disable exposure. Credentials must come from the service secret manager, never from Git-tracked YAML.
 
-Le serveur accepte toujours 127.0.0.1, ::1 et localhost. Tout bind non-loopback est refusé sauf si les trois variables suivantes valent explicitement true (ou 1/yes/on) :
-
-    AI_PLATFORM_REMOTE_ENABLED=true
-    AI_PLATFORM_TLS_TERMINATED=true
-    AI_PLATFORM_RATE_LIMIT=true
-
-Pour couper immédiatement l exposition :
-
-    AI_PLATFORM_REMOTE_ENABLED=false
-    # puis redémarrer le managed local user service
-
-Les credentials doivent être injectés via AI_PLATFORM_TRANSPORT_CREDENTIALS depuis le gestionnaire de secrets du service; ils ne doivent pas être commités.
-
-## Acceptation de risque
-
-Une exception volontaire est un JSON local non versionné par défaut (config/security-risk-acceptance.json, ou chemin indiqué par AI_PLATFORM_RISK_ACCEPTANCE_FILE) :
+A temporary exception is a local JSON file ignored by Git at config/security-risk-acceptance.json, or the path in AI_PLATFORM_RISK_ACCEPTANCE_FILE:
 
     {
       "id": "RA-49-001",
       "owner": "security-owner",
       "scope": "remote-mvp",
       "expires_at": "2026-09-01T00:00:00+00:00",
-      "rationale": "Exception temporaire et revue planifiée."
+      "rationale": "Temporary exception with a scheduled review."
     }
 
-Le fichier doit contenir un propriétaire, une justification, le scope exact remote-mvp et une date future avec fuseau. Il ne transforme pas remote_ready en true; il autorise uniquement une décision opérateur explicitement nommée.
+A valid record changes the operator decision to RISK_ACCEPTED only. It never changes remote_ready to true.
 
-## État MVP
+## MVP status
 
-Le gate est livré mais le dépôt reste volontairement NO_GO tant que les dépendances suivantes ne sont pas closes : plafonds temps/USD réellement appliqués (#45), rétention/redaction complète (#35), sandbox disponible sur l hôte et configuration de production (credentials, TLS, rate limiting).
+The engine-side gate is implemented and tested. The repository remains NO_GO until #35 retention/redaction evidence, #45 time/currency enforcement, host sandbox prerequisites and production credentials/TLS/rate-limit evidence are complete.

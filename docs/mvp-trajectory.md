@@ -21,7 +21,7 @@ The platform remains the authority for project admission, context, provider/mode
 
 ## What is already usable
 
-The local CLI can run synchronous work or submit a durable job. It can select context, route Claude Code/Codex CLI profiles, isolate each run in Git worktrees, validate in a disposable checkout, review/correct within a bound, record telemetry, enforce token/call budgets, gate scoped approvals, recover a crashed worker and resume merged stages. These capabilities are covered by the automated suite and are safe inside the documented single-user workstation boundary.
+The local CLI can run synchronous work or submit a durable job. The engine also provides authenticated transport, REST/SSE, structured events and cancellation, typed OpenClaw tools, Git base synchronization, audited action plans, provider-neutral previews, managed service profiles, notification outbox, context retrieval, Claude Code/Codex routing, isolated worktrees, validation, review/correction, telemetry, token/call budgets, scoped approvals and crash recovery. These capabilities are covered by the automated suite, but production remote exposure remains behind #49.
 
 ## MVP exit criteria
 
@@ -41,15 +41,15 @@ The MVP is complete only when every gate has an end-to-end test through the remo
 
 ### Now - remote control and safety loop (P0/P1)
 
-1. **#44 - authenticated transport and verified principals:** establish identity outside prompt text and protect channel identifiers.
+1. **#44/#47/#29 - authenticated remote engine surface:** transport principals, REST/SSE operations, replayable events and cooperative cancellation are implemented; production deployment remains behind #49.
 2. **#45 - time and currency ceilings:** complete the hard admission dimensions beyond delivered token/call reservations.
 3. **#35/#49 - secrets and remote-readiness gate:** the fail-closed `ai-platform security-check` is delivered; complete retention/redaction evidence and the remaining budget/sandbox controls before enabling a gateway.
-4. **#47 - REST/SSE API:** expose submit, status, replayable events, cancellation, approvals and artifacts through a narrow contract.
-5. **#29/#30 - lifecycle and OpenClaw:** make stage, provider, budget, validation, review and approval transitions observable and consumable by OpenClaw.
+4. **#47/#30 - gateway consumption:** the authenticated REST/SSE API and typed OpenClaw adapter are implemented; wire them to a concrete gateway with TLS, rate limiting and secret management.
+5. **#29/#30 - lifecycle and OpenClaw:** durable lifecycle events and typed tools are implemented; complete channel delivery and production gateway operations.
 6. **#37/#48 - constrained local models:** add Ollama first, with an explicit low-risk role policy and acceptance evaluation; vLLM/llama.cpp use the same compatible adapter where practical.
-7. **#33/#46 - Git delivery and approved actions:** pin the base ref, define divergence policy and route push/PR actions through the shared executor.
-8. **#34 - preview environments:** build the committed delivery revision, deploy a short-lived authenticated subdomain and tear it down deterministically.
-9. **#40/#42 - service and notifications:** keep one worker healthy on Linux, WSL2 or macOS and return compact mobile-friendly result views.
+7. **#33/#46 - Git delivery and approved actions:** base pinning, divergence policy, audited plans and approval-bound push are implemented; concrete PR/provider handlers remain.
+8. **#34 - preview environments:** the immutable preview lifecycle and authenticated API references are implemented; wire a concrete CI/cloud provider and production domain.
+9. **#40/#42 - service and notifications:** managed service profiles and the durable notification outbox are implemented; install and connect a concrete gateway sink.
 
 ### Next - reliability and quality (P1/P2)
 
