@@ -38,7 +38,8 @@ The current implementation is the local execution half of that loop. The remote 
 | External actions | [Audited action executor](action-executor.md) | core/actions/executor.py, core/jobs/approvals.py |
 | Previews | [Per-run preview environments](preview-environments.md) | core/previews/manager.py, core/transport/http.py |
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
-| Managed runtime | [Service operations](service-operations.md) | `core/service.py`, `core/backup.py`, `deploy/` |
+| Managed runtime | [Managed local user service](service-operations.md) | `core/service.py`, `core/backup.py`, `deploy/` |
+| Notifications | [Mobile notifications](notifications.md) | `core/notifications.py`, `notifications.sqlite` |
 
 ## Governance and history
 
