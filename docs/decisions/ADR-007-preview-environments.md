@@ -1,6 +1,6 @@
 # ADR-007: Immutable per-run preview environments
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-01
 
 ## Context
@@ -17,7 +17,7 @@ Preview deployment is a privileged workflow stage requiring an approval/budget p
 
 The phone can validate the exact branch artifact through a stable browser URL. Rebuilds are traceable and do not require keeping an agent worktree server alive. The design adds CI provider integration, DNS/TLS, secrets, retention, cost, and orphan cleanup responsibilities.
 
-Implementation is tracked by [#34](https://github.com/4nass/ai-platform/issues/34).
+The provider-neutral lifecycle is delivered in core/previews/manager.py and can be attached to the shared #46 action executor. A concrete CI/provider adapter and production domain configuration remain tracked by [#34](https://github.com/4nass/ai-platform/issues/34).
 
 ## Alternatives
 

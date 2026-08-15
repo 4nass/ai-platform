@@ -32,9 +32,10 @@ and unbounded provider output are never stored or returned.
 ## Handlers and deployment
 
 GitPushHandler verifies the delivery branch commit and the recorded remote base
-before invoking the non-force push guard from issue #33. PR and preview handlers
-are injected by their integrations (#33/#34), so provider credentials remain
-outside this generic module. A credential provider may supply an opaque
+before invoking the non-force push guard from issue #33. PR handlers remain injected by their integration (#33). The #34 preview lifecycle
+is implemented in core/previews/manager.py and is attached through
+PreviewActionHandler; the external CI/provider remains injected, so credentials
+remain outside this generic module. A credential provider may supply an opaque
 project-scoped credential to a handler; it is never serialized by the executor.
 
 Cancellation is durable at the execution level and cooperative for an in-process

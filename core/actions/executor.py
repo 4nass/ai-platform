@@ -184,6 +184,7 @@ class PreviewDeployPlan:
     commit_sha: str
     ttl_seconds: int
     config_sha256: str = ""
+    data_mode: str = "readonly"
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9._/-]{1,160}", self.service):
@@ -194,6 +195,8 @@ class PreviewDeployPlan:
             raise ActionPolicyError("preview service and environment are required")
         if self.ttl_seconds < 60 or self.ttl_seconds > 7 * 24 * 3600:
             raise ActionPolicyError("preview TTL must be between 60 seconds and 7 days")
+        if self.data_mode not in {"ephemeral", "readonly"}:
+            raise ActionPolicyError("preview data mode must be ephemeral or readonly")
 
     @property
     def action(self) -> str:
@@ -212,6 +215,7 @@ class PreviewDeployPlan:
             "commit_sha": self.commit_sha,
             "ttl_seconds": self.ttl_seconds,
             "config_sha256": self.config_sha256,
+            "data_mode": self.data_mode,
         }
 
     def safe_payload(self) -> dict:
@@ -268,6 +272,7 @@ class ActionContext:
     principal: str
     credentials: object = None
     cancel_event: threading.Event | None = None
+    request_id: str = ""
     job_id: int | None = None
     run_id: int | None = None
 
@@ -451,8 +456,14 @@ class ActionExecutor:
                 credentials = self.credential_provider.get(project.id, plan.action)
             execution = self.get(execution_id)
             context = ActionContext(
-                self.engine_root, project, principal, credentials, cancel_event,
-                execution.job_id, execution.run_id,
+                engine_root=self.engine_root,
+                project=project,
+                principal=principal,
+                credentials=credentials,
+                cancel_event=cancel_event,
+                request_id=execution.request_id,
+                job_id=execution.job_id,
+                run_id=execution.run_id,
             )
             handler = self.handlers.get(plan.action)
             if handler is None:

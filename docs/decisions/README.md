@@ -12,7 +12,7 @@ ADRs preserve durable technical decisions, their context, and trade-offs. Compon
 | [ADR-004](ADR-004-explicit-model-effort-routing.md) | Explicit model and effort routing | Accepted |
 | [ADR-005](ADR-005-separate-telemetry-and-job-stores.md) | Separate SQLite telemetry and job stores | Accepted |
 | [ADR-006](ADR-006-openclaw-as-gateway.md) | OpenClaw as replaceable interaction adapter | Accepted |
-| [ADR-007](ADR-007-preview-environments.md) | Immutable per-run preview environments | Proposed |
+| [ADR-007](ADR-007-preview-environments.md) | Immutable per-run preview environments | Accepted |
 | [ADR-008](ADR-008-platform-config-and-presets.md) | Two-tier configuration — platform.yaml plus internal presets | Accepted |
 | [ADR-009](ADR-009-resumable-runs-and-git-owned-checkpoints.md) | Resumable runs, checkpointed in git rather than in the queue | Accepted |
 | [ADR-010](ADR-010-project-registry-as-the-admission-boundary.md) | A project registry, not a path, is the admission boundary | Accepted |

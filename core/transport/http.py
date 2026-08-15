@@ -17,6 +17,7 @@ from typing import Callable
 from urllib.parse import parse_qs
 
 from core.jobs import approvals, budget, store, worker
+from core.previews import manager as preview_manager
 from core.jobs.envelope import Envelope
 from core.orchestrator import platform_config, registry
 from core.transport.auth import (
@@ -37,6 +38,7 @@ SCOPES = {
     ("POST", "cancel"): "jobs:cancel",
     ("POST", "approval"): "jobs:approve",
     ("GET", "artifacts"): "jobs:read",
+    ("GET", "preview"): "jobs:read",
 }
 
 
@@ -194,6 +196,8 @@ class RemoteAPI:
             return self._approval(job_id, payload, auth)
         if method == "GET" and len(parts) == 5 and parts[4] == "artifacts":
             return self._artifacts(job_id, auth)
+        if method == "GET" and len(parts) == 5 and parts[4] == "preview":
+            return self._preview(job_id, auth)
         raise APIError(404, "not_found", "resource not found")
 
     def _job_for(self, job_id, auth):
@@ -259,12 +263,14 @@ class RemoteAPI:
                 }
             except Exception:
                 budget_status = None
+        preview = preview_manager.get_for_job(self.engine_root, job.id)
         return {
             "job_id": job.id, "state": job.state,
             "submitted_at": job.submitted_at, "started_at": job.started_at,
             "finished_at": job.finished_at, "stage": job.stage or None,
             "branch": job.branch or None,
             "summary": (job.summary or "")[:1000] or None,
+            "preview": preview.safe_dict() if preview else None,
             "budget": budget_status,
         }
 
@@ -317,15 +323,28 @@ class RemoteAPI:
         return {"job_id": job_id, "approval_id": approval.id, "state": decided.state,
                 "job_state": store.get(self.engine_root, job_id).state}
 
+    def _preview(self, job_id, auth):
+        self._job_for(job_id, auth)
+        preview = preview_manager.get_for_job(self.engine_root, job_id)
+        if preview is None:
+            raise APIError(404, "not_found", "preview not found")
+        return preview.safe_dict()
+
     def _artifacts(self, job_id, auth):
         job = self._job_for(job_id, auth)
         branch = job.branch or None
+        preview = preview_manager.get_for_job(self.engine_root, job.id)
+        preview_url = preview.url if preview else job.envelope.get("preview_url")
         refs = [
             {"kind": "branch", "ref": branch, "available": bool(branch)},
             {"kind": "diff", "ref": f"/v1/jobs/{job.id}/artifacts/diff", "available": bool(branch)},
             {"kind": "log", "ref": f"/v1/jobs/{job.id}/artifacts/log", "available": bool(job.summary or job.detail)},
-            {"kind": "preview", "ref": job.envelope.get("preview_url"), "available": bool(job.envelope.get("preview_url"))},
+            {"kind": "preview", "ref": preview_url, "available": bool(preview_url)},
         ]
+        if preview:
+            refs[-1]["status"] = preview.status
+            refs[-1]["expires_at"] = preview.expires_at
+            refs[-1]["commit_sha"] = preview.commit_sha
         return {"job_id": job.id, "artifacts": refs}
 
 

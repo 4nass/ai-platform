@@ -9,7 +9,7 @@ The local engine is usable for one owner on one workstation. The blockers below 
 |---|---|---|
 | No exposed authenticated API | The HMAC verifier and durable nonce ledger exist in `core/transport/`, but no REST/SSE server is listening yet; the local CLI remains the supported interface | [#47](https://github.com/4nass/ai-platform/issues/47), [#49](https://github.com/4nass/ai-platform/issues/49) |
 | Budget limits cover tokens and calls, not time or currency | An unattended run is bounded in spend but not in wall-clock duration | [#27](https://github.com/4nass/ai-platform/issues/27) |
-| Approvals exist but the actions they gate mostly do not | `open_pr`, deploy and migration are declarable and gateable, and none is implemented yet — so today the gate is exercised by budget overruns | [#28](https://github.com/4nass/ai-platform/issues/28), [#33](https://github.com/4nass/ai-platform/issues/33) |
+| Concrete external providers remain incomplete | The shared audited executor and preview lifecycle are delivered; real PR/CI deployment providers still need wiring | [#34](https://github.com/4nass/ai-platform/issues/34), [#46](https://github.com/4nass/ai-platform/issues/46) |
 | Sandbox can fail open when Bubblewrap is absent | Untrusted target tests can execute with host access | security prerequisite |
 
 ## P1 — correctness and operability
@@ -18,7 +18,7 @@ The local engine is usable for one owner on one workstation. The blockers below 
 |---|---|---|
 | OpenClaw tools/API are not implemented | Gateway has no narrow platform contract | [#30](https://github.com/4nass/ai-platform/issues/30) |
 | No structured event stream/cancellation contract | Mobile clients cannot follow or stop a run robustly | [#29](https://github.com/4nass/ai-platform/issues/29) |
-| No per-run preview deployment | Browser validation requires manual setup | [#34](https://github.com/4nass/ai-platform/issues/34) |
+| No configured CI preview provider | The engine contract is delivered, but a deployment provider must be wired and configured | [#34](https://github.com/4nass/ai-platform/issues/34) |
 | No remote base sync/delivery policy | Branches can start from stale local state | [#33](https://github.com/4nass/ai-platform/issues/33) |
 | Secrets and data retention are incomplete | Remote operation risks credential and source leakage | [#35](https://github.com/4nass/ai-platform/issues/35) |
 | Provider health/quality routing is limited | Failover is deterministic but not deeply adaptive | [#31](https://github.com/4nass/ai-platform/issues/31), [#32](https://github.com/4nass/ai-platform/issues/32) |
