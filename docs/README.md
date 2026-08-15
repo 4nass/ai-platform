@@ -41,6 +41,7 @@ The current implementation is the local execution half of that loop. The remote 
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
 | Managed runtime | [Managed local user service](service-operations.md) | `core/service.py`, `core/backup.py`, `deploy/` |
 | Notifications | [Mobile notifications](notifications.md) | `core/notifications.py`, `notifications.sqlite` |
+| Remote security gate | [Remote security readiness](security-readiness.md) | `core/security_readiness.py`, `ai-platform security-check` |
 
 ## Governance and history
 

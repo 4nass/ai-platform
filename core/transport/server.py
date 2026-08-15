@@ -25,7 +25,23 @@ def authenticator_from_env(engine_root: Path, *, variable: str = "AI_PLATFORM_TR
         credentials[credential.key_id] = credential
     return Authenticator(credentials, ReplayStore(Path(engine_root) / "transport.sqlite"))
 
+def _loopback(host: str) -> bool:
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _remote_allowed(host: str) -> None:
+    if _loopback(host):
+        return
+    if os.environ.get("AI_PLATFORM_REMOTE_ENABLED", "").lower() not in {"1", "true", "yes", "on"}:
+        raise RuntimeError("remote exposure is disabled; set AI_PLATFORM_REMOTE_ENABLED=true explicitly")
+    if os.environ.get("AI_PLATFORM_TLS_TERMINATED", "").lower() not in {"1", "true", "yes", "on"}:
+        raise RuntimeError("remote exposure requires AI_PLATFORM_TLS_TERMINATED=true")
+    if os.environ.get("AI_PLATFORM_RATE_LIMIT", "").lower() not in {"1", "true", "yes", "on"}:
+        raise RuntimeError("remote exposure requires AI_PLATFORM_RATE_LIMIT=true")
+
+
 def serve(engine_root: Path, *, host: str = "127.0.0.1", port: int = 8787) -> None:
+    _remote_allowed(host)
     auth = authenticator_from_env(engine_root)
     with make_server(host, port, create_app(engine_root, auth)) as server:
         server.serve_forever()

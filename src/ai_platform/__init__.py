@@ -964,6 +964,38 @@ def restore(
     console.print(f"Restored: {', '.join(restored) or 'none'}")
 
 
+@app.command(name="security-check")
+def security_check(
+    json_output: bool = typer.Option(False, "--json", help="Print a machine-readable readiness report."),
+) -> None:
+    """Evaluate the fail-closed gate before enabling remote exposure."""
+    from rich.table import Table
+    from core import security_readiness
+
+    report = security_readiness.evaluate(ENGINE_ROOT)
+    if json_output:
+        typer.echo(security_readiness.report_json(report))
+    else:
+        table = Table(title=f"Remote security readiness: {report.decision}")
+        table.add_column("status")
+        table.add_column("check")
+        table.add_column("detail")
+        for check in report.checks:
+            style = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}[check.status]
+            detail = check.detail
+            if check.remediation:
+                detail += f"\nFix: {check.remediation}"
+            table.add_row(f"[{style}]{check.status}[/{style}]", check.name, detail)
+        console.print(table)
+        if report.risk_acceptance:
+            console.print(
+                f"[bold yellow]Risk acceptance:[/bold yellow] {report.risk_acceptance.identifier} "
+                f"by {report.risk_acceptance.owner} until {report.risk_acceptance.expires_at}"
+            )
+    if not report.operator_go:
+        raise typer.Exit(1)
+
+
 _STATE_STYLE = {
     "queued": "cyan",
     "running": "yellow",

@@ -21,6 +21,8 @@ flowchart LR
 
 Prompts help models understand intent but do not enforce security. Enforcement comes from deterministic code outside the model.
 
+Before any non-loopback bind, run `ai-platform security-check`. The command is the release gate for issue #49; it requires explicit remote enablement, TLS termination, rate limiting, authenticated scopes, allowlisted projects, strict budgets, audited actions, sandboxing, secret policy and durable audit. See [Remote security readiness](security-readiness.md).
+
 A request is never allowed to decide who sent it or whether it is new. Identity comes from the authenticated channel and travels beside the prompt; idempotency is keyed on the transport message identifiers, not on request text.
 
 ## Defense layers

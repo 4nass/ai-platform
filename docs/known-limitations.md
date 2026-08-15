@@ -7,7 +7,7 @@ The local engine is usable for one owner on one workstation. The blockers below 
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| No exposed authenticated API | The HMAC verifier and durable nonce ledger exist in `core/transport/`, but no REST/SSE server is listening yet; the local CLI remains the supported interface | [#47](https://github.com/4nass/ai-platform/issues/47), [#49](https://github.com/4nass/ai-platform/issues/49) |
+| Remote exposure is not release-ready | REST/SSE and authenticated transport primitives exist, but `ai-platform security-check` remains NO_GO until #35/#45, sandbox and production network evidence are complete; keep the bind loopback-only | [#49](https://github.com/4nass/ai-platform/issues/49) |
 | Budget limits cover tokens and calls, not time or currency | An unattended run is bounded in spend but not in wall-clock duration | [#27](https://github.com/4nass/ai-platform/issues/27) |
 | Concrete external providers remain incomplete | The shared audited executor and preview lifecycle are delivered; real PR/CI deployment providers still need wiring | [#34](https://github.com/4nass/ai-platform/issues/34), [#46](https://github.com/4nass/ai-platform/issues/46) |
 | Sandbox can fail open when Bubblewrap is absent | Untrusted target tests can execute with host access | security prerequisite |

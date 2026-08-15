@@ -43,7 +43,7 @@ The MVP is complete only when every gate has an end-to-end test through the remo
 
 1. **#44 - authenticated transport and verified principals:** establish identity outside prompt text and protect channel identifiers.
 2. **#45 - time and currency ceilings:** complete the hard admission dimensions beyond delivered token/call reservations.
-3. **#35/#49 - secrets and remote-readiness gate:** redact, retain and review the complete exposure boundary before enabling a gateway.
+3. **#35/#49 - secrets and remote-readiness gate:** the fail-closed `ai-platform security-check` is delivered; complete retention/redaction evidence and the remaining budget/sandbox controls before enabling a gateway.
 4. **#47 - REST/SSE API:** expose submit, status, replayable events, cancellation, approvals and artifacts through a narrow contract.
 5. **#29/#30 - lifecycle and OpenClaw:** make stage, provider, budget, validation, review and approval transitions observable and consumable by OpenClaw.
 6. **#37/#48 - constrained local models:** add Ollama first, with an explicit low-risk role policy and acceptance evaluation; vLLM/llama.cpp use the same compatible adapter where practical.
