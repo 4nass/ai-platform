@@ -140,9 +140,10 @@ def _auth_check(env: Mapping[str, str]) -> SecurityCheck:
 def _exposure_check(env: Mapping[str, str]) -> SecurityCheck:
     if not _truthy(env.get("AI_PLATFORM_REMOTE_ENABLED")):
         return _check(
-            "Network exposure policy", FAIL,
-            "remote exposure is disabled; the fail-closed default is not remote-ready",
+            "Network exposure policy", PASS,
+            "remote exposure is disabled; localhost-only mode is safe and ready for an explicit deployment decision",
             "Set AI_PLATFORM_REMOTE_ENABLED=true only after this report is GO",
+            blocking=False,
         )
     host = env.get("AI_PLATFORM_BIND_HOST", "127.0.0.1")
     if _loopback(host):

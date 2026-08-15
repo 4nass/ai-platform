@@ -23,7 +23,6 @@ def test_default_report_is_fail_closed(tmp_path: Path) -> None:
     assert {check.name for check in report.failures} >= {
         "Authenticated credentials",
         "Project registry",
-        "Network exposure policy",
         "Hard budgets",
         "Secrets retention",
     }
