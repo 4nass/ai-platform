@@ -874,6 +874,96 @@ def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:
         raise typer.Exit(1)
 
 
+@app.command(name="service-health")
+def service_health(
+    json_output: bool = typer.Option(False, "--json", help="Print a machine-readable report."),
+    env_file: Path = typer.Option(None, "--env-file", help="Load explicit KEY=VALUE service settings."),
+    readiness: bool = typer.Option(True, "--readiness/--no-readiness"),
+    liveness: bool = typer.Option(True, "--liveness/--no-liveness"),
+) -> None:
+    """Run local liveness/readiness probes without contacting a remote service."""
+    from core import service
+    try:
+        if env_file:
+            service.load_env_file(env_file)
+        config = service.ServiceConfig.from_env(ENGINE_ROOT)
+        report = service.health(config)
+    except (OSError, ValueError) as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
+    if json_output:
+        console.print(service.health_json(config))
+    else:
+        from rich.table import Table
+        table = Table(title="ai-platform service health")
+        table.add_column("scope"); table.add_column("status"); table.add_column("check"); table.add_column("detail")
+        checks = (("liveness", report.liveness) if liveness else ())
+        checks += (("readiness", report.readiness) if readiness else ())
+        for scope, entries in checks:
+            for check in entries:
+                style = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}[check.status]
+                table.add_row(scope, f"[{style}]{check.status}[/{style}]", check.name, check.detail)
+        console.print(table)
+    if readiness and not report.ready:
+        raise typer.Exit(1)
+
+
+@app.command(name="service-run")
+def service_run(
+    once: bool = typer.Option(False, "--once", help="Run one worker cycle and exit."),
+    env_file: Path = typer.Option(None, "--env-file", help="Load explicit KEY=VALUE service settings."),
+    log: Path = typer.Option(None, "--log", help="Append service logs to this file."),
+) -> None:
+    """Run the local durable worker with bounded restart backoff."""
+    from dataclasses import replace
+    from core import service
+    try:
+        if env_file:
+            service.load_env_file(env_file)
+        config = service.ServiceConfig.from_env(ENGINE_ROOT)
+        if log:
+            config = replace(config, log_path=log)
+        code = service.run_forever(config, once=once)
+    except (OSError, ValueError) as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1)
+    if code:
+        raise typer.Exit(code)
+
+
+@app.command()
+def backup(
+    destination: Path = typer.Option(None, "--destination", help="Backup directory (default: <engine>/backups)."),
+    keep: int = typer.Option(7, "--keep", min=1, help="Number of snapshots to retain."),
+) -> None:
+    """Create a WAL-aware, integrity-checked backup of engine databases."""
+    from core import backup as backup_store
+    try:
+        result = backup_store.create(ENGINE_ROOT, destination, keep=keep)
+    except (OSError, backup_store.BackupError) as exc:
+        console.print(f"[bold red]Backup failed:[/bold red] {exc}")
+        raise typer.Exit(1)
+    console.print(f"Backup created: [bold]{result.path}[/bold]")
+    console.print(f"Included: {', '.join(result.files) or 'none'}")
+    if result.skipped:
+        console.print(f"Skipped (not present): {', '.join(result.skipped)}")
+
+
+@app.command()
+def restore(
+    backup_path: Path = typer.Argument(..., help="Snapshot directory containing manifest.json."),
+    force: bool = typer.Option(False, "--force", help="Restore despite active jobs; stop service first."),
+) -> None:
+    """Restore checked SQLite snapshots; stop the service before invoking this command."""
+    from core import backup as backup_store
+    try:
+        restored = backup_store.restore(ENGINE_ROOT, backup_path, force=force)
+    except (OSError, backup_store.BackupError) as exc:
+        console.print(f"[bold red]Restore refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+    console.print(f"Restored: {', '.join(restored) or 'none'}")
+
+
 _STATE_STYLE = {
     "queued": "cyan",
     "running": "yellow",

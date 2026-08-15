@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily ai-platform SQLite backup
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=15m
+Persistent=true
+Unit=ai-platform-backup.service
+
+[Install]
+WantedBy=timers.target
