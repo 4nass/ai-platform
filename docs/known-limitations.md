@@ -16,7 +16,7 @@ The local engine is usable for one owner on one workstation. The blockers below 
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| OpenClaw tools/API are not implemented | Gateway has no narrow platform contract | [#30](https://github.com/4nass/ai-platform/issues/30) |
+| OpenClaw network gateway wiring is not deployed | Typed engine tools exist; TLS, rate limits and channel runtime remain deployment work | [#30](https://github.com/4nass/ai-platform/issues/30) |
 | No structured event stream/cancellation contract | Mobile clients cannot follow or stop a run robustly | [#29](https://github.com/4nass/ai-platform/issues/29) |
 | No configured CI preview provider | The engine contract is delivered, but a deployment provider must be wired and configured | [#34](https://github.com/4nass/ai-platform/issues/34) |
 | No remote base sync/delivery policy | Branches can start from stale local state | [#33](https://github.com/4nass/ai-platform/issues/33) |

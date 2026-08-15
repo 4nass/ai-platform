@@ -50,7 +50,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings are #45 |
 | P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate and shared audited executor delivered; concrete PR/preview integrations remain |
 | P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned; required by API/OpenClaw |
-| P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Planned; consumes #44 and #47 |
+| P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Engine delivered: versioned typed async tools and restart-safe contract; concrete gateway wiring/TLS remains #47/#49 |
 | P1 | Provider failover hardening | [#31](https://github.com/4nass/ai-platform/issues/31) | Planned |
 | P1 | Quality-aware routing | [#32](https://github.com/4nass/ai-platform/issues/32) | Planned |
 | P1 | Base synchronization and remote delivery | [#33](https://github.com/4nass/ai-platform/issues/33) | Engine delivered: pinned base, fetch/divergence policy and approval-only push guard; end-to-end PR delivery remains #30/#46/#47 |
