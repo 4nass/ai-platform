@@ -139,9 +139,9 @@ Failure, conflict, interruption or cleanup error may intentionally retain it. Co
 
 For the synchronous path, inspect the provider subprocess and terminal output. For jobs, run `ai-platform status <id>`; reconciliation marks an abandoned run `interrupted` once its heartbeat is stale (default 180 seconds). From there, `ai-platform resume <id>` continues it.
 
-### WSL-specific problems
+### Host-specific service profiles
 
-Use Linux-native Git, Python and uv for a repository inside WSL. Mixing Windows processes with WSL worktrees can keep handles open and break cleanup. The optional managed WSL service is documented in [service operations](service-operations.md).
+Use Linux-native Git, Python and uv for a repository inside WSL. Mixing Windows processes with WSL worktrees can keep handles open and break cleanup. The optional managed local user service is documented in [service operations](service-operations.md), with Linux/systemd, WSL2/systemd and macOS/launchd profiles.
 
 ## Remote warning
 

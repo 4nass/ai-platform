@@ -19,7 +19,7 @@ The current implementation is the local execution half of that loop. The remote 
 7. [Per-run previews](preview-environments.md) - immutable commits, authenticated URLs, TTL and cleanup.
 8. [Security model](security.md) - trust boundaries and enforcement layers.
 9. [Operations](operations.md) - how to run and troubleshoot it.
-10. [Managed service operations](service-operations.md) - WSL2 systemd, health, backups and recovery.
+10. [Managed local user service](service-operations.md) - Linux/systemd, WSL2/systemd, macOS/launchd, health, backups and recovery.
 
 ## Component documentation
 
@@ -38,7 +38,7 @@ The current implementation is the local execution half of that loop. The remote 
 | External actions | [Audited action executor](action-executor.md) | core/actions/executor.py, core/jobs/approvals.py |
 | Previews | [Per-run preview environments](preview-environments.md) | core/previews/manager.py, core/transport/http.py |
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
-| Managed runtime | [Service operations](service-operations.md) | `core/service.py`, `core/backup.py`, `deploy/systemd/` |
+| Managed runtime | [Service operations](service-operations.md) | `core/service.py`, `core/backup.py`, `deploy/` |
 
 ## Governance and history
 
