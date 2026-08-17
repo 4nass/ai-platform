@@ -289,17 +289,56 @@ def test_cancel_stops_a_queued_job(engine: Path) -> None:
     assert store.get(engine, job_id).state == store.CANCELLED
 
 
-def test_cancel_refuses_a_running_job_rather_than_pretending(engine: Path) -> None:
-    """Nothing can stop a run mid-DAG yet (issue #29). Marking the row
-    `cancelled` while provider calls kept spending quota would be a lie the
-    queue tells about itself."""
+def test_cancelling_a_running_job_requests_a_stop_rather_than_claiming_one(
+    engine: Path,
+) -> None:
+    """The row must not say `cancelled` while an agent is still holding a
+    subprocess. Only the worker that actually stopped can say that."""
     job_id = _submit(engine)
     store.claim(engine, job_id, worker_pid=1)
 
-    with pytest.raises(store.JobError, match="cannot be stopped mid-run"):
-        store.cancel(engine, job_id)
+    assert store.cancel(engine, job_id) is True
+    assert store.cancel(engine, job_id) is False, "the request is idempotent"
 
-    assert store.get(engine, job_id).state == store.RUNNING
+    job = store.get(engine, job_id)
+    assert job.state == store.CANCEL_REQUESTED
+    assert job.is_terminal is False, "still stopping is not finished"
+    assert store.cancellation_requested(engine, job_id) is True
+    assert store.is_cancelled(engine, job_id) is False
+    assert store.events_page(engine, job_id)["events"][-1]["event_type"] == "run.cancel_requested"
+
+
+def test_a_queued_job_has_nothing_to_stop_and_is_cancelled_outright(engine: Path) -> None:
+    job_id = _submit(engine)
+
+    assert store.cancel(engine, job_id) is True
+
+    assert store.get(engine, job_id).state == store.CANCELLED
+    assert store.is_cancelled(engine, job_id) is True
+
+
+def test_only_the_worker_completes_the_cancellation(engine: Path) -> None:
+    job_id = _submit(engine)
+    store.claim(engine, job_id, worker_pid=1)
+    store.cancel(engine, job_id)
+
+    store.transition(engine, job_id, store.CANCELLED, note="cancelled mid-run")
+
+    assert store.get(engine, job_id).state == store.CANCELLED
+    assert store.is_cancelled(engine, job_id) is True
+
+
+def test_a_run_that_finished_before_it_noticed_is_not_reported_cancelled(
+    engine: Path,
+) -> None:
+    """Untruth in the other direction: work that shipped did ship."""
+    job_id = _submit(engine)
+    store.claim(engine, job_id, worker_pid=1)
+    store.cancel(engine, job_id)
+
+    store.transition(engine, job_id, store.SUCCEEDED, note="done (cancellation arrived too late)")
+
+    assert store.get(engine, job_id).state == store.SUCCEEDED
 
 
 def test_cancel_reports_nothing_to_do_for_a_finished_job(engine: Path) -> None:
@@ -589,3 +628,16 @@ def test_a_pre_existing_database_gains_the_new_columns(engine: Path) -> None:
     # delivery identity nothing ever established
     assert old.idempotency_key == ""
     assert _deliver(engine).created is True
+
+def test_events_resume_from_cursor_without_duplicates(engine: Path) -> None:
+    job_id = _submit(engine)
+    first = store.events_page(engine, job_id, limit=1)
+    cursor = first["next_cursor"]
+    store.emit_event(engine, job_id, "stage.started", stage_id="backend", attempt=1,
+                     payload={"agent": "backend"})
+    page = store.events_page(engine, job_id, after=cursor, limit=10)
+    assert len(page["events"]) == 1
+    assert page["events"][0]["event_type"] == "stage.started"
+    assert page["events"][0]["stage_id"] == "backend"
+    assert page["events"][0]["payload"] == {"agent": "backend"}
+    assert store.events_page(engine, job_id, after=page["next_cursor"])["events"] == []

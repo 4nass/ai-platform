@@ -11,6 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+import os
+import signal
+import subprocess
+import threading
+import time
 
 PROMPTS_DIR = Path("prompts")
 
@@ -40,6 +45,7 @@ class AgentTask:
     model: str | None = None
     reasoning_effort: str | None = None
     complexity: str = "complex"
+    cancel_event: threading.Event | None = None
 
     def __post_init__(self) -> None:
         if self.engine_root is None:
@@ -96,6 +102,56 @@ class ProviderResult:
     summary: str
     raw: object = None
     usage: TokenUsage | None = None
+
+
+class ProviderCancelled(Exception):
+    """Provider subprocess was cooperatively cancelled."""
+
+
+def run_managed(cmd, *, cwd, timeout, cancel_event=None, **kwargs):
+    """Run a provider in its own process group and stop it safely on cancel."""
+    if kwargs.pop("capture_output", False):
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    proc = subprocess.Popen(cmd, cwd=cwd, start_new_session=(os.name != "nt"), **kwargs)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                _terminate_process_group(proc)
+                raise ProviderCancelled("provider cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_group(proc)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            try:
+                out, err = proc.communicate(timeout=min(0.2, remaining))
+                return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if proc.poll() is None:
+            _terminate_process_group(proc)
+
+
+def _terminate_process_group(proc):
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name != "nt":
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        else:
+            proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            if os.name != "nt":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
 
 
 class Provider(Protocol):
