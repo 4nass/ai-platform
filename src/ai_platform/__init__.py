@@ -858,12 +858,18 @@ def _decide(approval_id: int, *, approved: bool, note: str) -> None:
 
 @app.command()
 def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:
-    """Cancels a job that hasn't started executing yet."""
+    """Cancels a job, or asks a running one to stop."""
     from core.jobs import store
 
     try:
         if store.cancel(ENGINE_ROOT, job_id):
-            console.print(f"[bold]Job {job_id}[/bold] cancelled.")
+            if store.get(ENGINE_ROOT, job_id).state == store.CANCELLING:
+                console.print(
+                    f"[bold]Job {job_id}[/bold] asked to stop — it reports "
+                    f"[bold]cancelled[/bold] once its worker has actually stopped."
+                )
+            else:
+                console.print(f"[bold]Job {job_id}[/bold] cancelled.")
         else:
             console.print(
                 f"Job {job_id} already finished as "
@@ -1000,6 +1006,7 @@ _STATE_STYLE = {
     "queued": "cyan",
     "running": "yellow",
     "waiting_approval": "magenta",
+    "cancelling": "dim yellow",
     "succeeded": "green",
     "failed": "red",
     "cancelled": "dim",

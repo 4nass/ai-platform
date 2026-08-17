@@ -383,14 +383,19 @@ def test_cli_cancel_stops_a_queued_job(engine, tmp_path) -> None:
     assert store.get(engine, job_id).state == "cancelled"
 
 
-def test_cli_cancel_stops_a_running_job(engine, tmp_path) -> None:
+def test_cli_cancel_asks_a_running_job_to_stop(engine, tmp_path) -> None:
+    """`cancel` on a running job is a request, and says so — its worker still
+    has a provider subprocess to signal and worktrees to remove."""
     from core.jobs import store
 
     job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=1)
+
     result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
+
     assert result.exit_code == 0
-    assert store.get(engine, job_id).state == "cancelled"
+    assert store.get(engine, job_id).state == "cancelling"
+    assert "stop" in result.stdout.lower()
 
 
 def test_cli_reconciles_abandoned_jobs_on_a_read(engine, tmp_path) -> None:

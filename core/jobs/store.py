@@ -48,6 +48,20 @@ FAILED = "failed"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
 
+CANCELLING = "cancelling"
+"""Asked to stop, still stopping. The gap between the two is real work.
+
+Cancellation here is cooperative: the worker notices the request, the current
+provider call is signalled, worktrees are removed. None of that is instant, and
+a row that said `cancelled` the moment the request landed would be claiming
+something that had not happened yet — with an agent still holding a subprocess
+and spending quota behind it. That is the same lie this queue refused to tell
+back when it declined to cancel a running job at all.
+
+So the requester moves a running job to `cancelling`, and only the worker that
+actually stopped moves it to `cancelled`. A queued job has nothing to stop and
+goes straight across."""
+
 REJECTED = "rejected"
 """Not a job state — a `job_events` note recorded *against* an existing job
 when a submission was refused before becoming one. Kept out of `TRANSITIONS`
@@ -56,7 +70,7 @@ belongs on the job whose identifier was reused because that is where anyone
 investigating will look."""
 
 TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, CANCELLED, INTERRUPTED})
-ACTIVE_STATES = frozenset({QUEUED, RUNNING, WAITING_APPROVAL})
+ACTIVE_STATES = frozenset({QUEUED, RUNNING, WAITING_APPROVAL, CANCELLING})
 
 TRANSITIONS: dict[str, frozenset[str]] = {
     QUEUED: frozenset({RUNNING, CANCELLED}),
@@ -64,7 +78,14 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     # another run is a scheduling conflict, not a failure of this job (see
     # git_ops.exclusive_run_lock). Returning it to the queue is the difference
     # between a queue and a fire-once trigger.
-    RUNNING: frozenset({WAITING_APPROVAL, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED, QUEUED}),
+    RUNNING: frozenset({WAITING_APPROVAL, SUCCEEDED, FAILED, CANCELLED, CANCELLING, INTERRUPTED, QUEUED}),
+    # A run that had already finished by the time it noticed the request
+    # finished — reporting `cancelled` for work that shipped would be the same
+    # kind of untruth in the other direction. Interrupted stays reachable so a
+    # worker killed mid-cancellation is reconciled like any other dead worker.
+    CANCELLING: frozenset({CANCELLED, SUCCEEDED, FAILED, INTERRUPTED}),
+    # `queued` is the approval path: a job released by an approval goes back to
+    # the queue for a worker to claim (core.transport.http, #47).
     WAITING_APPROVAL: frozenset({RUNNING, QUEUED, CANCELLED, FAILED, INTERRUPTED}),
     SUCCEEDED: frozenset(),
     FAILED: frozenset(),
@@ -178,8 +199,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
 """
 
 
-class CancellationRequested(RuntimeError):
-    """A run was cancelled cooperatively; late provider output is discarded."""
+class CancellationRequested(BaseException):
+    """A run was cancelled cooperatively; late provider output is discarded.
+
+    `BaseException`, not `Exception`, for the same reason `KeyboardInterrupt`
+    and `asyncio.CancelledError` are: this is not a failure some layer might
+    reasonably handle and carry on from, it is the instruction to unwind. As an
+    `Exception` it was caught by the broad handlers that turn a stage's
+    problems into a failed `StageResult`, so cancelling mid-stage reported
+    "failed: run cancellation requested" and the run kept going — the request
+    was recorded as an error in the work it was cancelling.
+    """
 
 
 class JobError(Exception):
@@ -754,18 +784,47 @@ def resume(engine_root: Path, job_id: int) -> bool:
     )
 
 
+def cancellation_requested(engine_root: Path, job_id: int) -> bool:
+    """Whether someone has asked this job to stop — not whether it has.
+
+    What a worker's watcher needs to know, and the reason this is not
+    `state == CANCELLED`: between the request and the stop the job is
+    `cancelling`, and that is exactly the window the watcher exists to close.
+    """
+    with connect(engine_root) as con:
+        row = con.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return bool(row and row["state"] in {CANCELLING, CANCELLED})
+
+
 def is_cancelled(engine_root: Path, job_id: int) -> bool:
+    """Whether this job has actually stopped."""
     with connect(engine_root) as con:
         row = con.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return bool(row and row["state"] == CANCELLED)
 
 
 def cancel(engine_root: Path, job_id: int) -> bool:
-    """Idempotently requests cancellation for queued or running work."""
+    """Requests cancellation, idempotently, and says so honestly.
+
+    A queued job has nothing running behind it, so it is cancelled here and
+    now. A running one is only *asked*: its worker still has a provider
+    subprocess to signal and worktrees to remove, and until that happens the
+    row says `cancelling` rather than claiming a stop that has not occurred.
+    """
     job = get(engine_root, job_id)
-    if job.is_terminal or job.state == CANCELLED:
+    if job.is_terminal or job.state == CANCELLING:
         return False
-    return transition(engine_root, job_id, CANCELLED, note="cancellation requested", event_type="run.cancelled", payload={"requested": True})
+    if job.state == RUNNING:
+        return transition(
+            engine_root, job_id, CANCELLING,
+            note="cancellation requested", event_type="run.cancelling",
+            payload={"requested": True},
+        )
+    return transition(
+        engine_root, job_id, CANCELLED,
+        note="cancelled before execution", event_type="run.cancelled",
+        payload={"requested": True},
+    )
 
 
 def purge_older_than(engine_root: Path, *, days: float) -> int:

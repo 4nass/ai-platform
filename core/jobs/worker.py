@@ -42,7 +42,7 @@ class _CancellationWatcher:
     def _watch(self):
         while not self._stop.wait(self.interval):
             try:
-                if store.is_cancelled(self.engine_root, self.job_id):
+                if store.cancellation_requested(self.engine_root, self.job_id):
                     self.event.set()
                     return
             except Exception:
@@ -151,6 +151,13 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
                 emit_event=emit,
             )
     except store.CancellationRequested:
+        # Only now is `cancelled` true: the run has unwound, its provider
+        # subprocess is gone and its worktrees are removed. Whoever asked moved
+        # the row to `cancelling` and deliberately left this half undone.
+        store.transition(
+            engine_root, job_id, store.CANCELLED,
+            note="cancelled mid-run", event_type="run.cancelled",
+        )
         return store.CANCELLED
     except budget.BudgetExceeded as exc:
         # Paused, not failed. The run is well-formed and its work so far is on
@@ -183,8 +190,17 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
         )
         raise
 
-    if store.is_cancelled(engine_root, job_id):
-        return store.CANCELLED
+    if store.cancellation_requested(engine_root, job_id):
+        # Asked to stop, but it had already finished — `cancelling` resolves to
+        # the outcome the run actually reached rather than to `cancelled`.
+        state = store.SUCCEEDED if report.summary == "done" else store.FAILED
+        store.transition(
+            engine_root, job_id, state,
+            note=f"{report.summary} (cancellation arrived too late)",
+            branch=report.branch, payload={"summary": report.summary, "cancelled_too_late": True},
+        )
+        _record_outcome(engine_root, job_id, report)
+        return state
     state = store.SUCCEEDED if report.summary == "done" else store.FAILED
     store.transition(
         engine_root,
