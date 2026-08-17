@@ -394,7 +394,7 @@ def test_cli_cancel_asks_a_running_job_to_stop(engine, tmp_path) -> None:
     result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
 
     assert result.exit_code == 0
-    assert store.get(engine, job_id).state == "cancelling"
+    assert store.get(engine, job_id).state == "cancel_requested"
     assert "stop" in result.stdout.lower()
 
 

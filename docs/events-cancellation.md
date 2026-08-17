@@ -9,7 +9,7 @@ timestamp, and a JSON payload.
 Stable event types are `run.queued`, `run.started`, `context.selected`,
 `provider.selected`, `stage.started`, `stage.completed`, `approval.required`,
 `tests.completed`, `review.completed`, `run.completed`, `run.failed`,
-`run.cancelling` and `run.cancelled`. State transitions remain the source of
+`run.cancel_requested` and `run.cancelled`. State transitions remain the source of
 truth; event writes are transactional with the transition.
 
 ## Cancellation is a request, then a stop
@@ -17,7 +17,7 @@ truth; event writes are transactional with the transition.
 Those are two moments, and the row distinguishes them.
 
 `cancel` on a **queued** job cancels it: nothing is running, so there is nothing
-to wait for. `cancel` on a **running** job moves it to `cancelling` — its worker
+to wait for. `cancel` on a **running** job moves it to `cancel_requested` — its worker
 still has a provider subprocess to signal and worktrees to remove, and a row
 claiming `cancelled` before any of that happened would be asserting a stop that
 has not occurred, with quota still being spent behind it. Only the worker that
@@ -25,7 +25,7 @@ actually unwound moves the job to `cancelled`. A run that had already finished
 by the time it noticed resolves to the outcome it really reached, not to
 `cancelled`.
 
-`cancellation_requested()` is what a worker's watcher asks (`cancelling` or
+`cancellation_requested()` is what a worker's watcher asks (`cancel_requested` or
 `cancelled`); `is_cancelled()` is whether it has actually stopped. The request
 is idempotent.
 

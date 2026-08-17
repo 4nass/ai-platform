@@ -153,7 +153,7 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
     except store.CancellationRequested:
         # Only now is `cancelled` true: the run has unwound, its provider
         # subprocess is gone and its worktrees are removed. Whoever asked moved
-        # the row to `cancelling` and deliberately left this half undone.
+        # the row to `cancel_requested` and deliberately left this half undone.
         store.transition(
             engine_root, job_id, store.CANCELLED,
             note="cancelled mid-run", event_type="run.cancelled",
@@ -191,7 +191,7 @@ def run_job(engine_root: Path, job_id: int, *, claim: bool = True) -> str:
         raise
 
     if store.cancellation_requested(engine_root, job_id):
-        # Asked to stop, but it had already finished — `cancelling` resolves to
+        # Asked to stop, but it had already finished — `cancel_requested` resolves to
         # the outcome the run actually reached rather than to `cancelled`.
         state = store.SUCCEEDED if report.summary == "done" else store.FAILED
         store.transition(
