@@ -31,6 +31,7 @@ from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prom
 
 TIMEOUT_SECONDS = 900
 READS_FILES = True  # `codex exec` opens and edits files itself
+REPORTS_COST = False  # the CLI reports tokens, never a price for the call
 
 # The roles whose prompts say they produce a report rather than a modification
 # (see prompts/reviewer.md, prompts/security.md, prompts/decomposer.md) are
@@ -189,7 +190,7 @@ def run(task: AgentTask) -> ProviderResult:
                 cwd=task.repo_root,
                 capture_output=True,
                 text=True,
-                timeout=TIMEOUT_SECONDS,
+                timeout=(min(TIMEOUT_SECONDS, task.timeout_seconds) if task.timeout_seconds else TIMEOUT_SECONDS),
                 # Without this codex blocks waiting on stdin ("Reading
                 # additional input from stdin..."), which in a worker thread
                 # is an invisible hang rather than an error.

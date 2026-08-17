@@ -245,3 +245,87 @@ def test_the_report_says_so_when_nothing_is_capped(engine: Path) -> None:
     budget.settle(engine, reservation, 250)
 
     assert "no limit declared" in budget.report(engine, Limits(), run_key="r1").line()
+
+
+def test_time_reservations_bound_concurrent_runs(engine: Path) -> None:
+    limits = Limits(max_run_seconds=60)
+    budget.reserve(engine, run_key="r", estimated=1, estimated_seconds=50)
+    decision = budget.admit(
+        engine, limits, run_key="r", estimated=1, estimated_seconds=20, mode=budget.STRICT
+    )
+    assert decision.allowed is False
+    assert decision.limit == "max_run_seconds"
+
+
+def test_stage_time_is_scoped_to_stage(engine: Path) -> None:
+    limits = Limits(max_stage_seconds=30)
+    budget.reserve(engine, run_key="r", stage="build", estimated=1, estimated_seconds=25)
+    assert budget.admit(
+        engine, limits, run_key="r", stage="build", estimated=1,
+        estimated_seconds=10, mode=budget.STRICT
+    ).allowed is False
+    assert budget.admit(
+        engine, limits, run_key="r", stage="test", estimated=1,
+        estimated_seconds=10, mode=budget.STRICT
+    ).allowed is True
+
+
+def test_a_currency_ceiling_does_not_refuse_a_call_nobody_can_price(engine: Path) -> None:
+    """No provider here prices a request from its prompt.
+
+    So an admission that demanded a cost estimate demanded something that never
+    arrives, and a declared USD ceiling refused every call in strict mode —
+    which is not a budget, it is an outage.
+    """
+    for mode in (budget.SOFT, budget.STRICT, budget.LOCAL_FALLBACK):
+        decision = budget.admit(
+            engine, Limits(max_run_cost_usd=1), run_key=f"r-{mode}", estimated=1, mode=mode
+        )
+        assert decision.allowed is True, f"{mode} refused a call it could not price"
+
+
+def test_a_provider_that_should_have_priced_a_call_and_did_not_fails_closed(engine: Path) -> None:
+    """The anomaly worth refusing: cost was expected, and none came back.
+
+    Counting that call at zero would let the ceiling be crossed by a total it
+    already knows is short, so strict mode stops rather than undercount.
+    """
+    reservation = budget.reserve(engine, run_key="r", estimated=1, cost_expected=True)
+    budget.settle(engine, reservation, 1, actual_cost_usd=None)
+
+    decision = budget.admit(
+        engine, Limits(max_run_cost_usd=1), run_key="r", estimated=1, mode=budget.STRICT
+    )
+    assert decision.allowed is False
+    assert decision.limit == "currency_unknown"
+
+
+def test_a_provider_that_cannot_price_a_call_is_not_an_anomaly(engine: Path) -> None:
+    """`codex_cli` reports tokens and no price. That is how it works, not a gap."""
+    reservation = budget.reserve(engine, run_key="r", estimated=1, cost_expected=False)
+    budget.settle(engine, reservation, 1, actual_cost_usd=None)
+
+    assert budget.admit(
+        engine, Limits(max_run_cost_usd=1), run_key="r", estimated=1, mode=budget.STRICT
+    ).allowed is True
+    assert budget.validate(
+        engine, Limits(max_run_cost_usd=1), run_key="r", mode=budget.STRICT
+    ).allowed is True
+
+
+def test_soft_currency_budget_reports_unknown_cost(engine: Path) -> None:
+    reservation = budget.reserve(engine, run_key="r", estimated=1, cost_expected=True)
+    budget.settle(engine, reservation, 1, actual_seconds=2.5)
+    report = budget.report(engine, Limits(max_run_cost_usd=1), run_key="r")
+    assert report.cost_unknown is True
+    assert "unknown" in report.line()
+
+
+def test_currency_settlement_is_checked_against_the_ceiling(engine: Path) -> None:
+    reservation = budget.reserve(engine, run_key="r", estimated=1, estimated_cost_usd=0.5)
+    budget.settle(engine, reservation, 1, actual_cost_usd=1.25)
+    decision = budget.validate(
+        engine, Limits(max_run_cost_usd=1), run_key="r", mode=budget.STRICT
+    )
+    assert decision.allowed is False
+    assert decision.limit == "max_run_cost_usd"

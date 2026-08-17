@@ -49,7 +49,11 @@ context:
 # project that needs different relevance floors without editing the shipped
 # preset files. Uncomment and adjust only if you have a specific reason to.
 budgets:
-  # Hard spending limits, checked before each provider call (issue #27).
+  # Hard spending limits, checked before and after each provider call (issues #27/#45).
+  # Time is wall-clock provider time; the tightest ceiling left becomes the
+  # deadline handed to the provider. Currency is USD and is checked against
+  # settled spend — see docs/budget-policy.md, and note that a USD ceiling
+  # constrains nothing for a provider that cannot price its own calls.
   #   soft           - record and report, never block (the interactive default)
   #   strict         - refuse the call and pause the run for a human decision
   #   local_fallback - move the work to a local model, or wait if none is
@@ -64,6 +68,12 @@ budgets:
       max_stage_tokens: 900000
       max_run_calls: 60
       max_window_tokens: 16000000
+      # Optional ceilings (zero means unlimited):
+      # max_run_seconds: 3600
+      # max_stage_seconds: 900
+      # max_run_cost_usd: 25
+      # max_stage_cost_usd: 10
+      # max_window_cost_usd: 100
       window_hours: 24
 
 

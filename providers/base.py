@@ -40,6 +40,7 @@ class AgentTask:
     model: str | None = None
     reasoning_effort: str | None = None
     complexity: str = "complex"
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.engine_root is None:
@@ -109,6 +110,22 @@ class Provider(Protocol):
     it the content is the context.
     """
 
+    REPORTS_COST: bool
+    """Whether this provider returns a per-call price in `TokenUsage.cost_usd`.
+
+    A currency budget can only mean something for a provider that answers the
+    question. Flat-rate subscription CLIs mostly do not: what a single `codex
+    exec` call "cost" is not a figure the CLI has, and the engine has no price
+    table to invent one from — which is the same reason routing here ranks on
+    tokens rather than dollars.
+
+    So this is not a detail of usage parsing, it is what makes a USD ceiling
+    enforceable or not. Declared here so the gate can tell a provider that
+    *cannot* price a call apart from one that should have and didn't; the
+    second is an anomaly worth failing closed on, the first is just how that
+    provider works.
+    """
+
     def run(self, task: AgentTask) -> ProviderResult: ...
 
 
@@ -117,6 +134,13 @@ def reads_files(provider: object) -> bool:
     to have no disk access, so it gets the full content rather than a map of
     paths it may not be able to open."""
     return bool(getattr(provider, "READS_FILES", False))
+
+
+def reports_cost(provider: object) -> bool:
+    """Conservative default in the other direction: an undeclared provider is
+    assumed unable to price a call, so a currency ceiling does not silently
+    treat its silence as an anomaly."""
+    return bool(getattr(provider, "REPORTS_COST", False))
 
 
 def load_role_prompt(repo_root: Path, agent: str) -> str:

@@ -22,7 +22,7 @@ from core.jobs import budget
 from core.orchestrator import router
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
-from providers.base import AgentTask, ProviderResult, reads_files
+from providers.base import AgentTask, ProviderResult, reads_files, reports_cost
 from providers.claude_code import adapter as claude_code
 from providers.codex_cli import adapter as codex_cli
 from providers.openai_api import adapter as openai_api
@@ -149,16 +149,25 @@ def run_task(
     # --- the budget gate. Nothing below reaches a provider without it. ---
     limits = budget_limits if budget_limits is not None else budget.Limits()
     reservation, estimated = None, 0
+    estimated_seconds = 0.0
     if limits.declared and (key := run_key or _run_key(recorder)):
         mode = platform_config.budget_mode if platform_config is not None else budget.SOFT
         estimated = budget.estimate_tokens(description, agent_task.context_render)
-        # `admission`, not `decision`: the router's decision is still live here
+        estimated_seconds = budget.duration_estimate(limits)
+        # admission is separate from the router decision: the router's decision is still live here
         # and is read further down for model, effort and routing reason.
         admission = budget.admit(
-            engine_root, limits, run_key=key, estimated=estimated, mode=mode
+            engine_root, limits, run_key=key, estimated=estimated, mode=mode,
+            stage=stage_id or "", estimated_seconds=estimated_seconds
         )
         if not admission.allowed:
             raise budget.BudgetExceeded(admission)
+        # Read the deadline *before* reserving: what bounds this call is the
+        # budget everything else has left it, not the slice it is about to hold
+        # for itself.
+        deadline = budget.remaining_seconds(
+            engine_root, limits, run_key=key, stage=stage_id or ""
+        )
         reservation = budget.reserve(
             engine_root,
             run_key=key,
@@ -166,7 +175,11 @@ def run_task(
             stage=stage_id or "",
             agent=agent,
             provider=provider_name,
+            estimated_seconds=estimated_seconds,
+            cost_expected=reports_cost(provider),
         )
+        if deadline > 0:
+            agent_task.timeout_seconds = deadline
 
     started_at = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()
@@ -186,7 +199,10 @@ def run_task(
         # errored after processing a 200k-token prompt spent those tokens, and
         # making failures free is precisely backwards for a loop that retries
         # them.
-        budget.settle(engine_root, reservation, _spent(result, estimated))
+        usage = result.usage
+        actual_cost = usage.cost_usd if usage is not None else None
+        budget.settle(engine_root, reservation, _spent(result, estimated),
+                      actual_seconds=duration_ms / 1000.0, actual_cost_usd=actual_cost)
 
     if recorder is not None:
         recorder.record_call(
@@ -210,6 +226,10 @@ def run_task(
             # can't tell you what a given call was actually sent.
             metadata=_call_metadata(context, provider_reads_files, result, complexity),
         )
+    if reservation is not None:
+        final = budget.validate(engine_root, limits, run_key=key, stage=stage_id or "", mode=mode)
+        if not final.allowed and mode != budget.SOFT:
+            raise budget.BudgetExceeded(final)
     return result
 
 

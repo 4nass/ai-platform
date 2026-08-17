@@ -82,6 +82,14 @@ away the moment the provider reports what it actually produced; until then, a
 budget that counted only the prompt would be blind to the larger half of many
 calls."""
 
+DEFAULT_CALL_SECONDS = 60.0
+"""Wall-clock held for one call before it runs, when a time ceiling exists.
+
+Same shape of guess as `DEFAULT_OUTPUT_RESERVE`, and reconciled the same way:
+what it buys is that two concurrent stages cannot each start believing the
+whole remaining time is theirs. It is deliberately *not* the deadline for the
+call — see `remaining_seconds`."""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reservations (
   id INTEGER PRIMARY KEY,
@@ -91,6 +99,11 @@ CREATE TABLE IF NOT EXISTS reservations (
   provider   TEXT NOT NULL DEFAULT '',
   estimated  INTEGER NOT NULL,
   actual     INTEGER,
+  estimated_seconds REAL NOT NULL DEFAULT 0,
+  actual_seconds REAL,
+  estimated_cost_usd REAL,
+  actual_cost_usd REAL,
+  cost_expected INTEGER NOT NULL DEFAULT 0,
   state      TEXT NOT NULL,
   created_at TEXT NOT NULL,
   settled_at TEXT
@@ -133,12 +146,17 @@ class Limits:
     max_stage_tokens: int = 0
     max_run_calls: int = 0
     max_window_tokens: int = 0
+    max_run_seconds: float = 0
+    max_stage_seconds: float = 0
+    max_run_cost_usd: float = 0
+    max_stage_cost_usd: float = 0
+    max_window_cost_usd: float = 0
     window_hours: float = 24.0
 
     @property
     def declared(self) -> bool:
         return any(
-            (self.max_run_tokens, self.max_stage_tokens, self.max_run_calls, self.max_window_tokens)
+            (self.max_run_tokens, self.max_stage_tokens, self.max_run_calls, self.max_window_tokens, self.max_run_seconds, self.max_stage_seconds, self.max_run_cost_usd, self.max_stage_cost_usd, self.max_window_cost_usd)
         )
 
 
@@ -155,6 +173,13 @@ class Usage:
     run_tokens: int = 0
     run_calls: int = 0
     window_tokens: int = 0
+    run_seconds: float = 0.0
+    stage_seconds: float = 0.0
+    window_seconds: float = 0.0
+    run_cost_usd: float = 0.0
+    stage_cost_usd: float = 0.0
+    window_cost_usd: float = 0.0
+    cost_unknown: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +193,8 @@ class Decision:
     estimated: int = 0
     would_total: int = 0
     ceiling: int = 0
+    estimated_seconds: float = 0.0
+    estimated_cost_usd: float | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -178,6 +205,8 @@ class Decision:
             "would_total": self.would_total,
             "ceiling": self.ceiling,
             "reason": self.reason,
+            "estimated_seconds": self.estimated_seconds,
+            "estimated_cost_usd": self.estimated_cost_usd,
         }
 
 
@@ -196,6 +225,15 @@ class Report:
     limit: int = 0
     mode: str = SOFT
     decisions: list = field(default_factory=list)
+    reserved_seconds: float = 0.0
+    consumed_seconds: float = 0.0
+    reserved_cost_usd: float = 0.0
+    consumed_cost_usd: float = 0.0
+    cost_unknown: bool = False
+    seconds_limit: float = 0.0
+    cost_limit_usd: float = 0.0
+    stage_cost_limit_usd: float = 0.0
+    window_cost_limit_usd: float = 0.0
 
     @property
     def remaining(self) -> int:
@@ -203,11 +241,28 @@ class Report:
 
     def line(self) -> str:
         if not self.limit:
-            return f"{self.consumed:,} tokens over {self.calls} calls (no limit declared)"
-        return (
-            f"{self.consumed:,} of {self.limit:,} tokens over {self.calls} calls "
-            f"({self.remaining:,} left, {self.reserved:,} reserved, mode {self.mode})"
-        )
+            base = f"{self.consumed:,} tokens over {self.calls} calls (no limit declared)"
+        else:
+            base = (
+                f"{self.consumed:,} of {self.limit:,} tokens over {self.calls} calls "
+                f"({self.remaining:,} left, {self.reserved:,} reserved, mode {self.mode})"
+            )
+        parts = []
+        if self.seconds_limit:
+            parts.append(f"{self.consumed_seconds:.1f}/{self.seconds_limit:.1f}s")
+        if self.cost_limit_usd or self.stage_cost_limit_usd or self.window_cost_limit_usd:
+            value = "unknown" if self.cost_unknown else f"USD {self.consumed_cost_usd:.4f}"
+            ceilings = [v for v in (self.cost_limit_usd, self.stage_cost_limit_usd, self.window_cost_limit_usd) if v]
+            parts.append(f"{value}/USD {max(ceilings):.4f}")
+        return base + (f"; {'; '.join(parts)}" if parts else "")
+
+    @property
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.seconds_limit - self.consumed_seconds) if self.seconds_limit else 0.0
+
+    @property
+    def remaining_cost_usd(self) -> float:
+        return max(0.0, self.cost_limit_usd - self.consumed_cost_usd) if self.cost_limit_usd else 0.0
 
 
 def estimate_tokens(*texts: str, output_reserve: int = DEFAULT_OUTPUT_RESERVE) -> int:
@@ -219,13 +274,25 @@ def estimate_tokens(*texts: str, output_reserve: int = DEFAULT_OUTPUT_RESERVE) -
 
 def _ensure(con: sqlite3.Connection) -> None:
     con.executescript(SCHEMA)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(reservations)")}
+    for name, definition in (("estimated_seconds", "REAL NOT NULL DEFAULT 0"),
+                             ("actual_seconds", "REAL"),
+                             ("estimated_cost_usd", "REAL"),
+                             ("actual_cost_usd", "REAL"),
+                             ("cost_expected", "INTEGER NOT NULL DEFAULT 0")):
+        if name not in columns:
+            con.execute(f"ALTER TABLE reservations ADD COLUMN {name} {definition}")
+
+
+def _currency_capped(limits: Limits) -> bool:
+    return bool(limits.max_run_cost_usd or limits.max_stage_cost_usd or limits.max_window_cost_usd)
 
 
 def _window_start(hours: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
-def usage(engine_root: Path, limits: Limits, *, run_key: str) -> Usage:
+def usage(engine_root: Path, limits: Limits, *, run_key: str, stage: str = "") -> Usage:
     """What this run and this window have committed so far.
 
     `COALESCE(actual, estimated)` is what makes held and settled reservations
@@ -236,19 +303,38 @@ def usage(engine_root: Path, limits: Limits, *, run_key: str) -> Usage:
     with connect(engine_root) as con:
         _ensure(con)
         run = con.execute(
-            "SELECT COALESCE(SUM(COALESCE(actual, estimated)), 0) AS tokens, COUNT(*) AS calls"
+            "SELECT COALESCE(SUM(COALESCE(actual, estimated)), 0) AS tokens, COUNT(*) AS calls,"
+            " COALESCE(SUM(COALESCE(actual_seconds, estimated_seconds)), 0) AS seconds,"
+            " COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0) AS cost,"
+            # Only a call that was *expected* to price itself counts as unknown.
+            # A provider that cannot price a call (see providers.base.
+            # REPORTS_COST) reports nothing by design, and treating that as a
+            # gap would make a currency ceiling refuse every run it touched.
+            " SUM(CASE WHEN cost_expected = 1 AND state = ? AND actual_cost_usd IS NULL"
+            "          THEN 1 ELSE 0 END) AS unknown"
             " FROM reservations WHERE run_key = ? AND state <> ?",
-            (run_key, RELEASED),
+            (SETTLED, run_key, RELEASED),
+        ).fetchone()
+        stage_row = con.execute(
+            "SELECT COALESCE(SUM(COALESCE(actual_seconds, estimated_seconds)), 0) AS seconds,"
+            " COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0) AS cost"
+            " FROM reservations WHERE run_key = ? AND stage = ? AND state <> ?",
+            (run_key, stage or "", RELEASED),
         ).fetchone()
         window = con.execute(
-            "SELECT COALESCE(SUM(COALESCE(actual, estimated)), 0) AS tokens"
+            "SELECT COALESCE(SUM(COALESCE(actual, estimated)), 0) AS tokens,"
+            " COALESCE(SUM(COALESCE(actual_seconds, estimated_seconds)), 0) AS seconds,"
+            " COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0) AS cost"
             " FROM reservations WHERE state <> ? AND created_at >= ?",
             (RELEASED, _window_start(limits.window_hours)),
         ).fetchone()
     return Usage(
-        run_tokens=int(run["tokens"]),
-        run_calls=int(run["calls"]),
+        run_tokens=int(run["tokens"]), run_calls=int(run["calls"]),
         window_tokens=int(window["tokens"]),
+        run_seconds=float(run["seconds"] or 0), stage_seconds=float(stage_row["seconds"] or 0),
+        window_seconds=float(window["seconds"] or 0),
+        run_cost_usd=float(run["cost"] or 0), stage_cost_usd=float(stage_row["cost"] or 0),
+        window_cost_usd=float(window["cost"] or 0), cost_unknown=bool(run["unknown"] or 0),
     )
 
 
@@ -259,6 +345,9 @@ def admit(
     run_key: str,
     estimated: int,
     mode: str = SOFT,
+    stage: str = "",
+    estimated_seconds: float = 0.0,
+    estimated_cost_usd: float | None = None,
 ) -> Decision:
     """Decides whether one call may be made, without making it.
 
@@ -269,14 +358,33 @@ def admit(
     if mode not in MODES:
         raise ValueError(f"Unknown budget mode {mode!r}. Valid: {', '.join(MODES)}")
     if not limits.declared:
-        return Decision(allowed=True, mode=mode, reason="no budget declared", estimated=estimated)
+        return Decision(allowed=True, mode=mode, reason="no budget declared", estimated=estimated,
+                        estimated_seconds=estimated_seconds, estimated_cost_usd=estimated_cost_usd)
 
-    current = usage(engine_root, limits, run_key=run_key)
+    current = usage(engine_root, limits, run_key=run_key, stage=stage)
+
+    # Fail closed on a *missing* price, never on an unknowable one. What a call
+    # will cost cannot be known before it is made — no provider here prices a
+    # request from its prompt — so refusing every call that arrives without an
+    # estimate refuses every call, which is what this used to do. What can be
+    # known is what already settled, and a call that was expected to report its
+    # price and came back without one is a real anomaly: the ceiling would be
+    # counting against a total it knows to be short.
+    if _currency_capped(limits) and current.cost_unknown and mode != SOFT:
+        return Decision(allowed=False, mode=mode, limit="currency_unknown", estimated=estimated,
+                        estimated_seconds=estimated_seconds,
+                        reason="a settled call that should have reported its price did not; "
+                               "strict currency budgets fail closed rather than undercount")
     checks = (
         ("max_stage_tokens", estimated, limits.max_stage_tokens),
         ("max_run_tokens", current.run_tokens + estimated, limits.max_run_tokens),
         ("max_run_calls", current.run_calls + 1, limits.max_run_calls),
         ("max_window_tokens", current.window_tokens + estimated, limits.max_window_tokens),
+        ("max_stage_seconds", current.stage_seconds + estimated_seconds, limits.max_stage_seconds),
+        ("max_run_seconds", current.run_seconds + estimated_seconds, limits.max_run_seconds),
+        ("max_stage_cost_usd", current.stage_cost_usd + (estimated_cost_usd or 0), limits.max_stage_cost_usd),
+        ("max_run_cost_usd", current.run_cost_usd + (estimated_cost_usd or 0), limits.max_run_cost_usd),
+        ("max_window_cost_usd", current.window_cost_usd + (estimated_cost_usd or 0), limits.max_window_cost_usd),
     )
     for name, would_total, ceiling in checks:
         if ceiling and would_total > ceiling:
@@ -287,6 +395,8 @@ def admit(
                 estimated=estimated,
                 would_total=would_total,
                 ceiling=ceiling,
+                estimated_seconds=estimated_seconds,
+                estimated_cost_usd=estimated_cost_usd,
                 reason=(
                     f"{name} would reach {would_total:,} of {ceiling:,} "
                     f"(this call is estimated at {estimated:,} tokens)"
@@ -300,7 +410,64 @@ def admit(
         would_total=current.run_tokens + estimated,
         ceiling=limits.max_run_tokens,
         reason="within budget",
+        estimated_seconds=estimated_seconds,
+        estimated_cost_usd=estimated_cost_usd,
     )
+
+
+def duration_estimate(limits: Limits, *, default: float = DEFAULT_CALL_SECONDS) -> float:
+    """How much wall-clock to hold for a call that has not run yet.
+
+    A reservation, not a deadline — the two were the same value once, and that
+    made a generous run ceiling *shorten* every call: reserving 60s meant
+    timing the provider out at 60s no matter how much budget was left. What
+    bounds a call is `remaining_seconds`; this only decides how much capacity
+    two concurrent stages each hold while they run.
+    """
+    ceilings = [value for value in (limits.max_stage_seconds, limits.max_run_seconds) if value]
+    return min([default, *ceilings]) if ceilings else 0.0
+
+
+def remaining_seconds(engine_root: Path, limits: Limits, *, run_key: str, stage: str = "") -> float:
+    """Wall-clock left before the tightest declared time ceiling is crossed.
+
+    This is the honest deadline for the next call: everything already held or
+    settled has been counted, and what is left is what this call may take. Zero
+    means no time ceiling is declared — the caller keeps its own default.
+    """
+    ceilings = [value for value in (limits.max_stage_seconds, limits.max_run_seconds) if value]
+    if not ceilings:
+        return 0.0
+    current = usage(engine_root, limits, run_key=run_key, stage=stage)
+    headroom = [
+        limit - consumed
+        for limit, consumed in (
+            (limits.max_stage_seconds, current.stage_seconds),
+            (limits.max_run_seconds, current.run_seconds),
+        )
+        if limit
+    ]
+    return max(0.0, min(headroom))
+
+
+def validate(engine_root: Path, limits: Limits, *, run_key: str, stage: str = "",
+             mode: str = SOFT) -> Decision:
+    current = usage(engine_root, limits, run_key=run_key, stage=stage)
+    if any((limits.max_run_cost_usd, limits.max_stage_cost_usd, limits.max_window_cost_usd)) and current.cost_unknown and mode != SOFT:
+        return Decision(False, mode=mode, limit="currency_unknown",
+                        reason="provider cost is unknown; budget failed closed")
+    checks = (
+        ("max_stage_seconds", current.stage_seconds, limits.max_stage_seconds),
+        ("max_run_seconds", current.run_seconds, limits.max_run_seconds),
+        ("max_stage_cost_usd", current.stage_cost_usd, limits.max_stage_cost_usd),
+        ("max_run_cost_usd", current.run_cost_usd, limits.max_run_cost_usd),
+        ("max_window_cost_usd", current.window_cost_usd, limits.max_window_cost_usd),
+    )
+    for name, total, ceiling in checks:
+        if ceiling and total > ceiling:
+            return Decision(False, mode=mode, limit=name, would_total=total, ceiling=ceiling,
+                            reason=f"{name} consumed {total:.3f} of {ceiling:.3f}")
+    return Decision(True, mode=mode, reason="settled usage within budget")
 
 
 def reserve(
@@ -311,20 +478,32 @@ def reserve(
     stage: str = "",
     agent: str = "",
     provider: str = "",
+    estimated_seconds: float = 0.0,
+    estimated_cost_usd: float | None = None,
+    cost_expected: bool = False,
 ) -> int:
     """Commits capacity for a call that is about to be made, and returns the
-    reservation id the caller must later settle or release."""
+    reservation id the caller must later settle or release.
+
+    `cost_expected` records whether this provider prices its own calls, at the
+    moment the provider is known. Storing it on the row rather than looking it
+    up later keeps the judgement attached to the call it was made for: which
+    provider served a stage can change between runs, and a settled reservation
+    has to stay readable as the thing it was.
+    """
     with connect(engine_root) as con:
         _ensure(con)
         cursor = con.execute(
-            "INSERT INTO reservations(run_key, stage, agent, provider, estimated, state, created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (run_key, stage, agent, provider, estimated, HELD, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO reservations(run_key, stage, agent, provider, estimated, state, created_at,"
+            " estimated_seconds, estimated_cost_usd, cost_expected) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (run_key, stage, agent, provider, estimated, HELD,
+             datetime.now(timezone.utc).isoformat(), estimated_seconds, estimated_cost_usd,
+             int(bool(cost_expected))),
         )
         return int(cursor.lastrowid)
 
 
-def settle(engine_root: Path, reservation_id: int, actual: int) -> None:
+def settle(engine_root: Path, reservation_id: int, actual: int, *, actual_seconds: float | None = None, actual_cost_usd: float | None = None) -> None:
     """Replaces an estimate with what the call really cost.
 
     Applies to failed calls too, and that is deliberate: a provider that errored
@@ -335,9 +514,10 @@ def settle(engine_root: Path, reservation_id: int, actual: int) -> None:
     with connect(engine_root) as con:
         _ensure(con)
         con.execute(
-            "UPDATE reservations SET actual = ?, state = ?, settled_at = ?"
+            "UPDATE reservations SET actual = ?, actual_seconds = ?, actual_cost_usd = ?, state = ?, settled_at = ?"
             " WHERE id = ? AND state = ?",
-            (max(0, actual), SETTLED, datetime.now(timezone.utc).isoformat(), reservation_id, HELD),
+            (max(0, actual), actual_seconds, actual_cost_usd, SETTLED,
+             datetime.now(timezone.utc).isoformat(), reservation_id, HELD),
         )
 
 
@@ -379,6 +559,11 @@ def report(engine_root: Path, limits: Limits, *, run_key: str, mode: str = SOFT)
         row = con.execute(
             "SELECT COALESCE(SUM(estimated), 0) AS reserved,"
             " COALESCE(SUM(COALESCE(actual, estimated)), 0) AS consumed,"
+            " COALESCE(SUM(estimated_seconds), 0) AS reserved_seconds,"
+            " COALESCE(SUM(COALESCE(actual_seconds, estimated_seconds)), 0) AS consumed_seconds,"
+            " COALESCE(SUM(estimated_cost_usd), 0) AS reserved_cost,"
+            " COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0) AS consumed_cost,"
+            " SUM(CASE WHEN actual_cost_usd IS NULL AND estimated_cost_usd IS NULL THEN 1 ELSE 0 END) AS cost_unknown,"
             " COUNT(*) AS calls"
             " FROM reservations WHERE run_key = ? AND state <> ?",
             (run_key, RELEASED),
@@ -389,4 +574,13 @@ def report(engine_root: Path, limits: Limits, *, run_key: str, mode: str = SOFT)
         calls=int(row["calls"]),
         limit=limits.max_run_tokens,
         mode=mode,
+        reserved_seconds=float(row["reserved_seconds"] or 0),
+        consumed_seconds=float(row["consumed_seconds"] or 0),
+        reserved_cost_usd=float(row["reserved_cost"] or 0),
+        consumed_cost_usd=float(row["consumed_cost"] or 0),
+        cost_unknown=bool(row["cost_unknown"] or 0),
+        seconds_limit=limits.max_run_seconds,
+        cost_limit_usd=limits.max_run_cost_usd,
+        stage_cost_limit_usd=limits.max_stage_cost_usd,
+        window_cost_limit_usd=limits.max_window_cost_usd,
     )

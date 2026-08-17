@@ -108,6 +108,7 @@ Start with the [technical documentation index](docs/README.md).
 - [Technology stack](docs/technology-stack.md)
 - [Feature status and roadmap](docs/feature-status.md)
 - [Configuration reference](docs/configuration.md)
+- [Hard budget policy: tokens, time and currency](docs/budget-policy.md)
 - [Operations](docs/operations.md)
 - [Testing](docs/testing.md)
 - [Architecture decisions](docs/decisions/README.md)

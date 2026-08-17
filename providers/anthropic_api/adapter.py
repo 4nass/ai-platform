@@ -20,6 +20,7 @@ from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prom
 
 MODELS_CONFIG_PATH = Path("config/models.yaml")
 READS_FILES = False  # no disk access on the way in: it only sees its prompt
+REPORTS_COST = False  # priced per token upstream; no per-call figure is returned
 
 TOKEN_BUDGETS = {
     "architect": 12000,
@@ -124,7 +125,7 @@ def run(task: AgentTask) -> ProviderResult:
     context_note = f"\n\nContext:\n{task.context_render}" if task.context_render else ""
     user_prompt = f"Request:\n{task.description}{context_note}"
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(timeout=task.timeout_seconds) if task.timeout_seconds else anthropic.Anthropic()
     response = client.messages.parse(
         model=model_id,
         max_tokens=max_tokens,

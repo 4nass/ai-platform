@@ -21,6 +21,7 @@ from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prom
 
 TIMEOUT_SECONDS = 900
 READS_FILES = True  # the CLI opens files itself via its Read/Grep/Glob tools
+REPORTS_COST = True  # `--output-format json` carries total_cost_usd per call
 DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash(uv run pytest*)"
 # The reviewer/security roles must never edit files (see prompts/reviewer.md,
 # prompts/security.md: their output is a report, not a modification) —
@@ -157,7 +158,7 @@ def run(task: AgentTask) -> ProviderResult:
             cwd=task.repo_root,
             capture_output=True,
             text=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=(min(TIMEOUT_SECONDS, task.timeout_seconds) if task.timeout_seconds else TIMEOUT_SECONDS),
         )
     except FileNotFoundError:
         return ProviderResult(

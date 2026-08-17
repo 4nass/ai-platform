@@ -10,6 +10,7 @@ from __future__ import annotations
 from providers.base import AgentTask, ProviderResult
 
 READS_FILES = False  # an API, like anthropic_api — prompt in, plan out
+REPORTS_COST = False  # stub: nothing to price yet
 
 
 def run(task: AgentTask) -> ProviderResult:
