@@ -65,7 +65,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Engine delivered: channel-neutral compact rendering, preferences, redaction and idempotent retryable outbox; concrete gateway adapters remain |
 | P1 | REST/SSE remote API | [#47](https://github.com/4nass/ai-platform/issues/47) | Engine delivered: authenticated WSGI API and SSE replay; TLS/rate-limit deployment remains in #49 |
 | P1 | Local-model MVP policy and evaluation | [#48](https://github.com/4nass/ai-platform/issues/48) | Planned; constrained roles only |
-| P0 | Remote exposure security readiness gate | [#49](https://github.com/4nass/ai-platform/issues/49) | Engine delivered: fail-closed `security-check` report, network guard and risk-acceptance record; decision remains NO_GO until #35/#45/host sandbox and production evidence are complete |
+| P0 | Remote exposure security readiness gate | [#49](https://github.com/4nass/ai-platform/issues/49) | Engine delivered: preflight `security-check` with `ATTESTED` for controls this process cannot observe, no override, and gate revalidation before any non-loopback bind; decision remains NO_GO until #35, host sandbox, production credentials and TLS/rate-limit attestations are in place |
 
 ## MVP gate
 

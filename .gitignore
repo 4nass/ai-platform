@@ -32,4 +32,3 @@ auth.sqlite-wal
 auth.sqlite-shm
 
 # Local, time-bounded remote exposure exception (never commit)
-config/security-risk-acceptance.json

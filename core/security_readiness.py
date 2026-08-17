@@ -1,20 +1,38 @@
 """Fail-closed remote exposure readiness gate (#49).
 
 This module is an evidence report, not a replacement for the controls it
-checks. A report is GO only when every blocking dependency is demonstrably
-ready. A documented, time-bounded risk acceptance changes the decision to
-RISK_ACCEPTED but remains visible in JSON and operator output.
+checks — and it is careful about which of the two each line is.
+
+**GO means the prerequisites are ready, not that exposure is on.** The controls
+are therefore evaluated whether or not `AI_PLATFORM_REMOTE_ENABLED` is set:
+requiring exposure to be live in order to check its protections would mean
+turning the system on to find out whether turning it on is safe. The switch
+itself is reported, non-blocking, as the state it is in.
+
+**PASS is reserved for what this process can observe.** TLS terminates upstream
+and rate limiting lives with it; neither is visible from here, and an
+environment variable saying so is a claim, not evidence. Those resolve from a
+recorded operator attestation instead and report `ATTESTED` — see
+`core.attestations`, which also explains what that does and does not defend
+against.
+
+**There is no override.** A gate with a bypass is the bypass. What used to be a
+risk acceptance — an unsigned local JSON file that flipped the decision — is
+gone; an accepted risk is an attestation with a short expiry, which is the same
+act with an honest name and an audit row.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+from core import attestations
 from core.jobs import budget, store
 from core.orchestrator import platform_config, registry, target_config
 from core.transport.http import SCOPES
@@ -22,8 +40,18 @@ from core.transport.http import SCOPES
 PASS = "PASS"
 WARN = "WARN"
 FAIL = "FAIL"
-DECISIONS = ("GO", "RISK_ACCEPTED", "NO_GO")
+
+ATTESTED = "ATTESTED"
+"""Verified by a person, recorded, and expiring — not observed by this process.
+
+A separate status rather than a PASS, because the difference between "the
+engine confirmed this" and "someone said so on 3 March" is exactly what the
+reader of a security report needs to see."""
+
+SATISFIED = frozenset({PASS, ATTESTED})
+DECISIONS = ("GO", "NO_GO")
 REQUIRED_SCOPES = frozenset({"jobs:submit", "jobs:read", "jobs:cancel", "jobs:approve"})
+EXTERNAL_ACTIONS = frozenset({registry.OPEN_PR, registry.GIT_PUSH, registry.PREVIEW_DEPLOY})
 
 
 @dataclass(frozen=True)
@@ -45,32 +73,24 @@ class SecurityCheck:
 
 
 @dataclass(frozen=True)
-class RiskAcceptance:
-    identifier: str
-    owner: str
-    scope: str
-    expires_at: str
-    rationale: str
-
-    def as_dict(self) -> dict:
-        return {
-            "id": self.identifier,
-            "owner": self.owner,
-            "scope": self.scope,
-            "expires_at": self.expires_at,
-            "rationale": self.rationale,
-        }
-
-
-@dataclass(frozen=True)
 class SecurityReport:
     checks: tuple[SecurityCheck, ...]
     generated_at: str
-    risk_acceptance: RiskAcceptance | None = None
+    fingerprint: str = ""
 
     @property
     def failures(self) -> tuple[SecurityCheck, ...]:
-        return tuple(check for check in self.checks if check.blocking and check.status == FAIL)
+        """Blocking checks that are neither observed nor attested.
+
+        A blocking check must reach PASS or ATTESTED; anything else — FAIL, or
+        a WARN on something that blocks — leaves the gate shut. Written against
+        `SATISFIED` rather than `== FAIL` so a status added later cannot be
+        counted as success by omission.
+        """
+        return tuple(
+            check for check in self.checks
+            if check.blocking and check.status not in SATISFIED
+        )
 
     @property
     def remote_ready(self) -> bool:
@@ -78,13 +98,20 @@ class SecurityReport:
 
     @property
     def decision(self) -> str:
-        if self.remote_ready:
-            return "GO"
-        return "RISK_ACCEPTED" if self.risk_acceptance else "NO_GO"
+        return "GO" if self.remote_ready else "NO_GO"
 
     @property
     def operator_go(self) -> bool:
-        return self.decision in {"GO", "RISK_ACCEPTED"}
+        """The same answer as `decision`, and deliberately not a second one.
+
+        These were once allowed to disagree — `remote_ready` stayed false while
+        `operator_go` went true on a risk acceptance — which meant the field a
+        caller read decided what it was told."""
+        return self.remote_ready
+
+    @property
+    def attested(self) -> tuple[SecurityCheck, ...]:
+        return tuple(check for check in self.checks if check.status == ATTESTED)
 
     def as_dict(self) -> dict:
         return {
@@ -92,8 +119,8 @@ class SecurityReport:
             "generated_at": self.generated_at,
             "decision": self.decision,
             "remote_ready": self.remote_ready,
+            "deployment_fingerprint": self.fingerprint,
             "checks": [check.as_dict() for check in self.checks],
-            "risk_acceptance": self.risk_acceptance.as_dict() if self.risk_acceptance else None,
         }
 
 
@@ -137,30 +164,98 @@ def _auth_check(env: Mapping[str, str]) -> SecurityCheck:
     return _check("Authenticated credentials", PASS, f"{len(items)} credential(s) configured; secrets withheld")
 
 
-def _exposure_check(env: Mapping[str, str]) -> SecurityCheck:
-    if not _truthy(env.get("AI_PLATFORM_REMOTE_ENABLED")):
+def _exposure_switch_check(env: Mapping[str, str]) -> SecurityCheck:
+    """Report the switch; never let its position decide what else gets checked.
+
+    Non-blocking in both positions, because it describes the current state
+    rather than a prerequisite: a preflight on a disabled engine is exactly the
+    situation this report exists for.
+    """
+    if _truthy(env.get("AI_PLATFORM_REMOTE_ENABLED")):
         return _check(
-            "Network exposure policy", PASS,
-            "remote exposure is disabled; localhost-only mode is safe and ready for an explicit deployment decision",
-            "Set AI_PLATFORM_REMOTE_ENABLED=true only after this report is GO",
+            "Remote exposure switch", PASS,
+            "remote exposure is enabled",
+            "Set AI_PLATFORM_REMOTE_ENABLED=false and restart to disable it",
             blocking=False,
         )
+    return _check(
+        "Remote exposure switch", PASS,
+        "remote exposure is disabled — this report is a preflight, not a live state",
+        "Enable it only once this report is GO; the server re-checks before it binds",
+        blocking=False,
+    )
+
+
+def _bind_target_check(env: Mapping[str, str]) -> SecurityCheck:
     host = env.get("AI_PLATFORM_BIND_HOST", "127.0.0.1")
+    port = env.get("AI_PLATFORM_BIND_PORT", "8787")
     if _loopback(host):
-        return _check("Network exposure policy", FAIL, f"remote exposure binds loopback host {host}")
-    if not _truthy(env.get("AI_PLATFORM_TLS_TERMINATED")):
-        return _check("TLS termination", FAIL, "remote exposure has no explicit TLS termination")
-    if not _truthy(env.get("AI_PLATFORM_RATE_LIMIT")):
-        return _check("Rate limiting", FAIL, "remote exposure has no explicit rate limiting")
-    return _check("Network exposure policy", PASS, f"remote host {host} requires TLS and rate limiting")
+        return _check(
+            "Remote bind target", WARN,
+            f"bind target {host}:{port} is loopback-only; nothing is reachable off this machine",
+            "Set AI_PLATFORM_BIND_HOST to the interface the proxy forwards to",
+            blocking=False,
+        )
+    return _check(
+        "Remote bind target", PASS,
+        f"bind target {host}:{port} is reachable off this machine",
+        blocking=False,
+    )
+
+
+def _attested_check(
+    engine_root: Path, name: str, control: str, fingerprint: str, now: datetime, missing: str
+) -> SecurityCheck:
+    """Resolve a control this process cannot observe from a recorded statement.
+
+    Three outcomes worth telling apart, because they have different fixes: no
+    statement was ever made for this exposure, one was made and has run out, or
+    one is live.
+    """
+    live = attestations.active(
+        engine_root, control=control, fingerprint=fingerprint, now=now
+    )
+    if live is not None:
+        return _check(
+            name, ATTESTED,
+            f"attested by {live.attested_by} on {live.attested_at[:10]}, "
+            f"expires {live.expires_at[:10]}: {live.statement}",
+            f"Re-attest before {live.expires_at[:10]} with: ai-platform attest {control}",
+        )
+    stale = attestations.latest(engine_root, control=control, fingerprint=fingerprint)
+    if stale is not None and stale.revoked_at:
+        detail = f"the attestation by {stale.attested_by} was withdrawn on {stale.revoked_at[:10]}"
+    elif stale is not None:
+        detail = f"the attestation by {stale.attested_by} expired on {stale.expires_at[:10]}"
+    else:
+        detail = missing
+    return _check(
+        name, FAIL, detail,
+        f"Verify it, then record what you checked: ai-platform attest {control}",
+    )
+
+
+def _tls_check(engine_root: Path, fingerprint: str, now: datetime) -> SecurityCheck:
+    return _attested_check(
+        engine_root, "TLS termination", attestations.TLS_TERMINATION, fingerprint, now,
+        "TLS terminates upstream of this process and cannot be observed from here; "
+        "no operator has attested it for this deployment",
+    )
+
+
+def _rate_limit_check(engine_root: Path, fingerprint: str, now: datetime) -> SecurityCheck:
+    return _attested_check(
+        engine_root, "Rate limiting", attestations.RATE_LIMIT, fingerprint, now,
+        "rate limiting lives with the upstream proxy and cannot be observed from here; "
+        "no operator has attested it for this deployment",
+    )
 
 
 def _rollback_check(env: Mapping[str, str]) -> SecurityCheck:
-    if not _truthy(env.get("AI_PLATFORM_REMOTE_ENABLED")):
-        return _check("Disable switch", PASS, "remote exposure is disabled by default")
     return _check(
         "Disable switch", PASS,
         "set AI_PLATFORM_REMOTE_ENABLED=false and restart the service to disable exposure",
+        blocking=False,
     )
 
 
@@ -199,15 +294,174 @@ def _budget_check(engine_root: Path) -> SecurityCheck:
     )
 
 
-def _action_check() -> SecurityCheck:
+def _action_policy_check(engine_root: Path) -> SecurityCheck:
+    """Can the engine actually perform every external action it permits?
+
+    Read-only, against the real registry, because that is the question with
+    consequences: a project allowing `open_pr` against a build with no
+    pull-request handler is a promise the engine cannot keep. The old check
+    asked whether `ActionExecutor` was importable, which is true of a class
+    nothing ever constructs.
+    """
+    try:
+        from core.actions import executor
+
+        projects = registry.load(engine_root)
+        available = set(executor.default_handlers())
+    except Exception as exc:
+        return _check(
+            "Audited actions — policy", FAIL,
+            f"action policy cannot be resolved ({type(exc).__name__})",
+        )
+
+    enabled = {
+        action: project_id
+        for project_id, project in projects.items()
+        for action in project.allowed_actions
+        if action in EXTERNAL_ACTIONS
+    }
+    if not enabled:
+        return _check(
+            "Audited actions — policy", WARN,
+            "no project enables an external action; audited execution is not applicable here",
+            "Add open_pr, git_push or preview_deploy to a project's allowed_actions "
+            "only once a handler exists for it",
+            blocking=False,
+        )
+    missing = sorted(action for action in enabled if action not in available)
+    if missing:
+        return _check(
+            "Audited actions — policy", FAIL,
+            "configured actions have no executable audited handler: "
+            + ", ".join(f"{action} ({enabled[action]})" for action in missing),
+            "Register a handler, or remove the action from allowed_actions",
+        )
+    return _check(
+        "Audited actions — policy", PASS,
+        f"every enabled external action has a handler: {', '.join(sorted(enabled))}",
+    )
+
+
+class _NullActionHandler:
+    """Stands where a real handler would, and reaches nothing outside.
+
+    The mechanism check has to drive a plan all the way through approval and
+    settlement, which means something has to answer at the end of it. Passing
+    this explicitly makes "the health check cannot push" a property of the
+    object graph rather than a rule someone has to keep following.
+    """
+
+    def execute(self, plan, context):
+        from core.actions.executor import ActionResult
+
+        return ActionResult(True, "healthcheck", "dry mechanism check", "")
+
+    def cleanup(self, plan, context):
+        return None
+
+
+def _action_mechanism_check() -> SecurityCheck:
+    """Exercise request → approval → fingerprint → audit, touching nothing real.
+
+    In a throwaway engine root: the tables, the approval binding and the refusal
+    of a changed plan are what make an audited action auditable, and none of it
+    can be confirmed by importing a symbol. Deliberately not run against the
+    live `jobs.sqlite` — a health check that writes execution rows into the
+    production queue is its own kind of side effect.
+    """
     try:
         from core.actions import executor
         from core.jobs import approvals
-        if not callable(executor.ActionExecutor) or not callable(approvals.request):
-            raise TypeError("audited action primitives are unavailable")
+
+        with tempfile.TemporaryDirectory(prefix="ai-platform-actioncheck-") as tmp:
+            root = Path(tmp)
+            project = registry.Project(
+                id="healthcheck",
+                path=root,
+                remote="https://example.invalid/healthcheck.git",
+                base_branch="main",
+                allowed_actions=(registry.GIT_PUSH,),
+                approval_required=(registry.GIT_PUSH,),
+            )
+            engine = executor.ActionExecutor(
+                root, handlers={executor.GIT_PUSH: _NullActionHandler()}
+            )
+            plan = executor.GitPushPlan(
+                project_id="healthcheck",
+                branch="engine/healthcheck",
+                commit_sha="0" * 40,
+                base_sha="1" * 40,
+                remote_name="origin",
+                remote_url=project.remote,
+                base_branch="main",
+            )
+            pending = engine.execute(
+                plan, project=project, principal="cli:healthcheck", request_id="probe-1"
+            )
+            if pending.state != executor.WAITING_APPROVAL:
+                return _check(
+                    "Audited actions — mechanism", FAIL,
+                    f"a privileged action did not stop for approval (state {pending.state})",
+                )
+
+            # The decision a person makes at the CLI. Stood in for here because
+            # the point is that the *gate* holds, not that someone is watching.
+            approvals.decide(
+                root, pending.approval_id, approved=True, principal="cli:healthcheck",
+                note="readiness mechanism check",
+            )
+            done = engine.execute(
+                plan, project=project, principal="cli:healthcheck", request_id="probe-1",
+                approval_id=pending.approval_id,
+            )
+            if done.state != executor.SUCCEEDED:
+                return _check(
+                    "Audited actions — mechanism", FAIL,
+                    f"an approved action did not complete (state {done.state})",
+                )
+            if not engine.events(done.id):
+                return _check(
+                    "Audited actions — mechanism", FAIL,
+                    "the action produced no audit trail",
+                )
+
+            # The property that makes an approval an approval: it covers the
+            # inputs it was shown, and a different commit is a different act.
+            moved = executor.GitPushPlan(
+                project_id="healthcheck",
+                branch="engine/healthcheck",
+                commit_sha="2" * 40,
+                base_sha="1" * 40,
+                remote_name="origin",
+                remote_url=project.remote,
+                base_branch="main",
+            )
+            second = engine.execute(
+                moved, project=project, principal="cli:healthcheck", request_id="probe-2"
+            )
+            reused = engine.execute(
+                moved, project=project, principal="cli:healthcheck", request_id="probe-2",
+                approval_id=pending.approval_id,
+            )
+            if reused.state == executor.SUCCEEDED:
+                return _check(
+                    "Audited actions — mechanism", FAIL,
+                    "an approval was accepted for a plan it was not granted against",
+                )
+            if second.state != executor.WAITING_APPROVAL:
+                return _check(
+                    "Audited actions — mechanism", FAIL,
+                    "a changed plan did not require its own approval",
+                )
     except Exception as exc:
-        return _check("Audited actions", FAIL, f"approval/action executor unavailable ({type(exc).__name__})")
-    return _check("Audited actions", PASS, "scoped approvals and audited executor are importable")
+        return _check(
+            "Audited actions — mechanism", FAIL,
+            f"the audited action path could not be exercised ({type(exc).__name__})",
+        )
+    return _check(
+        "Audited actions — mechanism", PASS,
+        "approval is required, consumed once, audited, and refused for a changed plan",
+    )
 
 
 def _sandbox_check(engine_root: Path) -> SecurityCheck:
@@ -280,41 +534,34 @@ def _audit_check() -> SecurityCheck:
     return _check("Audit trail", PASS, "jobs, events and telemetry are durable")
 
 
-def _risk_acceptance(engine_root: Path, env: Mapping[str, str], now: datetime) -> RiskAcceptance | None:
-    path = Path(env.get("AI_PLATFORM_RISK_ACCEPTANCE_FILE", str(engine_root / "config/security-risk-acceptance.json")))
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        expires = datetime.fromisoformat(str(data["expires_at"]))
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        if expires <= now or data.get("scope") != "remote-mvp":
-            return None
-        values = {key: str(data[key]).strip() for key in ("id", "owner", "scope", "expires_at", "rationale")}
-        if not all(values.values()):
-            return None
-        return RiskAcceptance(values["id"], values["owner"], values["scope"], values["expires_at"], values["rationale"])
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-
-def evaluate(engine_root: Path, *, env: Mapping[str, str] | None = None, now: datetime | None = None) -> SecurityReport:
+def evaluate(
+    engine_root: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    now: datetime | None = None,
+) -> SecurityReport:
+    """Read-only. Recording a decision is `attestations.record_decision`."""
     values = os.environ if env is None else env
     current = now or datetime.now(timezone.utc)
+    root = Path(engine_root)
+    fingerprint = attestations.deployment_fingerprint(values)
     checks = (
         _auth_check(values),
-        _registry_check(Path(engine_root)),
-        _exposure_check(values),
+        _registry_check(root),
+        _exposure_switch_check(values),
+        _bind_target_check(values),
+        _tls_check(root, fingerprint, current),
+        _rate_limit_check(root, fingerprint, current),
         _rollback_check(values),
-        _budget_check(Path(engine_root)),
-        _action_check(),
-        _sandbox_check(Path(engine_root)),
+        _budget_check(root),
+        _action_policy_check(root),
+        _action_mechanism_check(),
+        _sandbox_check(root),
         _secrets_check(values),
         _api_check(),
         _audit_check(),
     )
-    return SecurityReport(checks, current.isoformat(), _risk_acceptance(Path(engine_root), values, current))
+    return SecurityReport(checks, current.isoformat(), fingerprint)
 
 
 def report_json(report: SecurityReport) -> str:

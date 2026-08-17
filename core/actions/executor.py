@@ -309,6 +309,19 @@ class GitPushHandler:
         return CleanupResult(True, "no cleanup required for git push")
 
 
+def default_handlers() -> dict[str, ActionHandler]:
+    """Which actions this build can actually carry out, as a plain fact.
+
+    Separate from `ActionExecutor.__init__` because constructing an executor
+    creates its tables, and "can the engine perform `open_pr`?" is a question a
+    read-only health check has to be able to ask without writing to
+    `jobs.sqlite`. An action absent from this map is declarable in the registry
+    and not executable — which is a configuration error worth failing a gate
+    on, and was previously invisible.
+    """
+    return {GIT_PUSH: GitPushHandler()}
+
+
 class ActionExecutor:
     def __init__(
         self,
@@ -320,7 +333,8 @@ class ActionExecutor:
     ):
         self.engine_root = Path(engine_root)
         self.handlers = dict(handlers or {})
-        self.handlers.setdefault(GIT_PUSH, GitPushHandler())
+        for action, handler in default_handlers().items():
+            self.handlers.setdefault(action, handler)
         self.credential_provider = credential_provider
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         self._cancel_events: dict[str, threading.Event] = {}
