@@ -164,6 +164,44 @@ def test_same_nonce_and_body_is_an_idempotent_retry(tmp_path: Path) -> None:
     assert second.replayed is True
 
 
+def test_a_future_dated_request_cannot_outlive_its_own_ledger_entry(tmp_path: Path) -> None:
+    """The nonce must stay refused for as long as its signature is accepted.
+
+    The skew check is two-sided, so a client may legally date a request into
+    the future. If the ledger entry expired at arrival time plus the skew, a
+    request dated NOW+899 would be forgotten at NOW+900 while remaining
+    verifiable until NOW+1799 — and the captured payload would come back as a
+    brand new request rather than a detected replay.
+    """
+    credential = _credential()
+    clock = {"now": NOW}
+    auth = Authenticator(
+        {credential.key_id: credential},
+        ReplayStore(tmp_path / "auth.sqlite"),
+        clock=lambda: clock["now"],
+    )
+    future = NOW + 899
+    signed = dict(
+        method="POST", path=PATH, body=BODY, key_id=credential.key_id, timestamp=future,
+        nonce=NONCE, envelope=_envelope(),
+        signature=credential.sign(
+            method="POST", path=PATH, body=BODY, timestamp=future, nonce=NONCE
+        ),
+    )
+
+    assert auth.verify(**signed).replayed is False
+
+    # Every later moment at which this signature still verifies must report a
+    # replay rather than a fresh request.
+    for offset in (901, 1200, 1798):
+        clock["now"] = NOW + offset
+        assert auth.verify(**signed).replayed is True, f"replay missed at NOW+{offset}"
+
+    clock["now"] = NOW + 1800
+    with pytest.raises(ReplayError, match="replay window"):
+        auth.verify(**signed)
+
+
 def test_nonce_ledger_survives_a_new_authenticator(tmp_path: Path) -> None:
     credential = _credential()
     _auth(tmp_path, credential).verify(

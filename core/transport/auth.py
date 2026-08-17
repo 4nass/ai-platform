@@ -301,7 +301,14 @@ class Authenticator:
             key_id=key_id,
             nonce=nonce,
             body_hash=body_hash,
-            expires_at=now + self.max_skew_seconds,
+            # The ledger entry has to outlive the window in which this exact
+            # signature is still acceptable, and that window ends at
+            # `timestamp + skew`, not at `now + skew`. A future-dated timestamp
+            # is legal here (the skew check is two-sided), so deriving the
+            # expiry from arrival time lets the entry be swept while the
+            # signature is still valid — and the captured request then comes
+            # back through as a *new* one rather than a detected replay.
+            expires_at=max(now, float(timestamp_int)) + self.max_skew_seconds,
             now=now,
         )
         authenticated = AuthenticatedRequest(
