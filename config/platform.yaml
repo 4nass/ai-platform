@@ -50,8 +50,10 @@ context:
 # preset files. Uncomment and adjust only if you have a specific reason to.
 budgets:
   # Hard spending limits, checked before and after each provider call (issues #27/#45).
-  # Time is wall-clock provider time reserved per run/stage; currency is USD.
-  # Strict/local_fallback fail closed when a provider reports no cost estimate.
+  # Time is wall-clock provider time; the tightest ceiling left becomes the
+  # deadline handed to the provider. Currency is USD and is checked against
+  # settled spend — see docs/budget-policy.md, and note that a USD ceiling
+  # constrains nothing for a provider that cannot price its own calls.
   #   soft           - record and report, never block (the interactive default)
   #   strict         - refuse the call and pause the run for a human decision
   #   local_fallback - move the work to a local model, or wait if none is

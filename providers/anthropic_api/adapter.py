@@ -20,6 +20,7 @@ from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prom
 
 MODELS_CONFIG_PATH = Path("config/models.yaml")
 READS_FILES = False  # no disk access on the way in: it only sees its prompt
+REPORTS_COST = False  # priced per token upstream; no per-call figure is returned
 
 TOKEN_BUDGETS = {
     "architect": 12000,

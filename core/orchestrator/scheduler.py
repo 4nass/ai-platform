@@ -22,7 +22,7 @@ from core.jobs import budget
 from core.orchestrator import router
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
-from providers.base import AgentTask, ProviderResult, reads_files
+from providers.base import AgentTask, ProviderResult, reads_files, reports_cost
 from providers.claude_code import adapter as claude_code
 from providers.codex_cli import adapter as codex_cli
 from providers.openai_api import adapter as openai_api
@@ -162,6 +162,12 @@ def run_task(
         )
         if not admission.allowed:
             raise budget.BudgetExceeded(admission)
+        # Read the deadline *before* reserving: what bounds this call is the
+        # budget everything else has left it, not the slice it is about to hold
+        # for itself.
+        deadline = budget.remaining_seconds(
+            engine_root, limits, run_key=key, stage=stage_id or ""
+        )
         reservation = budget.reserve(
             engine_root,
             run_key=key,
@@ -170,9 +176,10 @@ def run_task(
             agent=agent,
             provider=provider_name,
             estimated_seconds=estimated_seconds,
+            cost_expected=reports_cost(provider),
         )
-        if estimated_seconds:
-            agent_task.timeout_seconds = estimated_seconds
+        if deadline > 0:
+            agent_task.timeout_seconds = deadline
 
     started_at = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()

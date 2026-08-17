@@ -355,6 +355,48 @@ def test_run_task_records_budget_drops_separately_from_relevance_drops(
     assert recorder.calls[0]["context_files"] < 4
 
 
+def test_a_declared_budget_reaches_the_provider_instead_of_blocking_it(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    """The gate has to be exercised through `run_task`, not only in isolation.
+
+    Every defect this test covers passed the budget module's own unit tests:
+    what was wrong was the arguments `run_task` supplies. A currency ceiling
+    refused every call because no cost estimate is ever passed, and a time
+    ceiling arrived at the adapter as a 60-second deadline no matter how large
+    it was.
+    """
+    from core.jobs.budget import Limits
+
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+    limits = Limits(max_run_cost_usd=25, max_run_seconds=3600, max_run_tokens=900_000)
+
+    result = scheduler.run_task(
+        repo_root, "backend", "x", budget_limits=limits, run_key="run-1",
+    )
+
+    assert result.success is True, "a declared currency ceiling refused the call"
+    # The deadline is the budget left, not the slice reserved for this call.
+    assert captured["task"].timeout_seconds == pytest.approx(3600.0)
+
+
+def test_a_stage_time_ceiling_bounds_the_call_it_applies_to(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path
+) -> None:
+    from core.jobs.budget import Limits
+
+    captured: dict = {}
+    monkeypatch.setitem(scheduler.PROVIDERS, "claude_code", _fake_provider(captured))
+
+    scheduler.run_task(
+        repo_root, "backend", "x", stage_id="build", run_key="run-2",
+        budget_limits=Limits(max_stage_seconds=120),
+    )
+
+    assert captured["task"].timeout_seconds == pytest.approx(120.0)
+
+
 def test_run_task_without_context_records_no_reason(
     monkeypatch: pytest.MonkeyPatch, repo_root: Path
 ) -> None:

@@ -82,6 +82,14 @@ away the moment the provider reports what it actually produced; until then, a
 budget that counted only the prompt would be blind to the larger half of many
 calls."""
 
+DEFAULT_CALL_SECONDS = 60.0
+"""Wall-clock held for one call before it runs, when a time ceiling exists.
+
+Same shape of guess as `DEFAULT_OUTPUT_RESERVE`, and reconciled the same way:
+what it buys is that two concurrent stages cannot each start believing the
+whole remaining time is theirs. It is deliberately *not* the deadline for the
+call — see `remaining_seconds`."""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reservations (
   id INTEGER PRIMARY KEY,
@@ -95,6 +103,7 @@ CREATE TABLE IF NOT EXISTS reservations (
   actual_seconds REAL,
   estimated_cost_usd REAL,
   actual_cost_usd REAL,
+  cost_expected INTEGER NOT NULL DEFAULT 0,
   state      TEXT NOT NULL,
   created_at TEXT NOT NULL,
   settled_at TEXT
@@ -269,9 +278,14 @@ def _ensure(con: sqlite3.Connection) -> None:
     for name, definition in (("estimated_seconds", "REAL NOT NULL DEFAULT 0"),
                              ("actual_seconds", "REAL"),
                              ("estimated_cost_usd", "REAL"),
-                             ("actual_cost_usd", "REAL")):
+                             ("actual_cost_usd", "REAL"),
+                             ("cost_expected", "INTEGER NOT NULL DEFAULT 0")):
         if name not in columns:
             con.execute(f"ALTER TABLE reservations ADD COLUMN {name} {definition}")
+
+
+def _currency_capped(limits: Limits) -> bool:
+    return bool(limits.max_run_cost_usd or limits.max_stage_cost_usd or limits.max_window_cost_usd)
 
 
 def _window_start(hours: float) -> str:
@@ -292,9 +306,14 @@ def usage(engine_root: Path, limits: Limits, *, run_key: str, stage: str = "") -
             "SELECT COALESCE(SUM(COALESCE(actual, estimated)), 0) AS tokens, COUNT(*) AS calls,"
             " COALESCE(SUM(COALESCE(actual_seconds, estimated_seconds)), 0) AS seconds,"
             " COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0) AS cost,"
-            " SUM(CASE WHEN actual_cost_usd IS NULL AND estimated_cost_usd IS NULL THEN 1 ELSE 0 END) AS unknown"
+            # Only a call that was *expected* to price itself counts as unknown.
+            # A provider that cannot price a call (see providers.base.
+            # REPORTS_COST) reports nothing by design, and treating that as a
+            # gap would make a currency ceiling refuse every run it touched.
+            " SUM(CASE WHEN cost_expected = 1 AND state = ? AND actual_cost_usd IS NULL"
+            "          THEN 1 ELSE 0 END) AS unknown"
             " FROM reservations WHERE run_key = ? AND state <> ?",
-            (run_key, RELEASED),
+            (SETTLED, run_key, RELEASED),
         ).fetchone()
         stage_row = con.execute(
             "SELECT COALESCE(SUM(COALESCE(actual_seconds, estimated_seconds)), 0) AS seconds,"
@@ -342,12 +361,20 @@ def admit(
         return Decision(allowed=True, mode=mode, reason="no budget declared", estimated=estimated,
                         estimated_seconds=estimated_seconds, estimated_cost_usd=estimated_cost_usd)
 
-    if any((limits.max_run_cost_usd, limits.max_stage_cost_usd, limits.max_window_cost_usd)) and estimated_cost_usd is None and mode != SOFT:
+    current = usage(engine_root, limits, run_key=run_key, stage=stage)
+
+    # Fail closed on a *missing* price, never on an unknowable one. What a call
+    # will cost cannot be known before it is made — no provider here prices a
+    # request from its prompt — so refusing every call that arrives without an
+    # estimate refuses every call, which is what this used to do. What can be
+    # known is what already settled, and a call that was expected to report its
+    # price and came back without one is a real anomaly: the ceiling would be
+    # counting against a total it knows to be short.
+    if _currency_capped(limits) and current.cost_unknown and mode != SOFT:
         return Decision(allowed=False, mode=mode, limit="currency_unknown", estimated=estimated,
                         estimated_seconds=estimated_seconds,
-                        reason="provider did not supply a cost estimate; strict currency budgets fail closed")
-
-    current = usage(engine_root, limits, run_key=run_key, stage=stage)
+                        reason="a settled call that should have reported its price did not; "
+                               "strict currency budgets fail closed rather than undercount")
     checks = (
         ("max_stage_tokens", estimated, limits.max_stage_tokens),
         ("max_run_tokens", current.run_tokens + estimated, limits.max_run_tokens),
@@ -388,9 +415,39 @@ def admit(
     )
 
 
-def duration_estimate(limits: Limits, *, default: float = 60.0) -> float:
+def duration_estimate(limits: Limits, *, default: float = DEFAULT_CALL_SECONDS) -> float:
+    """How much wall-clock to hold for a call that has not run yet.
+
+    A reservation, not a deadline — the two were the same value once, and that
+    made a generous run ceiling *shorten* every call: reserving 60s meant
+    timing the provider out at 60s no matter how much budget was left. What
+    bounds a call is `remaining_seconds`; this only decides how much capacity
+    two concurrent stages each hold while they run.
+    """
     ceilings = [value for value in (limits.max_stage_seconds, limits.max_run_seconds) if value]
     return min([default, *ceilings]) if ceilings else 0.0
+
+
+def remaining_seconds(engine_root: Path, limits: Limits, *, run_key: str, stage: str = "") -> float:
+    """Wall-clock left before the tightest declared time ceiling is crossed.
+
+    This is the honest deadline for the next call: everything already held or
+    settled has been counted, and what is left is what this call may take. Zero
+    means no time ceiling is declared — the caller keeps its own default.
+    """
+    ceilings = [value for value in (limits.max_stage_seconds, limits.max_run_seconds) if value]
+    if not ceilings:
+        return 0.0
+    current = usage(engine_root, limits, run_key=run_key, stage=stage)
+    headroom = [
+        limit - consumed
+        for limit, consumed in (
+            (limits.max_stage_seconds, current.stage_seconds),
+            (limits.max_run_seconds, current.run_seconds),
+        )
+        if limit
+    ]
+    return max(0.0, min(headroom))
 
 
 def validate(engine_root: Path, limits: Limits, *, run_key: str, stage: str = "",
@@ -423,16 +480,25 @@ def reserve(
     provider: str = "",
     estimated_seconds: float = 0.0,
     estimated_cost_usd: float | None = None,
+    cost_expected: bool = False,
 ) -> int:
     """Commits capacity for a call that is about to be made, and returns the
-    reservation id the caller must later settle or release."""
+    reservation id the caller must later settle or release.
+
+    `cost_expected` records whether this provider prices its own calls, at the
+    moment the provider is known. Storing it on the row rather than looking it
+    up later keeps the judgement attached to the call it was made for: which
+    provider served a stage can change between runs, and a settled reservation
+    has to stay readable as the thing it was.
+    """
     with connect(engine_root) as con:
         _ensure(con)
         cursor = con.execute(
             "INSERT INTO reservations(run_key, stage, agent, provider, estimated, state, created_at,"
-            " estimated_seconds, estimated_cost_usd) VALUES(?,?,?,?,?,?,?,?,?)",
+            " estimated_seconds, estimated_cost_usd, cost_expected) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (run_key, stage, agent, provider, estimated, HELD,
-             datetime.now(timezone.utc).isoformat(), estimated_seconds, estimated_cost_usd),
+             datetime.now(timezone.utc).isoformat(), estimated_seconds, estimated_cost_usd,
+             int(bool(cost_expected))),
         )
         return int(cursor.lastrowid)
 

@@ -31,6 +31,7 @@ from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prom
 
 TIMEOUT_SECONDS = 900
 READS_FILES = True  # `codex exec` opens and edits files itself
+REPORTS_COST = False  # the CLI reports tokens, never a price for the call
 
 # The roles whose prompts say they produce a report rather than a modification
 # (see prompts/reviewer.md, prompts/security.md, prompts/decomposer.md) are
