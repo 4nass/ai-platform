@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -10,8 +11,12 @@ import git
 import pytest
 
 from core.errors import ConfigError
-from core.jobs import budget
-from core.orchestrator import checkpoint, git_ops, registry, scheduler, supervisor, test_runner
+from core.jobs import budget, store
+from core.context.manager import SelectedContext
+from core.orchestrator import (
+    checkpoint, git_ops, planner, platform_config, registry, scheduler, supervisor,
+    target_config, test_runner,
+)
 from core.telemetry import store as telemetry
 from providers.base import AgentTask, ProviderResult
 
@@ -1943,3 +1948,72 @@ def test_a_project_selects_its_own_budget_class(
     report = supervisor.run(fake_repo, fake_repo, "add oauth2", project=project)
 
     assert report.budget.limit == 999999999
+
+
+def test_cancelling_mid_stage_unwinds_the_run_instead_of_failing_the_stage(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """A cancellation is not a stage that went wrong.
+
+    `CancellationRequested` was an `Exception`, so the broad handlers that turn
+    a stage's problems into a failed `StageResult` swallowed it: the request
+    was recorded as an error in the very work it was cancelling, and the run
+    carried on to the next stage.
+    """
+    cancel_event = threading.Event()
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        cancel_event.set()  # the watcher would set this from the job row
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary="partial work")
+
+    _patch_provider(monkeypatch, fake_run)
+    repo = git.Repo(fake_repo)
+    integration_root, branch = git_ops.create_integration_worktree(repo, "add oauth2")
+
+    # The stage function itself, because that is where the swallowing was: run()
+    # would raise anyway from its next `check_cancel`, which hid the fact that
+    # the stage had already been written down as a failure on the way there.
+    with pytest.raises(store.CancellationRequested):
+        supervisor._run_stage_in_worktree(
+            integration_root,
+            fake_repo,
+            branch,
+            planner.Task(id="backend", agent="backend", depends_on=[]),
+            "add oauth2",
+            SelectedContext(chunks=[]),
+            [],
+            target_config.TargetConfig(),
+            platform_config.load(fake_repo),
+            budget.Limits(),
+            run_key="run-1",
+            cancel_event=cancel_event,
+        )
+
+
+def test_a_cancelled_run_leaves_no_worktree_behind(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    """Cancellation can unwind from half a dozen points; cleanup written at one
+    of them covered one of them. What was left was the integration worktree,
+    its task worktrees and the branch, under a job reporting itself stopped."""
+    cancel_event = threading.Event()
+
+    def fake_run(task: AgentTask) -> ProviderResult:
+        cancel_event.set()
+        _write_compliant_artifact(task)
+        return ProviderResult(success=True, summary="partial work")
+
+    _patch_provider(monkeypatch, fake_run)
+    _patch_tests(monkeypatch, passed=True)
+
+    with pytest.raises(store.CancellationRequested):
+        supervisor.run(fake_repo, fake_repo, "add oauth2", cancel_event=cancel_event)
+
+    listed = git.Repo(fake_repo).git.worktree("list", "--porcelain")
+    extra = [
+        line.split(" ", 1)[1]
+        for line in listed.splitlines()
+        if line.startswith("worktree ") and Path(line.split(" ", 1)[1]) != fake_repo
+    ]
+    assert extra == [], f"worktrees survived cancellation: {extra}"
