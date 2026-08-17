@@ -301,11 +301,11 @@ def test_cancelling_a_running_job_requests_a_stop_rather_than_claiming_one(
     assert store.cancel(engine, job_id) is False, "the request is idempotent"
 
     job = store.get(engine, job_id)
-    assert job.state == store.CANCELLING
+    assert job.state == store.CANCEL_REQUESTED
     assert job.is_terminal is False, "still stopping is not finished"
     assert store.cancellation_requested(engine, job_id) is True
     assert store.is_cancelled(engine, job_id) is False
-    assert store.events_page(engine, job_id)["events"][-1]["event_type"] == "run.cancelling"
+    assert store.events_page(engine, job_id)["events"][-1]["event_type"] == "run.cancel_requested"
 
 
 def test_a_queued_job_has_nothing_to_stop_and_is_cancelled_outright(engine: Path) -> None:
