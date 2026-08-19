@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import multiprocessing
+from pathlib import Path
+
 import pytest
 
 from core.jobs import store
@@ -21,6 +24,24 @@ NOW = 1_700_000_000
 PATH = "/v1/jobs"
 BODY = b'{"project_id":"ai-platform","request":"run tests"}'
 NONCE = "nonce_0123456789"
+
+
+def _claim_nonce_in_child(database_path, ready, start, result):
+    """Claim one nonce after both independent processes are ready."""
+    try:
+        ready.put(True)
+        if not start.wait(timeout=10):
+            raise RuntimeError("parent never released concurrent nonce claim")
+        replayed = ReplayStore(Path(database_path)).claim(
+            key_id="key-current",
+            nonce=NONCE,
+            body_hash="body-hash",
+            expires_at=NOW + 900,
+            now=NOW,
+        )
+        result.put(("ok", replayed))
+    except BaseException as exc:
+        result.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _credential(**overrides) -> TransportCredential:
@@ -356,3 +377,32 @@ def test_verified_submission_rejects_text_not_present_in_signed_body(tmp_path: P
             tmp_path, project="/allowlisted/ai-platform", project_id="ai-platform",
             request="different request", body=BODY, authenticated=authenticated,
         )
+
+def test_nonce_claim_is_atomic_across_independent_processes(tmp_path: Path) -> None:
+    """The durable ledger, not the in-process lock, decides the winner."""
+    context = multiprocessing.get_context("spawn")
+    ready, start, result = context.Queue(), context.Event(), context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_nonce_in_child,
+            args=(str(tmp_path / "auth.sqlite"), ready, start, result),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        assert ready.get(timeout=10) is True
+        assert ready.get(timeout=10) is True
+        start.set()
+        outcomes = [result.get(timeout=10), result.get(timeout=10)]
+    finally:
+        start.set()
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(outcomes) == [("ok", False), ("ok", True)]
