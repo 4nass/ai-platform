@@ -419,7 +419,7 @@ def _action_mechanism_check() -> SecurityCheck:
                     "Audited actions — mechanism", FAIL,
                     f"an approved action did not complete (state {done.state})",
                 )
-            if not engine.events(done.id):
+            if not engine.events(done.id, principal="cli:healthcheck"):
                 return _check(
                     "Audited actions — mechanism", FAIL,
                     "the action produced no audit trail",
