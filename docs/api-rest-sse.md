@@ -15,14 +15,15 @@ message identifiers; these are checked against the credential principal and
 provide durable idempotency.
 
 Credentials for the development server are supplied through the
-AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Do not
-put secrets in YAML, Git, query strings or logs. The built-in local development
-server uses a request thread per connection, so a long-lived SSE subscription
-does not block job status, cancellation or approval calls. It is not a
-production WSGI deployment: production needs a managed WSGI/ASGI host, TLS, a
-secret manager, process supervision and reverse-proxy rate/body limits.
+AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Keys
+can have not_before and expires_at timestamps and may be revoked during
+rotation. Do not put secrets in YAML, Git, query strings or logs.
 
-`ai-platform serve --host 127.0.0.1 --port 8787` starts the built-in local development server. It emits an access record for every request, including route template, HTTP status, outcome and direct client address. It never logs request bodies, query strings, credential identifiers, signatures, nonces, delivery identifiers or arbitrary paths. A production WSGI host must configure the same `ai_platform.transport.access` logger itself and keep its proxy access logs subject to the same redaction and retention policy.
+`ai-platform serve --host 127.0.0.1 --port 8787` starts the built-in local development server. It uses a request thread per connection, so a long-lived SSE subscription does not block job status, cancellation or approval calls. It emits an access record for every request, including route template, HTTP status, outcome and direct client address. It never logs request bodies, query strings, credential identifiers, signatures, nonces, delivery identifiers or arbitrary paths. It is not a production WSGI deployment: a production host must configure the same `ai_platform.transport.access` logger itself and keep its proxy access logs subject to the same redaction and retention policy.
+
+After a request has passed HMAC and identity verification, its nonce is recorded
+before scope authorization. A scope refusal therefore consumes that signed
+nonce; callers must create a fresh signed request for a corrected operation.
 
 ## Endpoints
 

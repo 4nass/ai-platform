@@ -406,3 +406,44 @@ def test_nonce_claim_is_atomic_across_independent_processes(tmp_path: Path) -> N
 
     assert all(process.exitcode == 0 for process in processes)
     assert sorted(outcomes) == [("ok", False), ("ok", True)]
+
+def test_credential_activation_window_is_enforced_at_both_boundaries(tmp_path: Path) -> None:
+    before = _credential(not_before=NOW + 1)
+    expired = _credential(expires_at=NOW)
+    active = _credential(expires_at=NOW + 1)
+
+    for credential, nonce in (
+        (before, "nonce_not_before_123"),
+        (expired, "nonce_expired_key_123"),
+    ):
+        with pytest.raises(AuthenticationError, match="inactive"):
+            _auth(tmp_path / nonce, credential).verify(
+                method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+                timestamp=NOW, nonce=nonce, signature=_signature(credential, nonce=nonce),
+                envelope=_envelope(),
+            )
+
+    accepted = _auth(tmp_path / "active", active).verify(
+        method="POST", path=PATH, body=BODY, key_id=active.key_id,
+        timestamp=NOW, nonce="nonce_active_key_123",
+        signature=_signature(active, nonce="nonce_active_key_123"), envelope=_envelope(),
+    )
+    assert accepted.replayed is False
+
+
+def test_scope_refusal_consumes_the_authenticated_nonce(tmp_path: Path) -> None:
+    credential = _credential(scopes=frozenset({"jobs:read"}))
+    auth = _auth(tmp_path, credential)
+
+    with pytest.raises(AuthorizationError, match="jobs:submit"):
+        auth.verify(
+            method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+            timestamp=NOW, nonce=NONCE, signature=_signature(credential),
+            envelope=_envelope(), scope="jobs:submit",
+        )
+
+    retry = auth.verify(
+        method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+        timestamp=NOW, nonce=NONCE, signature=_signature(credential), envelope=_envelope(),
+    )
+    assert retry.replayed is True
