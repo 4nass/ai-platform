@@ -35,6 +35,7 @@ def request(app, method, path, body=b"", *, credential_obj=None, nonce="nonce_12
         "HTTP_X_CHAT_ID": chat,
         "HTTP_X_MESSAGE_ID": message,
         "CONTENT_LENGTH": str(len(body)),
+        "CONTENT_TYPE": "application/json" if body else "",
         "wsgi.input": io.BytesIO(body),
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
@@ -178,3 +179,20 @@ def test_signed_query_parameters_cannot_be_changed_after_authentication(api):
 
     assert status["status"] == "401 Unauthorized"
     assert value["error"]["code"] == "unauthorized"
+
+def test_json_routes_reject_an_unlabelled_or_wrong_media_type(api):
+    app, c = api
+    body = b"{}"
+
+    status, value = request(
+        app.application,
+        "POST",
+        "/v1/jobs",
+        body,
+        credential_obj=c,
+        nonce="nonce_media_type",
+        extra={"CONTENT_TYPE": "text/plain"},
+    )
+
+    assert status["status"] == "415 Unsupported Media Type"
+    assert value["error"]["code"] == "unsupported_media_type"
