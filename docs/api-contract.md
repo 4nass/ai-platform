@@ -210,4 +210,4 @@ This mapping is intentionally replaceable: a browser or CLI client uses the same
 
 ## Non-goals
 
-The `v1` contract does not expose arbitrary shell execution, direct provider prompts, raw Git push, database access, webhook secrets, or an OpenClaw-specific payload format. OpenClaw-specific formatting belongs in its adapter, while authorization and durable state remain testable in AI Platform.
+The `v1` contract does not expose arbitrary shell execution, direct provider prompts, raw Git push, database access or webhook secrets. The typed engine adapter is documented in [openclaw-tools.md](openclaw-tools.md); channel formatting and network delivery remain replaceable gateway concerns, while authorization and durable state remain testable in AI Platform.

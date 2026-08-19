@@ -35,6 +35,7 @@ The current implementation is the local execution half of that loop. The remote 
 | Telemetry, jobs, tokens, quotas | [Data, telemetry, and budgets](data-and-observability.md) | `core/telemetry/`, `core/jobs/`, SQLite files |
 | Configuration | [Configuration reference](configuration.md) | `config/*.yaml`, `.ai-platform.yml` |
 | Remote interface | [REST/SSE API contract](api-contract.md) and [implementation](api-rest-sse.md) | core/transport/ |
+| OpenClaw tools | [Typed OpenClaw tools](openclaw-tools.md) | `core/openclaw.py` |
 | External actions | [Audited action executor](action-executor.md) | core/actions/executor.py, core/jobs/approvals.py |
 | Previews | [Per-run preview environments](preview-environments.md) | core/previews/manager.py, core/transport/http.py |
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |

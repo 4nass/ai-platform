@@ -145,4 +145,4 @@ Use Linux-native Git, Python and uv for a repository inside WSL. Mixing Windows 
 
 ## Remote warning
 
-OpenClaw/API, structured events, remote Git delivery, preview deployment and secrets retention are not delivered. Do not expose the local worker to the Internet; follow the gates in [Security](security.md) and [MVP trajectory](mvp-trajectory.md).
+Concrete OpenClaw channel wiring, remote Git delivery, preview deployment and secrets retention are not delivered; the typed OpenClaw engine adapter and REST/SSE primitives are available. Do not expose the local worker to the Internet; follow the gates in [Security](security.md) and [MVP trajectory](mvp-trajectory.md).

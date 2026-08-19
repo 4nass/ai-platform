@@ -9,7 +9,7 @@ The owner wants to submit work, follow tests, and validate results from a phone 
 
 ## Decision
 
-Use OpenClaw only as an optional, replaceable personal interaction adapter. It translates Signal, WhatsApp, Telegram or another channel into the stable [REST/SSE API contract](../api-contract.md). A browser UI, CLI or another adapter must be able to use the same contract without changing the engine.
+Use OpenClaw only as an optional, replaceable personal interaction adapter. The engine-side v1 contract is implemented by core/openclaw.py and reuses authenticated transport, durable jobs and event cursors. It translates Signal, WhatsApp, Telegram or another channel into the stable [REST/SSE API contract](../api-contract.md). A browser UI, CLI or another adapter must be able to use the same contract without changing the engine.
 
 The API exposes only narrow authenticated and idempotent platform operations: submit a job, read status/events, cancel, approve a privileged transition, and fetch artifact or preview references.
 

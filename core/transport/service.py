@@ -17,6 +17,25 @@ from core.jobs import store
 from core.transport.auth import AuthenticatedRequest, AuthenticationError
 
 
+class OwnedResourceNotFound(Exception):
+    """A resource is missing or belongs to another principal.
+
+    Callers intentionally receive one outcome for both cases, so probing a job
+    id cannot disclose another principal's work.
+    """
+
+
+def job_for_principal(engine_root: Path, job_id: int, principal: object) -> store.Job:
+    """Load a job only when it belongs to the verified principal."""
+    try:
+        job = store.get(engine_root, job_id)
+    except store.JobError:
+        raise OwnedResourceNotFound from None
+    if job.principal != str(principal):
+        raise OwnedResourceNotFound
+    return job
+
+
 def submit_verified(
     engine_root: Path,
     *,
