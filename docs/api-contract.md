@@ -4,7 +4,7 @@
 - Version: `v1`
 - Tracking: [#47](https://github.com/4nass/ai-platform/issues/47), [#30](https://github.com/4nass/ai-platform/issues/30)
 
-This document defines the stable boundary between user interfaces (OpenClaw, a browser, CLI adapters or future notification clients) and AI Platform. It is a design contract, not a claim that the remote server is already deployed. Until the API and transport-auth issues are delivered, the local CLI remains the supported interface.
+This document defines the stable boundary between user interfaces (OpenClaw, a browser, CLI adapters or future notification clients) and AI Platform. It is a design contract, not a claim that the remote server is already deployed. The transport verifier is delivered as an engine building block; the REST/SSE server and public exposure gate remain tracked by #47 and #49. Until then, the local CLI remains the supported interface.
 
 ## Ownership boundary
 
@@ -29,10 +29,17 @@ An adapter never receives an arbitrary repository path, shell command, provider 
 
 - Base path: `/v1`.
 - HTTPS is required outside localhost.
-- Requests use `Authorization: Bearer <access-token>`; the token identifies a principal and its scopes, not a project.
+- Requests use a rotating HMAC credential with `X-AI-Platform-Key-Id`, `X-AI-Platform-Timestamp`, `X-AI-Platform-Nonce` and `X-AI-Platform-Signature` headers. HTTPS is still required.
+- The signature covers the protocol version, method, path, timestamp, nonce and SHA-256 body hash. The credential identifies a channel-scoped principal and scopes, never a project.
 - JSON is UTF-8. Timestamps are ISO-8601 UTC.
 - Breaking changes require a new major path (`/v2`). Additive fields and event types are allowed in `v1`; clients must ignore unknown fields and event types.
 - Every response includes `request_id` for support and audit correlation.
+
+### Request authentication
+
+The current transport-neutral verifier is implemented in `core/transport/auth.py`; an HTTP adapter must call it before parsing or dispatching an operation. A credential is identified by a non-secret key id and carries a channel, principal id, scopes, activation/expiry window and revocation state. Multiple active credentials may overlap during rotation. Secrets are injected by the service runtime and never stored in repository configuration.
+
+The nonce ledger is durable (`ReplayStore`) and keyed by credential plus nonce. A repeated nonce with the same signed body is an idempotent retry and may proceed to the job store, which returns the original job. Reusing it with different content is rejected. Timestamps have a bounded skew window, and channel/sender/chat/message fields are part of the signed request envelope.
 
 ## Operations
 
@@ -43,10 +50,15 @@ An adapter never receives an arbitrary repository path, shell command, provider 
 Required headers:
 
 ```http
-Authorization: Bearer <token>
-Idempotency-Key: <stable-client-key>
+X-AI-Platform-Key-Id: key-2026-01
+X-AI-Platform-Timestamp: 1786478400
+X-AI-Platform-Nonce: <fresh-random-value>
+X-AI-Platform-Signature: <base64url-hmac>
+Idempotency-Key: <derived-from-signed-envelope>
 Content-Type: application/json
 ```
+
+`Idempotency-Key` must equal the key derived from the signed transport envelope. The server may recompute it and reject a mismatch.
 
 Request:
 
@@ -55,7 +67,14 @@ Request:
   "project_id": "ai-platform",
   "request": "Add a health endpoint",
   "operation": "modify",
-  "dry_run": false
+  "dry_run": false,
+  "transport": {
+    "channel": "openclaw",
+    "sender_id": "owner-1",
+    "chat_id": "chat-1",
+    "message_id": "message-1",
+    "sent_at": "2026-08-11T20:00:00Z"
+  }
 }
 ```
 

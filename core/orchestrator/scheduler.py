@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from core import untrusted
 from core.context import selection
 from core.context.manager import FULL, POINTERS, SelectedContext
-from core.jobs import budget
+from core.jobs import budget, store
 from core.orchestrator import router
 from core.orchestrator.planner import Task
 from providers.anthropic_api import adapter as anthropic_api
@@ -90,6 +90,7 @@ def run_task(
     platform_config: "PlatformConfig | None" = None,
     budget_limits=None,
     run_key: str = "",
+    cancel_event=None,
 ) -> ProviderResult:
     """Runs one task through its configured provider, recording what it cost.
 
@@ -134,6 +135,9 @@ def run_task(
     rendered = context.render_for(reads_files=provider_reads_files) if context else None
     context_paths = context.context_paths() if context else []
 
+    if cancel_event is not None and cancel_event.is_set():
+        raise store.CancellationRequested("run cancellation requested")
+
     agent_task = AgentTask(
         agent=agent,
         description=description,
@@ -144,6 +148,7 @@ def run_task(
         complexity=complexity,
         context_paths=context_paths,
         context_render=rendered.text if rendered else "",
+        cancel_event=cancel_event,
     )
 
     # --- the budget gate. Nothing below reaches a provider without it. ---
@@ -172,13 +177,16 @@ def run_task(
     started = time.monotonic()
     try:
         result = provider.run(agent_task)
-    except BaseException:
-        # Nothing was spent that anyone can attribute, so the capacity goes
-        # back. Settling this at the estimate would charge the budget for a
-        # call whose cost is unknown and possibly zero.
-        if reservation is not None:
-            budget.release(engine_root, reservation)
+    except BaseException as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            if reservation is not None:
+                budget.release(engine_root, reservation)
+            raise store.CancellationRequested("run cancellation requested") from exc
         raise
+    if cancel_event is not None and cancel_event.is_set():
+        if reservation is not None:
+            budget.settle(engine_root, reservation, _spent(result, estimated))
+        raise store.CancellationRequested("run cancellation requested")
     duration_ms = int((time.monotonic() - started) * 1000)
 
     if reservation is not None:

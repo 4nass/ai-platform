@@ -23,6 +23,7 @@ from rich.console import Console
 from core.context.manager import ContextManager, SelectedContext
 from core.jobs import budget
 from core.errors import ConfigError
+from core.jobs import store
 from core.orchestrator import (
     checkpoint,
     contracts,
@@ -224,6 +225,7 @@ def _run_stage_in_worktree(
     run_key: str,
     complexity: str = router.DEFAULT_COMPLEXITY,
     recorder: telemetry.RunRecorder | None = None,
+    cancel_event=None,
 ) -> tuple[StageResult, Path | None, str | None]:
     """Runs entirely inside a worker thread — touches nothing shared: its
     own worktree, its own git.Repo instance. Never merges or removes the
@@ -246,6 +248,8 @@ def _run_stage_in_worktree(
     and the worktree comes back to the caller so it still gets cleaned up.
     """
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise store.CancellationRequested("run cancellation requested")
         worktree_path, task_branch = git_ops.create_worktree(
             git.Repo(integration_root), branch, task.id
         )
@@ -274,6 +278,7 @@ def _run_stage_in_worktree(
             platform_config=platform_config,
             budget_limits=budget_limits,
             run_key=run_key,
+            cancel_event=cancel_event,
         )
 
         worktree_repo = git.Repo(worktree_path)
@@ -457,6 +462,8 @@ def run(
     progress: Callable[..., None] | None = None,
     resume: Resume | None = None,
     project: registry.Project | None = None,
+    cancel_event=None,
+    emit_event: Callable[..., None] | None = None,
 ) -> RunReport:
     """`engine_root` is the ai-platform install (config/, prompts/, the
     shared telemetry.sqlite); `target_root` is the repo this run actually
@@ -521,6 +528,10 @@ def run(
     # for an observer, and a queue with a bad row is a smaller problem than a
     # run that died reporting into it.
     report_progress = _guarded(progress)
+    emit = _guarded(emit_event)
+    def check_cancel():
+        if cancel_event is not None and cancel_event.is_set():
+            raise store.CancellationRequested("run cancellation requested")
 
     console.rule("Engine")
 
@@ -618,6 +629,7 @@ def run(
         context = context_manager.select_context(request)
 
         kept_files = len(context.context_paths())
+        emit(event_type="context.selected", payload={"files": kept_files, "candidates": len(context.decisions)})
         if kept_files:
             console.print(
                 f"[bold]Context selected:[/bold] {kept_files} of {len(context.decisions)} candidates "
@@ -730,6 +742,7 @@ def run(
                     f"({stale_branch}) — remove it once you've looked[/dim]"
                 )
         elif workflow.decompose:
+            check_cancel()
             report_progress(stage="decompose")
             known_ids = [t.id for t in workflow.tasks]
             decomposer_result = scheduler.run_task(
@@ -743,6 +756,7 @@ def run(
                 platform_config=platform_config,
                 budget_limits=budget_limits,
                 run_key=run_key,
+                cancel_event=cancel_event,
             )
             chosen = decomposer.parse_tasks(decomposer_result.summary, known_ids) if decomposer_result.success else None
             classified = (
@@ -854,6 +868,7 @@ def run(
             in_flight: dict[Future, planner.Task] = {}
 
             def _dispatch_ready() -> None:
+                check_cancel()
                 for task_id in list(remaining):
                     task = remaining[task_id]
                     pending_deps = [d for d in task.depends_on if d not in completed_ids and d not in blocked_ids]
@@ -877,6 +892,15 @@ def run(
                     snapshot = list(completed)
                     dispatched.add(task.id)
                     report_progress(stage=", ".join(sorted(dispatched)))
+                    try:
+                        selected_provider = scheduler.resolve_provider(
+                            engine_root, task.agent, complexity, platform_config=platform_config
+                        )
+                    except Exception as exc:
+                        selected_provider = f"unresolved:{type(exc).__name__}"
+                    emit(event_type="provider.selected", stage_id=task.id, attempt=0,
+                         payload={"provider": selected_provider, "agent": task.agent})
+                    emit(event_type="stage.started", stage_id=task.id, attempt=0, payload={"agent": task.agent})
                     future = executor.submit(
                         _run_stage_in_worktree,
                         integration_root,
@@ -976,6 +1000,7 @@ def run(
                                     f"  partial work from {task.id} kept on branch {task_branch}"
                                 )
 
+                    emit(event_type="stage.completed", stage_id=task.id, attempt=0, payload={"status": stage_result.status, "files": len(stage_result.files_changed)})
                     stage_reports.append(
                         StageReport(
                             id=task.id,
@@ -988,12 +1013,23 @@ def run(
 
                 _dispatch_ready()
 
+        if cancel_event is not None and cancel_event.is_set():
+            try:
+                git_ops.remove_worktree(integration_repo, integration_root)
+                report_progress(integration_root="")
+            except Exception as exc:
+                console.print(f"[bold yellow]could not remove cancelled integration worktree[/bold yellow]: {exc}")
+            raise store.CancellationRequested("run cancellation requested")
+
         any_stage_incomplete = any(s.status != "done" for s in stage_reports)
 
+        check_cancel()
         report_progress(stage="verify")
         test_result = _verify(integration_repo, branch, config, project)
         _print_test_result(test_result)
+        emit(event_type="tests.completed", payload={"passed": test_result.passed})
 
+        check_cancel()
         report_progress(stage="review")
         diff = git_ops.diff_since(integration_repo, base_sha)
         review_result = scheduler.run_task(
@@ -1006,8 +1042,10 @@ def run(
             platform_config=platform_config,
             budget_limits=budget_limits,
             run_key=run_key,
+            cancel_event=cancel_event,
         )
         review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
+        emit(event_type="review.completed", payload={"passed": review_passed})
         review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
         console.print(f"[bold]Review:[/bold] {review_label}")
         if review_result.summary:
@@ -1029,6 +1067,7 @@ def run(
         )
         if can_correct:
             for attempt in range(1, workflow.max_correction_attempts + 1):
+                check_cancel()
                 correction_attempts = attempt
                 report_progress(stage=f"correction-{attempt}", attempt=attempt)
                 # Per actor, not once per run: earlier attempts and the
@@ -1054,6 +1093,7 @@ def run(
                     platform_config=platform_config,
                     budget_limits=budget_limits,
                     run_key=run_key,
+                    cancel_event=cancel_event,
                 )
                 corrected_files = git_ops.commit_all(
                     integration_repo, f"correction {attempt}: {correction_result.summary or request}"
@@ -1093,8 +1133,10 @@ def run(
                     platform_config=platform_config,
                     budget_limits=budget_limits,
                     run_key=run_key,
+                    cancel_event=cancel_event,
                 )
                 review_passed = review.parse_verdict(review_result.summary) if review_result.success else None
+                emit(event_type="review.completed", payload={"passed": review_passed})
                 review_label = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[review_passed]
                 console.print(f"[bold]Review:[/bold] {review_label}")
                 if review_result.summary:
