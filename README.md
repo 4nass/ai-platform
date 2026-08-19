@@ -29,7 +29,7 @@ The local engineering engine is operational and tested. The delivered surface in
 - project registry/action allowlist, idempotent replay-safe envelopes, hard token/call admission budgets and scoped approvals for the local job path.
 
 
-The authenticated REST/SSE transport and structured event stream are implemented as the remote boundary for OpenClaw. It still requires TLS, a secret manager, rate limiting and a controlled deployment boundary; remote Git synchronization, preview deployment and secrets-retention remain roadmap work. The exact split between engine-delivered capabilities and the remote roadmap is maintained in [Feature status](docs/feature-status.md).
+The authenticated REST/SSE transport and structured event stream are implemented as the remote boundary for OpenClaw. Git base synchronization, approval-bound delivery actions and the provider-neutral preview lifecycle are also implemented in the engine. Production use still requires TLS, a secret manager, rate limiting, concrete CI/preview providers, channel wiring and a controlled deployment boundary; complete secrets retention remains roadmap work. The exact split between engine-delivered capabilities and the remote roadmap is maintained in [Feature status](docs/feature-status.md).
 
 ## MVP target
 The MVP is not a general-purpose SaaS or autonomous deployment system. It is a personal loop that can be used from a phone:

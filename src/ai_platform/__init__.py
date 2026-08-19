@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -858,12 +859,18 @@ def _decide(approval_id: int, *, approved: bool, note: str) -> None:
 
 @app.command()
 def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:
-    """Cancels a job that hasn't started executing yet."""
+    """Cancels a job, or asks a running one to stop."""
     from core.jobs import store
 
     try:
         if store.cancel(ENGINE_ROOT, job_id):
-            console.print(f"[bold]Job {job_id}[/bold] cancelled.")
+            if store.get(ENGINE_ROOT, job_id).state == store.CANCEL_REQUESTED:
+                console.print(
+                    f"[bold]Job {job_id}[/bold] asked to stop — it reports "
+                    f"[bold]cancelled[/bold] once its worker has actually stopped."
+                )
+            else:
+                console.print(f"[bold]Job {job_id}[/bold] cancelled.")
         else:
             console.print(
                 f"Job {job_id} already finished as "
@@ -964,10 +971,112 @@ def restore(
     console.print(f"Restored: {', '.join(restored) or 'none'}")
 
 
+@app.command(name="security-check")
+def security_check(
+    json_output: bool = typer.Option(False, "--json", help="Print a machine-readable readiness report."),
+) -> None:
+    """Evaluate the fail-closed gate before enabling remote exposure."""
+    from rich.table import Table
+    from core import security_readiness
+
+    report = security_readiness.evaluate(ENGINE_ROOT)
+    if json_output:
+        typer.echo(security_readiness.report_json(report))
+    else:
+        table = Table(title=f"Remote security readiness: {report.decision}")
+        table.add_column("status")
+        table.add_column("check")
+        table.add_column("detail")
+        for check in report.checks:
+            style = {"PASS": "green", "WARN": "yellow", "FAIL": "red", "ATTESTED": "cyan"}[check.status]
+            detail = check.detail
+            if check.remediation:
+                detail += f"\nFix: {check.remediation}"
+            table.add_row(f"[{style}]{check.status}[/{style}]", check.name, detail)
+        console.print(table)
+        console.print(f"[dim]deployment fingerprint {report.fingerprint}[/dim]")
+        if report.attested:
+            console.print(
+                f"[cyan]{len(report.attested)} control(s) rest on an operator attestation, "
+                "not on something this process observed.[/cyan]"
+            )
+    if not report.operator_go:
+        raise typer.Exit(1)
+
+
+@app.command()
+def attest(
+    control: str = typer.Argument(..., help="tls_termination or rate_limit."),
+    statement: str = typer.Option(
+        ..., "--statement", "-s", help="What you verified, in your own words."
+    ),
+    by: str = typer.Option(None, "--by", help="Who is attesting (default: the OS user)."),
+    days: int = typer.Option(30, "--days", help="How long this holds, 1-90."),
+) -> None:
+    """Record that you verified a control this engine cannot observe itself.
+
+    TLS terminates upstream and rate limiting lives with it; neither is visible
+    from inside this process. An attestation is the honest form of that: a
+    person states what they checked, it is written down against this exact
+    deployment, and it expires.
+    """
+    import getpass
+
+    from core import attestations
+
+    fingerprint = attestations.deployment_fingerprint(os.environ)
+    try:
+        recorded = attestations.record(
+            ENGINE_ROOT,
+            control=control,
+            fingerprint=fingerprint,
+            statement=statement,
+            attested_by=by or getpass.getuser(),
+            ttl_days=days,
+        )
+    except attestations.AttestationError as exc:
+        console.print(f"[bold red]Refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[bold]{recorded.control}[/bold] attested by {recorded.attested_by}, "
+        f"expires {recorded.expires_at[:10]}."
+    )
+    console.print(
+        f"[dim]Bound to deployment fingerprint {fingerprint} — changing the bind address, "
+        "the TLS endpoint or the rate-limit policy voids it.[/dim]"
+    )
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind."),
+    port: int = typer.Option(8787, "--port", help="Port to bind."),
+) -> None:
+    """Serve the authenticated REST/SSE API. Minimal, and behind a proxy.
+
+    A non-loopback bind re-evaluates the readiness gate first and refuses on any
+    blocking check — the report produced before deployment describes the
+    configuration of that moment, and this is the moment that matters. There is
+    no flag to skip it.
+    """
+    from core.transport import server
+
+    try:
+        console.print(f"[bold]Serving[/bold] on {host}:{port} — Ctrl-C to stop.")
+        server.serve(ENGINE_ROOT, host=host, port=port)
+    except RuntimeError as exc:
+        console.print(f"[bold red]Refused:[/bold red] {exc}")
+        raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("stopped.")
+
+
 _STATE_STYLE = {
     "queued": "cyan",
     "running": "yellow",
     "waiting_approval": "magenta",
+    "cancel_requested": "dim yellow",
     "succeeded": "green",
     "failed": "red",
     "cancelled": "dim",

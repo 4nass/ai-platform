@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 from core.actions.executor import ActionContext, ActionError, ActionResult, CleanupResult, PreviewDeployPlan
 from core.jobs import approvals, store
 from core.orchestrator import registry
@@ -15,6 +15,15 @@ REQUESTED="requested"; DEPLOYING="deploying"; READY="ready"; FAILED="failed"
 EXPIRED="expired"; SUPERSEDED="superseded"; CLEANING="cleaning"; CLEANED="cleaned"
 CLEANUP_FAILED="cleanup_failed"; CANCELLED="cancelled"
 TERMINAL=frozenset({FAILED,EXPIRED,SUPERSEDED,CLEANED,CLEANUP_FAILED,CANCELLED})
+ALLOWED_TRANSITIONS={
+    REQUESTED:frozenset({DEPLOYING,CANCELLED,SUPERSEDED}),
+    DEPLOYING:frozenset({READY,FAILED,EXPIRED,SUPERSEDED,CANCELLED}),
+    READY:frozenset({EXPIRED,SUPERSEDED,CLEANING}),
+    EXPIRED:frozenset({CLEANING}),
+    SUPERSEDED:frozenset({CLEANING}),
+    CANCELLED:frozenset({CLEANING}),
+    CLEANING:frozenset({CLEANED,CLEANUP_FAILED}),
+}
 SCHEMA="""CREATE TABLE IF NOT EXISTS previews (
 id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL, job_id INTEGER, run_id INTEGER,
 project_id TEXT NOT NULL, principal TEXT NOT NULL, service TEXT NOT NULL, environment TEXT NOT NULL,
@@ -102,20 +111,23 @@ class PreviewManager:
         self._validate(plan,project,request_id)
         fp=approvals.fingerprint(plan.action,plan.target,plan.detail()); old=self._find(request_id)
         if old:
-            if old.fingerprint!=fp:
-                self._audit(old.id,"refused.replay",principal,{"reason":"fingerprint mismatch"})
-                raise PreviewReplayError("request id was already used for different preview inputs")
-            return old
+            return self._replay(old,fp,principal)
         if run_id is not None: self._supersede(project,principal,run_id,credentials)
         pid=str(uuid.uuid4()); now=self._now(); token=secrets.token_urlsafe(32)
         digest=hashlib.sha256(token.encode()).hexdigest()
-        with _connect(self.engine_root) as con:
-            con.execute("INSERT INTO previews(id,request_id,job_id,run_id,project_id,principal,service,environment,"
-                        "commit_sha,config_sha256,data_mode,fingerprint,status,capability_hash,ttl_seconds,requested_at)"
-                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (pid,request_id,job_id,run_id,project.id,principal,plan.service,plan.environment,
-                         plan.commit_sha,plan.config_sha256,plan.data_mode,fp,REQUESTED,digest,plan.ttl_seconds,now))
-            self._event(con,pid,"requested",principal,{"commit_sha":plan.commit_sha,"job_id":job_id,"run_id":run_id})
+        try:
+            with _connect(self.engine_root) as con:
+                con.execute("INSERT INTO previews(id,request_id,job_id,run_id,project_id,principal,service,environment,"
+                            "commit_sha,config_sha256,data_mode,fingerprint,status,capability_hash,ttl_seconds,requested_at)"
+                            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (pid,request_id,job_id,run_id,project.id,principal,plan.service,plan.environment,
+                             plan.commit_sha,plan.config_sha256,plan.data_mode,fp,REQUESTED,digest,plan.ttl_seconds,now))
+                self._event(con,pid,"requested",principal,{"commit_sha":plan.commit_sha,"job_id":job_id,"run_id":run_id})
+        except sqlite3.IntegrityError:
+            old=self._find(request_id)
+            if old is None:
+                raise
+            return self._replay(old,fp,principal)
         self._emit(job_id,"preview.requested",{"preview_id":pid,"commit_sha":plan.commit_sha})
         if cancel_event is not None and cancel_event.is_set():
             self._transition(pid,CANCELLED,principal,"cancelled",{"reason":"cancelled before deploy"})
@@ -154,6 +166,15 @@ class PreviewManager:
             self._transition(pid,FAILED,principal,"provider.failure",{"error":type(exc).__name__},error_code=type(exc).__name__)
             self._emit(job_id,"preview.failed",{"preview_id":pid,"error":type(exc).__name__})
         return get(self.engine_root,pid)
+    def _replay(self,record,fp,principal):
+        """Return a concurrent or retried request without duplicating a deploy."""
+        if record.principal!=principal:
+            raise PreviewError("preview not found")
+        if record.fingerprint!=fp:
+            self._audit(record.id,"refused.replay",principal,{"reason":"fingerprint mismatch"})
+            raise PreviewReplayError("request id was already used for different preview inputs")
+        return record
+
     def cleanup(self,pid,*,principal,project,credentials=None,reason="requested"):
         p=get(self.engine_root,pid)
         if p.status in {CLEANED,SUPERSEDED,CLEANUP_FAILED}: return p
@@ -195,7 +216,7 @@ class PreviewManager:
         if plan.project_id!=project.id: raise PreviewError("preview project does not match registry")
         if not request_id or len(request_id)>200 or not all(c.isprintable() for c in request_id): raise PreviewError("preview request id is invalid")
         if len(plan.commit_sha)!=40 or any(c not in "0123456789abcdefABCDEF" for c in plan.commit_sha): raise PreviewError("preview must pin a 40-character hexadecimal commit SHA")
-        if project.base_branch and not project.remote: raise PreviewError("preview project has no configured remote")
+        if not project.remote: raise PreviewError("preview project has no configured remote")
     def _validate_deployment(self,d,plan):
         if d.source_commit!=plan.commit_sha: raise PreviewError("provider deployed a different commit")
         if d.auth_mode not in {"provider","capability"}: raise PreviewError("provider auth or capability auth is required")
@@ -208,10 +229,19 @@ class PreviewManager:
         host=p.hostname.lower().rstrip(".")
         if not any(host==h or host.endswith("."+h) for h in self.allowed_hosts): raise PreviewError(f"{label} is outside the configured preview domain")
     @staticmethod
-    def _access_url(url,mode,token):
-        if mode!="capability": return url
-        p=urlsplit(url); q=urlencode(parse_qsl(p.query,keep_blank_values=True)+[("ai_platform_capability",token)])
-        return urlunsplit((p.scheme,p.netloc,p.path,q,p.fragment))
+    def _access_url(url, mode, token):
+        """Return only an URL that remains safe to place in an artifact.
+
+        A bearer in a query string leaks through browser history, Referer and
+        proxy logs. The manager cannot set a cross-origin secure cookie or
+        header, so capability mode stays fail-closed until a provider-specific
+        edge exchange is implemented.
+        """
+        if mode == "capability":
+            raise PreviewError(
+                "capability previews require a secure provider edge token exchange"
+            )
+        return url
     def _find(self,request_id):
         with _connect(self.engine_root) as con: row=con.execute("SELECT * FROM previews WHERE request_id=?",(request_id,)).fetchone()
         return _row(row) if row else None
@@ -231,13 +261,26 @@ class PreviewManager:
                 self._audit(p.id,"cleanup.failure",principal,{"error":type(exc).__name__,"reason":"superseded"})
                 self._emit(p.job_id,"preview.cleanup_failed",{"preview_id":p.id,"reason":"superseded"})
     def _transition(self,pid,status,actor,event,payload,*,error_code=""):
-        current=get(self.engine_root,pid)
-        if current.status==status or (current.status in TERMINAL and status not in {CLEANING,CLEANED}): return
-        now=self._now()
+        """Write the next status only if the observed status is still current."""
         with _connect(self.engine_root) as con:
-            con.execute("UPDATE previews SET status=?,finished_at=?,error_code=? WHERE id=?",
-                        (status,now if status in TERMINAL or status==READY else current.finished_at,error_code,pid))
+            row=con.execute("SELECT status,finished_at FROM previews WHERE id=?",(pid,)).fetchone()
+            if row is None:
+                raise PreviewError("preview not found")
+            current=row["status"]
+            if current==status:
+                return False
+            if status not in ALLOWED_TRANSITIONS.get(current,frozenset()):
+                raise PreviewError(f"invalid preview transition {current} -> {status}")
+            now=self._now()
+            cursor=con.execute(
+                "UPDATE previews SET status=?,finished_at=?,error_code=? WHERE id=? AND status=?",
+                (status,now if status in TERMINAL or status==READY else row["finished_at"],error_code,pid,current),
+            )
+            if cursor.rowcount!=1:
+                raise PreviewError("preview transition lost a concurrent race")
             self._event(con,pid,event,actor,payload)
+        return True
+
     def _audit(self,pid,event,actor,payload):
         with _connect(self.engine_root) as con: self._event(con,pid,event,actor,payload)
     @staticmethod

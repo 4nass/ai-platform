@@ -33,7 +33,7 @@ An unattended request is bounded in what it can reach, what it can spend, and wh
 
 The cost is four new modules and two new stores' worth of schema in `jobs.sqlite`, plus a second engine config file. Each carries a real ongoing obligation: a migration path, and the discipline that a refusal must commit its audit record explicitly, since `connect()` commits only on a clean exit and the exception reporting a refusal would otherwise roll back the evidence for it. That bug was written twice during this work and caught twice by tests.
 
-What is *not* delivered, and is stated rather than implied: no authenticated transport exists, so the only principal today is the local OS user and gate 2 of [docs/security.md](../security.md) remains partial ([#30](https://github.com/4nass/ai-platform/issues/30)). Budgets bound tokens and calls, not elapsed time or currency. `local_fallback` waits rather than falling back, because there is no local adapter ([#37](https://github.com/4nass/ai-platform/issues/37)). None of this makes the engine safe to expose; it makes the remaining gap nameable.
+Current implementation update: signed transport principals, authenticated REST/SSE operations and typed OpenClaw tools are now delivered in #44/#47/#30. The remaining remote gap is production exposure and gateway deployment, enforced by #49. Budgets still bind tokens and calls, not elapsed time or currency. local_fallback waits rather than falling back because no local adapter exists (#37). None of this makes the engine safe to expose directly to the Internet; it makes the remaining gap nameable.
 
 ## Alternatives
 

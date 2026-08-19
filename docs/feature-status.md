@@ -29,11 +29,11 @@ This page is the authoritative distinction between implemented behavior and targ
 | Bounded review/correction loop | Delivered | Only eligible validation/review failures |
 | SQLite telemetry and cost estimates | Delivered | Analytical history, not a financial ceiling |
 | Hard budgets with reservations | Engine delivered | Token/call gate is real; time/currency ceilings remain in #45 |
-| Scoped approvals for privileged actions | Engine delivered | Fingerprint-bound, single-use approvals plus shared audited action executor (#46) |
+| Scoped approvals for privileged actions | Partially delivered | Fingerprint-bound approvals are live; the shared action-executor library has no CLI, worker or REST caller yet (#46) |
 | Durable jobs, detached worker and crash recovery | Delivered | Heartbeat and reconciliation mark abandoned runs `interrupted` |
 | Resuming an interrupted run | Delivered | `ai-platform resume <id>` skips merged stages |
-| Structured progress events and cooperative cancellation | Planned | Remote event/cancel contract is #29 |
-| REST/SSE remote API | Planned | Narrow authenticated transport is #47; OpenClaw consumer is #30 |
+| Structured progress events and cooperative cancellation | Engine delivered | Durable lifecycle events, cursor replay and cooperative cancellation are implemented; gateway consumption remains #30/#47 |
+| REST/SSE remote API | Engine delivered | Authenticated WSGI REST/SSE server, replay, cancellation, approvals and artifact reads are implemented; production exposure remains #49 |
 | Constrained local-model provider tier | Planned | Adapter direction is #37; MVP role policy/evaluation is #48 |
 | Dirty-tree snapshot mode | Known limitation | Default `head` policy excludes uncommitted changes |
 | Cross-machine run locking | Known limitation | Current lock is intra-machine only |
@@ -46,15 +46,15 @@ This page is the authoritative distinction between implemented behavior and targ
 | P0 | Safe ephemeral-write policy | [#23](https://github.com/4nass/ai-platform/issues/23) | Delivered; issue closed |
 | P0 | Durable asynchronous lifecycle | [#24](https://github.com/4nass/ai-platform/issues/24) | Delivered; issue closed |
 | P0 | Project registry and allowlist | [#25](https://github.com/4nass/ai-platform/issues/25) | Engine delivered; issue closed |
-| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine delivered: signed transport verifier and durable replay ledger in #44; authenticated API consumption remains #30/#47/#49 |
+| P0 | Authentication, authorization and idempotency | [#26](https://github.com/4nass/ai-platform/issues/26) | Engine delivered: signed transport verifier, durable replay ledger and authenticated API consumption; production exposure remains #49 |
 | P0 | Hard admission budgets | [#27](https://github.com/4nass/ai-platform/issues/27) | Token/call reservations delivered; time/currency ceilings are #45 |
 | P0 | Approval gates for privileged actions | [#28](https://github.com/4nass/ai-platform/issues/28) | Gate and shared audited executor delivered; concrete PR/preview integrations remain |
-| P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Planned; required by API/OpenClaw |
+| P1 | Structured events and cancellation | [#29](https://github.com/4nass/ai-platform/issues/29) | Engine delivered: durable events, cursor replay and cooperative cancellation; gateway integration remains |
 | P1 | OpenClaw tool/API integration | [#30](https://github.com/4nass/ai-platform/issues/30) | Engine delivered: versioned typed async tools and restart-safe contract; concrete gateway wiring/TLS remains #47/#49 |
 | P1 | Provider failover hardening | [#31](https://github.com/4nass/ai-platform/issues/31) | Planned |
 | P1 | Quality-aware routing | [#32](https://github.com/4nass/ai-platform/issues/32) | Planned |
 | P1 | Base synchronization and remote delivery | [#33](https://github.com/4nass/ai-platform/issues/33) | Engine delivered: pinned base, fetch/divergence policy and approval-only push guard; end-to-end PR delivery remains #30/#46/#47 |
-| P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Engine delivered: immutable provider contract, capability URLs, TTL/reconcile/cleanup, REST status/artifact links; concrete CI provider remains |
+| P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Library only: immutable provider contract and lifecycle exist; no reachable deploy/reconcile caller, concrete CI provider or secure capability exchange |
 | P1 | Secrets isolation and retention | [#35](https://github.com/4nass/ai-platform/issues/35) | Planned; required by #49 |
 | P1 | Multi-turn run references | [#36](https://github.com/4nass/ai-platform/issues/36) | Planned |
 | P1 | Local-model provider | [#37](https://github.com/4nass/ai-platform/issues/37) | Planned; MVP policy/evaluation is #48 |
@@ -63,19 +63,19 @@ This page is the authoritative distinction between implemented behavior and targ
 | P2 | Managed local user service | [#40](https://github.com/4nass/ai-platform/issues/40) | Delivered in engine with Linux/systemd, WSL2/systemd and macOS/launchd profiles; host enablement remains operator-specific |
 | P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Delivered; issue closed |
 | P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Engine delivered: channel-neutral compact rendering, preferences, redaction and idempotent retryable outbox; concrete gateway adapters remain |
-| P1 | REST/SSE remote API | [#47](https://github.com/4nass/ai-platform/issues/47) | Planned; MVP gateway transport |
+| P1 | REST/SSE remote API | [#47](https://github.com/4nass/ai-platform/issues/47) | Engine delivered: authenticated WSGI API and SSE replay; TLS/rate-limit deployment remains in #49 |
 | P1 | Local-model MVP policy and evaluation | [#48](https://github.com/4nass/ai-platform/issues/48) | Planned; constrained roles only |
-| P0 | Remote exposure security readiness gate | [#49](https://github.com/4nass/ai-platform/issues/49) | Planned; final go/no-go evidence |
+| P0 | Remote exposure security readiness gate | [#49](https://github.com/4nass/ai-platform/issues/49) | Engine delivered: preflight `security-check` with `ATTESTED` for controls this process cannot observe, no override, and gate revalidation before any non-loopback bind; decision remains NO_GO until #35, host sandbox, production credentials and TLS/rate-limit attestations are in place |
 
 ## MVP gate
 
-The first expanded phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). It requires authenticated transport (#44), REST/SSE plus lifecycle events (#29/#30/#47), constrained local-model execution (#37/#48), synchronized delivery and immutable artifacts (#33), authenticated previews (#34), secrets/retention (#35), approved external actions (#46, executor delivered; concrete handlers remain), the security readiness gate (#49), and a reliable worker/notification path (#40/#42).
+The first expanded phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). Transport, lifecycle, sync and service foundations exist in #29/#30/#33/#40/#44/#47. Preview, notification and action modules (#34/#42/#46) still need one reachable, principal-aware integration path. Release readiness also requires constrained local-model execution (#37/#48), complete secrets/retention (#35), time/currency ceilings (#45), concrete provider/gateway deployment and the security readiness gate (#49).
 
 Local engine delivery of #25-#28 is a prerequisite, not a substitute for the remote gates. Local models are included in this MVP only for explicitly allowed low-risk roles and only after the evaluation policy in #48 passes.
 
 ## Tracking reconciliation
 
-GitHub keeps #26-#28 open because their remote halves are unfinished. The residuals are split into #44 (transport auth), #45 (time/currency budgets) and #46 (audited external actions). New MVP scope is tracked in #47 (REST/SSE), #48 (local-model policy) and #49 (security readiness). Close a parent only when its full end-to-end contract is delivered.
+GitHub keeps the parent safety issues open when their production or remote halves are unfinished. Transport auth (#44), structured events (#29), REST/SSE (#47), OpenClaw tools (#30), base synchronization (#33), previews (#34), service/notifications (#40/#42) and the audited executor (#46) now have engine implementations. Remaining MVP scope is #35, #37/#48, #45 and #49 plus concrete gateway/provider deployment. Close a parent only when its full end-to-end contract is delivered.
 
 ## Release rule
 

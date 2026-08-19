@@ -383,14 +383,19 @@ def test_cli_cancel_stops_a_queued_job(engine, tmp_path) -> None:
     assert store.get(engine, job_id).state == "cancelled"
 
 
-def test_cli_cancel_stops_a_running_job(engine, tmp_path) -> None:
+def test_cli_cancel_asks_a_running_job_to_stop(engine, tmp_path) -> None:
+    """`cancel` on a running job is a request, and says so — its worker still
+    has a provider subprocess to signal and worktrees to remove."""
     from core.jobs import store
 
     job_id = store.submit(engine, project=str(tmp_path), request="add oauth2").id
     store.claim(engine, job_id, worker_pid=1)
+
     result = runner.invoke(ai_platform.app, ["cancel", str(job_id)])
+
     assert result.exit_code == 0
-    assert store.get(engine, job_id).state == "cancelled"
+    assert store.get(engine, job_id).state == "cancel_requested"
+    assert "stop" in result.stdout.lower()
 
 
 def test_cli_reconciles_abandoned_jobs_on_a_read(engine, tmp_path) -> None:
@@ -796,3 +801,19 @@ def test_cli_approving_a_budget_pause_points_at_resume(
     result = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
 
     assert "ai-platform resume 7" in result.stdout
+
+def test_serve_command_starts_the_transport_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict = {}
+    monkeypatch.setattr(
+        "core.transport.server.serve",
+        lambda engine_root, host, port: called.update(
+            engine_root=engine_root, host=host, port=port
+        ),
+    )
+
+    result = runner.invoke(ai_platform.app, ["serve", "--host", "127.0.0.1", "--port", "9911"])
+
+    assert result.exit_code == 0
+    assert called["engine_root"] == ai_platform.ENGINE_ROOT
+    assert called["host"] == "127.0.0.1"
+    assert called["port"] == 9911

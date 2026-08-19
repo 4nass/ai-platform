@@ -36,6 +36,10 @@ CONFIG_PATH = Path(".ai-platform.yml")
 
 @dataclass
 class TestResult:
+    # Pytest otherwise treats this domain dataclass as a test class solely
+    # because its name starts with Test.
+    __test__ = False
+
     passed: bool
     output: str
     skipped: bool = False

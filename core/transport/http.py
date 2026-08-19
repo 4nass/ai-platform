@@ -9,9 +9,11 @@ the built-in server helper is for local development and smoke tests.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
@@ -31,6 +33,7 @@ from core.transport import service as transport_service
 
 MAX_BODY_BYTES = 1_048_576
 JOB_ID = re.compile(r"^[1-9][0-9]{0,18}$")
+ACCESS_LOG = logging.getLogger("ai_platform.transport.access")
 SCOPES = {
     ("POST", "/v1/jobs"): "jobs:submit",
     ("GET", "job"): "jobs:read",
@@ -65,15 +68,24 @@ class RemoteAPI:
         self.clock = clock
 
     def application(self, environ, start_response):
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        path = environ.get("PATH_INFO", "")
+        status = 500
+        outcome = "internal_error"
         try:
-            method = environ.get("REQUEST_METHOD", "GET").upper()
-            path = environ.get("PATH_INFO", "")
             if not path.startswith("/v1/"):
                 raise APIError(404, "not_found", "resource not found")
             body = self._body(environ)
+            # HMAC verification needs raw bytes, not parsed JSON. Authenticate
+            # first so malformed attacker-controlled JSON cannot consume parser
+            # work before credentials and the request signature are checked.
+            auth = self._authenticate(environ, method, path, body)
+            if body:
+                self._require_json_content_type(environ)
             payload = self._json(body) if body else {}
-            auth = self._authenticate(environ, method, path, body, payload)
+            auth = self._bind_signed_payload(method, path, payload, auth, environ)
             result = self._dispatch(method, path, payload, auth, environ, body)
+            status, outcome = 200, "ok"
             if isinstance(result, _SSE):
                 headers = [
                     ("Content-Type", "text/event-stream; charset=utf-8"),
@@ -83,24 +95,63 @@ class RemoteAPI:
                 ]
                 start_response("200 OK", headers)
                 return result.iter_bytes()
-            return self._json_response(start_response, 200, result)
+            return self._json_response(start_response, status, result)
         except APIError as exc:
-            return self._error(start_response, exc.status, exc.code, exc.message)
+            status, outcome = exc.status, exc.code
+            return self._error(start_response, status, exc.code, exc.message)
         except AuthorizationError:
-            return self._error(start_response, 403, "forbidden", "operation not authorized")
+            status, outcome = 403, "authorization_denied"
+            return self._error(start_response, status, "forbidden", "operation not authorized")
         except (AuthenticationError, ReplayError, TransportAuthError):
-            return self._error(start_response, 401, "unauthorized", "request not authorized")
+            status, outcome = 401, "authentication_failed"
+            return self._error(start_response, status, "unauthorized", "request not authorized")
         except (registry.RegistryError, store.JobError, approvals.ApprovalError):
-            return self._error(start_response, 404, "not_found", "resource not found")
+            status, outcome = 404, "not_found"
+            return self._error(start_response, status, "not_found", "resource not found")
         except Exception:
-            return self._error(start_response, 500, "internal_error", "internal server error")
+            return self._error(start_response, status, outcome, "internal server error")
+        finally:
+            self._log_access(environ, method=method, path=path, status=status, outcome=outcome)
+
+    @staticmethod
+    def _log_path(path: str) -> str:
+        """Return a route template rather than logging a caller-controlled path."""
+        if path == "/v1/jobs":
+            return path
+        parts = path.rstrip("/").split("/")
+        if len(parts) == 4 and JOB_ID.fullmatch(parts[3]):
+            return "/v1/jobs/{id}"
+        if len(parts) == 5 and JOB_ID.fullmatch(parts[3]) and parts[4] in {
+            "events", "cancel", "approval", "artifacts", "preview"
+        }:
+            return f"/v1/jobs/{{id}}/{parts[4]}"
+        return "invalid"
+
+    @staticmethod
+    def _log_access(environ, *, method: str, path: str, status: int, outcome: str) -> None:
+        """Log bounded, non-secret request evidence for incident response.
+
+        Do not log bodies, query strings, credential ids, signatures, nonces,
+        envelope ids or an arbitrary PATH_INFO value. Those are all supplied by
+        the caller and may contain sensitive data.
+        """
+        level = logging.INFO if status < 400 else logging.WARNING
+        ACCESS_LOG.log(
+            level,
+            "transport_request method=%s route=%s status=%s outcome=%s client=%s",
+            method,
+            RemoteAPI._log_path(path),
+            status,
+            outcome,
+            environ.get("REMOTE_ADDR", "-"),
+        )
 
     @staticmethod
     def _json_response(start_response, status, value):
         data = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         reasons = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
                    413: "Payload Too Large", 403: "Forbidden",
-                   500: "Internal Server Error"}
+                   415: "Unsupported Media Type", 500: "Internal Server Error"}
         start_response(f"{status} {reasons.get(status, 'Error')}", [
             ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(data))),
@@ -126,6 +177,16 @@ class RemoteAPI:
         return body
 
     @staticmethod
+    def _require_json_content_type(environ) -> None:
+        content_type = environ.get("CONTENT_TYPE", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            raise APIError(
+                415,
+                "unsupported_media_type",
+                "request body must use Content-Type application/json",
+            )
+
+    @staticmethod
     def _json(body: bytes) -> dict:
         try:
             value = json.loads(body)
@@ -135,29 +196,23 @@ class RemoteAPI:
             raise APIError(400, "invalid_json", "request body must be a JSON object")
         return value
 
-    def _authenticate(self, environ, method, path, body, payload):
+    def _authenticate(self, environ, method, path, body):
         key_id = environ.get("HTTP_X_API_KEY", "")
         signature = environ.get("HTTP_X_SIGNATURE", "")
         nonce = environ.get("HTTP_X_NONCE", "")
         timestamp = environ.get("HTTP_X_TIMESTAMP", "")
         if not all((key_id, signature, nonce, timestamp)):
             raise AuthenticationError("missing authentication headers")
-        envelope_data = payload.get("envelope") if method == "POST" else None
-        envelope_data = envelope_data if isinstance(envelope_data, dict) else {}
-        envelope = Envelope(
-            channel=str(envelope_data.get("channel") or environ.get("HTTP_X_CHANNEL", "")),
-            sender_id=str(envelope_data.get("sender_id") or environ.get("HTTP_X_SENDER_ID", "")),
-            chat_id=str(envelope_data.get("chat_id") or environ.get("HTTP_X_CHAT_ID", "")),
-            message_id=str(envelope_data.get("message_id") or environ.get("HTTP_X_MESSAGE_ID", "")),
-            sent_at=str(envelope_data.get("sent_at") or ""),
-            project_id=str(payload.get("project_id") or envelope_data.get("project_id") or "") or None,
-            session_id=payload.get("session_id"),
-            dirty_policy=str(payload.get("dirty_policy") or "head"),
-        )
+        # These header identity values are only a pre-authentication envelope:
+        # after the signed JSON is parsed, _bind_signed_payload requires the
+        # two representations to agree and replaces this provisional value.
+        envelope = self._header_envelope(environ)
         scope = self._scope(method, path)
+        query = environ.get("QUERY_STRING", "")
+        signed_path = f"{path}?{query}" if query else path
         return self.authenticator.verify(
             method=method,
-            path=path,
+            path=signed_path,
             body=body,
             key_id=key_id,
             timestamp=timestamp,
@@ -167,6 +222,51 @@ class RemoteAPI:
             scope=scope,
             require_delivery_identity=(method == "POST" and path == "/v1/jobs"),
         )
+
+    @staticmethod
+    def _header_envelope(environ) -> Envelope:
+        return Envelope(
+            channel=str(environ.get("HTTP_X_CHANNEL", "")),
+            sender_id=str(environ.get("HTTP_X_SENDER_ID", "")),
+            chat_id=str(environ.get("HTTP_X_CHAT_ID", "")),
+            message_id=str(environ.get("HTTP_X_MESSAGE_ID", "")),
+        )
+
+    @staticmethod
+    def _payload_envelope(payload, environ) -> Envelope:
+        data = payload.get("envelope")
+        data = data if isinstance(data, dict) else {}
+        return Envelope(
+            channel=str(data.get("channel") or environ.get("HTTP_X_CHANNEL", "")),
+            sender_id=str(data.get("sender_id") or environ.get("HTTP_X_SENDER_ID", "")),
+            chat_id=str(data.get("chat_id") or environ.get("HTTP_X_CHAT_ID", "")),
+            message_id=str(data.get("message_id") or environ.get("HTTP_X_MESSAGE_ID", "")),
+            sent_at=str(data.get("sent_at") or ""),
+            project_id=str(payload.get("project_id") or data.get("project_id") or "") or None,
+            session_id=payload.get("session_id"),
+            dirty_policy=str(payload.get("dirty_policy") or "head"),
+        )
+
+    def _bind_signed_payload(self, method, path, payload, auth, environ):
+        """Bind the JSON envelope after the raw signed request is verified.
+
+        The remote identity in headers is needed before parsing to select and
+        authenticate the credential. The body is still authoritative for the
+        durable envelope: it is HMAC-signed, and any identity disagreement is
+        rejected rather than letting a header alter a signed submission.
+        """
+        if method != "POST" or path != "/v1/jobs":
+            return auth
+        envelope = self._payload_envelope(payload, environ)
+        header = auth.envelope
+        if (
+            envelope.channel != header.channel
+            or envelope.sender_id != header.sender_id
+            or envelope.chat_id != header.chat_id
+            or envelope.message_id != header.message_id
+        ):
+            raise AuthenticationError("signed envelope does not match request identity")
+        return replace(auth, envelope=envelope)
 
     @staticmethod
     def _scope(method, path):

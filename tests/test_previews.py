@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import threading
 import pytest
 from core.actions.executor import ActionExecutor, PreviewDeployPlan, PREVIEW_DEPLOY, SUCCEEDED, WAITING_APPROVAL
 from core.jobs import approvals
@@ -13,7 +14,7 @@ class Clock:
     def __call__(self): return self.value.isoformat()
     def advance(self,seconds): self.value += timedelta(seconds=seconds)
 class Provider:
-    def __init__(self,*,commit=None,auth_mode="capability",status=READY,raises=False):
+    def __init__(self,*,commit=None,auth_mode="provider",status=READY,raises=False):
         self.commit=commit; self.auth_mode=auth_mode; self.status=status; self.raises=raises
         self.deployments=0; self.cleanups=0; self.context=None
     def deploy(self,plan,context):
@@ -31,9 +32,8 @@ def manager(tmp_path,provider,clock=None):
 def test_deploy_is_pinned_authenticated_and_audited(tmp_path):
     provider=Provider(); clock=Clock(); m=manager(tmp_path,provider,clock)
     record=m.deploy(plan(),project=project(tmp_path),principal="owner",request_id="preview-1",job_id=7,run_id=11,credentials="opaque-secret")
-    assert record.status==READY and record.commit_sha==COMMIT and record.auth_mode=="capability"
-    token=record.url.split("=",1)[1]
-    assert m.authorize_capability(token).id==record.id
+    assert record.status==READY and record.commit_sha==COMMIT and record.auth_mode=="provider"
+    assert "ai_platform_capability" not in record.url
     assert provider.context.credentials=="opaque-secret"
     assert "opaque-secret" not in str(record.safe_dict())
     assert [e["event"] for e in events(tmp_path,record.id)]==["requested","deploying","ready"]
@@ -70,3 +70,90 @@ def test_invalid_data_mode_is_rejected():
 def test_provider_failure_does_not_persist_raw_error(tmp_path):
     record=manager(tmp_path,Provider(raises=True)).deploy(plan(),project=project(tmp_path),principal="owner",request_id="failed")
     assert record.status==FAILED and "must-not-be-persisted" not in str(get(tmp_path,record.id))
+
+def test_capability_mode_fails_closed_without_a_secure_edge_exchange(tmp_path):
+    provider = Provider(auth_mode="capability")
+    record = manager(tmp_path, provider).deploy(
+        plan(), project=project(tmp_path), principal="owner", request_id="capability"
+    )
+
+    assert record.status == FAILED
+    assert "ai_platform_capability" not in record.url
+    assert record.error_code == "PreviewError"
+
+
+def test_preview_requires_a_registered_remote_even_without_a_base_branch(tmp_path):
+    no_remote = Project(
+        id="demo", path=tmp_path, remote="", base_branch="",
+        allowed_actions=(PREVIEW_DEPLOY,),
+    )
+
+    with pytest.raises(Exception, match="configured remote"):
+        manager(tmp_path, Provider()).deploy(
+            plan(), project=no_remote, principal="owner", request_id="no-remote"
+        )
+
+def test_concurrent_preview_requests_share_one_deployment(tmp_path, monkeypatch):
+    provider = Provider()
+    m = manager(tmp_path, provider)
+    original_find = m._find
+    barrier = threading.Barrier(2)
+    calls = 0
+    lock = threading.Lock()
+
+    def synchronized_find(request_id):
+        nonlocal calls
+        with lock:
+            calls += 1
+            number = calls
+        if number <= 2:
+            barrier.wait(timeout=5)
+        return original_find(request_id)
+
+    monkeypatch.setattr(m, "_find", synchronized_find)
+    records, failures = [], []
+
+    def deploy():
+        try:
+            records.append(
+                m.deploy(plan(), project=project(tmp_path), principal="owner", request_id="racing")
+            )
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=deploy) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert len({record.id for record in records}) == 1
+    assert provider.deployments == 1
+
+
+def test_concurrent_preview_transitions_cannot_overwrite_each_other(tmp_path):
+    m = manager(tmp_path, Provider(status="deploying"))
+    record = m.deploy(plan(), project=project(tmp_path), principal="owner", request_id="state-race")
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def transition(status):
+        barrier.wait(timeout=5)
+        try:
+            m._transition(record.id, status, "owner", "test", {})
+            outcomes.append("won")
+        except Exception:
+            outcomes.append("lost")
+
+    threads = [
+        threading.Thread(target=transition, args=(READY,)),
+        threading.Thread(target=transition, args=(FAILED,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert sorted(outcomes) == ["lost", "won"]
+    assert get(tmp_path, record.id).status in {READY, FAILED}

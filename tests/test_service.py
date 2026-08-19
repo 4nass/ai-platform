@@ -33,3 +33,12 @@ def test_env_file_is_explicit_and_does_not_execute(tmp_path, monkeypatch):
     service.load_env_file(env)
     assert monkeypatch
     assert service.ServiceConfig.from_env(tmp_path).idle_seconds == 2.0
+
+def test_env_file_overrides_an_inherited_setting(tmp_path, monkeypatch):
+    env = tmp_path / "service.env"
+    env.write_text("AI_PLATFORM_SERVICE_IDLE=2\n", encoding="utf-8")
+    monkeypatch.setenv("AI_PLATFORM_SERVICE_IDLE", "99")
+
+    service.load_env_file(env)
+
+    assert service.ServiceConfig.from_env(tmp_path).idle_seconds == 2.0

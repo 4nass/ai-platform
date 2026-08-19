@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,13 +39,15 @@ def request(app, method, path, body=b"", *, credential_obj=None, nonce="nonce_12
         "HTTP_X_CHAT_ID": chat,
         "HTTP_X_MESSAGE_ID": message,
         "CONTENT_LENGTH": str(len(body)),
+        "CONTENT_TYPE": "application/json" if body else "",
         "wsgi.input": io.BytesIO(body),
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": query,
     }
+    signed_path = f"{path}?{query}" if query else path
     headers["HTTP_X_SIGNATURE"] = c.sign(
-        method=method, path=path, body=body, timestamp=NOW, nonce=nonce
+        method=method, path=signed_path, body=body, timestamp=NOW, nonce=nonce
     )
     if extra:
         headers.update(extra)
@@ -210,3 +213,121 @@ def test_preview_status_and_artifact_link_are_principal_bound(api, tmp_path):
     item = next(item for item in value["artifacts"] if item["kind"] == "preview")
     assert item["ref"] == preview.url
     assert item["available"] is True
+
+def test_access_logs_are_useful_without_recording_request_secrets(api, caplog) -> None:
+    app, c = api
+    caplog.set_level(logging.INFO, logger="ai_platform.transport.access")
+    secret_path = "/v1/not-a-route/sk-test-12345678901234567890"
+    status, value = request(app.application, "GET", secret_path, credential_obj=c)
+
+    assert status["status"] == "404 Not Found"
+    assert value["error"]["code"] == "not_found"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("status=404" in message and "route=invalid" in message for message in messages)
+    assert all("sk-test-12345678901234567890" not in message for message in messages)
+
+
+def test_access_logs_authentication_failures(api, caplog) -> None:
+    app, c = api
+    caplog.set_level(logging.WARNING, logger="ai_platform.transport.access")
+    status, value = request(
+        app.application,
+        "GET",
+        "/v1/jobs/1",
+        credential_obj=c,
+        extra={"HTTP_X_SIGNATURE": "not-a-valid-signature"},
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"
+    assert any(
+        "status=401" in record.getMessage() and "outcome=authentication_failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+def test_signed_query_parameters_cannot_be_changed_after_authentication(api):
+    app, c = api
+    job_id = store.submit(
+        app.engine_root, project="/safe", request="x", principal="openclaw:owner-1",
+        envelope={"project_id": "demo"},
+    ).id
+
+    status, value = request(
+        app.application,
+        "GET",
+        f"/v1/jobs/{job_id}/events",
+        credential_obj=c,
+        nonce="nonce_tampered_query",
+        query="cursor=0",
+        extra={"QUERY_STRING": "cursor=999"},
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"
+
+def test_json_routes_reject_an_unlabelled_or_wrong_media_type(api):
+    app, c = api
+    body = b"{}"
+
+    status, value = request(
+        app.application,
+        "POST",
+        "/v1/jobs",
+        body,
+        credential_obj=c,
+        nonce="nonce_media_type",
+        extra={"CONTENT_TYPE": "text/plain"},
+    )
+
+    assert status["status"] == "415 Unsupported Media Type"
+    assert value["error"]["code"] == "unsupported_media_type"
+
+def test_invalid_signature_is_rejected_before_json_parsing(api, monkeypatch):
+    app, c = api
+    parsed = False
+
+    def fail_if_parsed(body):
+        nonlocal parsed
+        parsed = True
+        raise AssertionError("untrusted JSON must not be parsed")
+
+    monkeypatch.setattr(app, "_json", fail_if_parsed)
+    status, value = request(
+        app.application,
+        "POST",
+        "/v1/jobs",
+        b"{not valid json}",
+        credential_obj=c,
+        nonce="nonce_auth_before_json",
+        extra={"HTTP_X_SIGNATURE": "invalid"},
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"
+    assert parsed is False
+
+
+def test_signed_payload_identity_must_match_authenticated_headers(api):
+    app, c = api
+    body = json.dumps({
+        "project_id": "demo",
+        "request": "run tests",
+        "envelope": {
+            "channel": "other-channel",
+            "sender_id": "owner-1",
+            "chat_id": "chat-1",
+            "message_id": "message-1",
+        },
+    }, separators=(",", ":")).encode()
+
+    status, value = request(
+        app.application,
+        "POST",
+        "/v1/jobs",
+        body,
+        credential_obj=c,
+        nonce="nonce_identity_mismatch",
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"

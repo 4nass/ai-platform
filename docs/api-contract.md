@@ -4,7 +4,7 @@
 - Version: `v1`
 - Tracking: [#47](https://github.com/4nass/ai-platform/issues/47), [#30](https://github.com/4nass/ai-platform/issues/30)
 
-This document defines the stable boundary between user interfaces (OpenClaw, a browser, CLI adapters or future notification clients) and AI Platform. It is a design contract, not a claim that the remote server is already deployed. The transport verifier is delivered as an engine building block; the REST/SSE server and public exposure gate remain tracked by #47 and #49. Until then, the local CLI remains the supported interface.
+This document defines the stable boundary between user interfaces (OpenClaw, a browser, CLI adapters or future notification clients) and AI Platform. The transport verifier and authenticated REST/SSE server are implemented and tested in the engine. The server helper is intended for local/development use; production network exposure remains gated by #49, so the local CLI remains the safest supported interface.
 
 ## Ownership boundary
 
@@ -169,8 +169,10 @@ GET /v1/jobs/{job_id}/preview
 Returns the authenticated preview record when a deployment exists. It includes
 the immutable commit_sha, provider status, expiring URL, optional logs URL,
 data isolation mode and expires_at. The URL is an artifact, not an
-authorization bypass: the provider edge must enforce its provider auth or
-capability token. The endpoint is principal-bound like the other job reads.
+authorization bypass: the provider edge must enforce its own authentication.
+Capability-token previews are fail-closed until a secure cookie or header
+exchange is implemented. The endpoint is principal-bound like the other job
+reads.
 
 The SSE stream also carries preview.requested, preview.deploying, preview.ready,
 preview.failed, preview.expired, preview.cleaned and preview.cleanup_failed

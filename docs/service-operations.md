@@ -29,8 +29,7 @@ Use AI_PLATFORM_SERVICE_REQUIRED_PATHS for a path-separated mount list,
 AI_PLATFORM_SERVICE_NETWORK=host:port for a concrete network prerequisite,
 AI_PLATFORM_SERVICE_MAX_BACKOFF for the retry ceiling, and
 AI_PLATFORM_SERVICE_LOG for a log file. The CLI --env-file accepts simple
-KEY=VALUE lines only; it never evaluates shell code. Keep the file mode 0600
-and put provider credentials in the provider CLI's own user configuration.
+KEY=VALUE lines only; it never evaluates shell code. Because passing `--env-file` is explicit, its values override inherited environment settings. Keep the file mode 0600 and put provider credentials in the provider CLI's own user configuration.
 
 ## Linux and WSL2 (systemd)
 

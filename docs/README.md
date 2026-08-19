@@ -6,7 +6,7 @@ This directory is the source of truth for the platform's technical design, opera
 
 The product is a personal software-engineering control plane, not a chat bot and not a multi-tenant SaaS. A request arriving from a phone should be able to create a durable run, select the right context and model effort, keep spend bounded, ask for approval at consequential boundaries, and return a reproducible branch plus a browser-validatable preview. OpenClaw owns interaction and channel delivery; AI Platform owns engineering truth, policy, execution and audit.
 
-The current implementation is the local execution half of that loop. The remote control loop is deliberately documented as a sequence of gates rather than implied by the presence of a local job queue.
+The current implementation includes the local execution engine plus authenticated transport, REST/SSE, typed OpenClaw tools, structured events, preview lifecycle, notifications and managed service profiles. These engine-side capabilities are tested, but production remote exposure remains gated by #49 and concrete gateway/provider wiring.
 
 ## Read in this order
 
@@ -41,6 +41,7 @@ The current implementation is the local execution half of that loop. The remote 
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
 | Managed runtime | [Managed local user service](service-operations.md) | `core/service.py`, `core/backup.py`, `deploy/` |
 | Notifications | [Mobile notifications](notifications.md) | `core/notifications.py`, `notifications.sqlite` |
+| Remote security gate | [Remote security readiness](security-readiness.md) | `core/security_readiness.py`, `ai-platform security-check` |
 
 ## Governance and history
 

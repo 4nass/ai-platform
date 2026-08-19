@@ -8,17 +8,26 @@ approvals and event cursors remain in their existing modules.
 
 Every request carries X-API-Key, X-Timestamp, X-Nonce and X-Signature. The
 signature is the HMAC-SHA256 canonical request from core.transport.auth
-(method, exact path, timestamp, nonce and SHA-256 body). TLS is still required.
+(method, exact path including its raw query string, timestamp, nonce and SHA-256
+body). TLS is still required.
 POST /v1/jobs additionally carries an envelope with channel, sender, chat and
 message identifiers; these are checked against the credential principal and
 provide durable idempotency.
 
 Credentials for the development server are supplied through the
-AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Do not
-put secrets in YAML, Git, query strings or logs. Production needs a secret
-manager, TLS, a process supervisor and reverse-proxy rate/body limits.
+AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Keys
+can have not_before and expires_at timestamps and may be revoked during
+rotation. Do not put secrets in YAML, Git, query strings or logs.
+
+`ai-platform serve --host 127.0.0.1 --port 8787` starts the built-in local development server. It uses a request thread per connection, so a long-lived SSE subscription does not block job status, cancellation or approval calls. It emits an access record for every request, including route template, HTTP status, outcome and direct client address. It never logs request bodies, query strings, credential identifiers, signatures, nonces, delivery identifiers or arbitrary paths. It is not a production WSGI deployment: a production host must configure the same `ai_platform.transport.access` logger itself and keep its proxy access logs subject to the same redaction and retention policy.
+
+After a request has passed HMAC and identity verification, its nonce is recorded
+before scope authorization. A scope refusal therefore consumes that signed
+nonce; callers must create a fresh signed request for a corrected operation.
 
 ## Endpoints
+
+JSON request bodies must include `Content-Type: application/json`; unsupported media types are rejected after HMAC authentication and before JSON parsing. The server reads bounded raw bytes only to verify the HMAC; it parses JSON after authentication. For a job submission, the header identity used during authentication must exactly match the signed body envelope before it becomes the durable job identity.
 
 - POST /v1/jobs: JSON {project_id, request, envelope, dirty_policy?}. Project ids
   are resolved through the registry; paths and shell commands are rejected.

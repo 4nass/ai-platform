@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import multiprocessing
+from pathlib import Path
+
 import pytest
 
 from core.jobs import store
@@ -21,6 +24,24 @@ NOW = 1_700_000_000
 PATH = "/v1/jobs"
 BODY = b'{"project_id":"ai-platform","request":"run tests"}'
 NONCE = "nonce_0123456789"
+
+
+def _claim_nonce_in_child(database_path, ready, start, result):
+    """Claim one nonce after both independent processes are ready."""
+    try:
+        ready.put(True)
+        if not start.wait(timeout=10):
+            raise RuntimeError("parent never released concurrent nonce claim")
+        replayed = ReplayStore(Path(database_path)).claim(
+            key_id="key-current",
+            nonce=NONCE,
+            body_hash="body-hash",
+            expires_at=NOW + 900,
+            now=NOW,
+        )
+        result.put(("ok", replayed))
+    except BaseException as exc:
+        result.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _credential(**overrides) -> TransportCredential:
@@ -162,6 +183,44 @@ def test_same_nonce_and_body_is_an_idempotent_retry(tmp_path: Path) -> None:
 
     assert first.replayed is False
     assert second.replayed is True
+
+
+def test_a_future_dated_request_cannot_outlive_its_own_ledger_entry(tmp_path: Path) -> None:
+    """The nonce must stay refused for as long as its signature is accepted.
+
+    The skew check is two-sided, so a client may legally date a request into
+    the future. If the ledger entry expired at arrival time plus the skew, a
+    request dated NOW+899 would be forgotten at NOW+900 while remaining
+    verifiable until NOW+1799 — and the captured payload would come back as a
+    brand new request rather than a detected replay.
+    """
+    credential = _credential()
+    clock = {"now": NOW}
+    auth = Authenticator(
+        {credential.key_id: credential},
+        ReplayStore(tmp_path / "auth.sqlite"),
+        clock=lambda: clock["now"],
+    )
+    future = NOW + 899
+    signed = dict(
+        method="POST", path=PATH, body=BODY, key_id=credential.key_id, timestamp=future,
+        nonce=NONCE, envelope=_envelope(),
+        signature=credential.sign(
+            method="POST", path=PATH, body=BODY, timestamp=future, nonce=NONCE
+        ),
+    )
+
+    assert auth.verify(**signed).replayed is False
+
+    # Every later moment at which this signature still verifies must report a
+    # replay rather than a fresh request.
+    for offset in (901, 1200, 1798):
+        clock["now"] = NOW + offset
+        assert auth.verify(**signed).replayed is True, f"replay missed at NOW+{offset}"
+
+    clock["now"] = NOW + 1800
+    with pytest.raises(ReplayError, match="replay window"):
+        auth.verify(**signed)
 
 
 def test_nonce_ledger_survives_a_new_authenticator(tmp_path: Path) -> None:
@@ -318,3 +377,73 @@ def test_verified_submission_rejects_text_not_present_in_signed_body(tmp_path: P
             tmp_path, project="/allowlisted/ai-platform", project_id="ai-platform",
             request="different request", body=BODY, authenticated=authenticated,
         )
+
+def test_nonce_claim_is_atomic_across_independent_processes(tmp_path: Path) -> None:
+    """The durable ledger, not the in-process lock, decides the winner."""
+    context = multiprocessing.get_context("spawn")
+    ready, start, result = context.Queue(), context.Event(), context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_nonce_in_child,
+            args=(str(tmp_path / "auth.sqlite"), ready, start, result),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        assert ready.get(timeout=10) is True
+        assert ready.get(timeout=10) is True
+        start.set()
+        outcomes = [result.get(timeout=10), result.get(timeout=10)]
+    finally:
+        start.set()
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(outcomes) == [("ok", False), ("ok", True)]
+
+def test_credential_activation_window_is_enforced_at_both_boundaries(tmp_path: Path) -> None:
+    before = _credential(not_before=NOW + 1)
+    expired = _credential(expires_at=NOW)
+    active = _credential(expires_at=NOW + 1)
+
+    for credential, nonce in (
+        (before, "nonce_not_before_123"),
+        (expired, "nonce_expired_key_123"),
+    ):
+        with pytest.raises(AuthenticationError, match="inactive"):
+            _auth(tmp_path / nonce, credential).verify(
+                method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+                timestamp=NOW, nonce=nonce, signature=_signature(credential, nonce=nonce),
+                envelope=_envelope(),
+            )
+
+    accepted = _auth(tmp_path / "active", active).verify(
+        method="POST", path=PATH, body=BODY, key_id=active.key_id,
+        timestamp=NOW, nonce="nonce_active_key_123",
+        signature=_signature(active, nonce="nonce_active_key_123"), envelope=_envelope(),
+    )
+    assert accepted.replayed is False
+
+
+def test_scope_refusal_consumes_the_authenticated_nonce(tmp_path: Path) -> None:
+    credential = _credential(scopes=frozenset({"jobs:read"}))
+    auth = _auth(tmp_path, credential)
+
+    with pytest.raises(AuthorizationError, match="jobs:submit"):
+        auth.verify(
+            method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+            timestamp=NOW, nonce=NONCE, signature=_signature(credential),
+            envelope=_envelope(), scope="jobs:submit",
+        )
+
+    retry = auth.verify(
+        method="POST", path=PATH, body=BODY, key_id=credential.key_id,
+        timestamp=NOW, nonce=NONCE, signature=_signature(credential), envelope=_envelope(),
+    )
+    assert retry.replayed is True

@@ -10,6 +10,7 @@ import git
 
 from core.actions.executor import (
     ActionError,
+    ActionNotFound,
     ActionPolicyError,
     GitPushPlan,
     ActionExecutor,
@@ -23,6 +24,7 @@ from core.actions.executor import (
     OpenPRPlan,
     SUCCEEDED,
     WAITING_APPROVAL,
+    RUNNING,
     CANCELLED,
     DENIED,
 )
@@ -88,7 +90,7 @@ def test_policy_denial_is_audited_and_never_calls_provider(tmp_path: Path):
     )
     assert result.state == DENIED
     assert handler.calls == 0
-    assert any(e["event"] == "refused.policy" for e in executor.events(result.id))
+    assert any(e["event"] == "refused.policy" for e in executor.events(result.id, principal="owner"))
 
 
 def test_approval_is_consumed_only_for_the_exact_plan(tmp_path: Path):
@@ -133,7 +135,7 @@ def test_reused_approval_with_new_request_is_rejected_by_fingerprint(tmp_path: P
     assert changed.state == DENIED
     assert handler.calls == 0
     assert approvals.get(tmp_path, approval.id).state == approvals.APPROVED
-    assert any(e["event"] == "approval.refused" for e in executor.events(changed.id))
+    assert any(e["event"] == "approval.refused" for e in executor.events(changed.id, principal="owner"))
 
 
 def test_expired_approval_is_terminal_and_never_calls_provider(tmp_path: Path):
@@ -162,7 +164,7 @@ def test_provider_failure_is_audited_and_cleanup_is_attempted(tmp_path: Path):
     result = executor.execute(plan(), project=project(), principal="owner", request_id="failure-1")
     assert result.state == FAILED
     assert handler.cleanups == 1
-    events = [e["event"] for e in executor.events(result.id)]
+    events = [e["event"] for e in executor.events(result.id, principal="owner")]
     assert "provider.failure" in events
     assert "cleanup.result" in events
     assert "do-not-persist" not in json.dumps(events)
@@ -238,3 +240,85 @@ def test_git_push_handler_revalidates_pinned_remote_base(tmp_path: Path):
     )
     assert result.state == SUCCEEDED
     assert remote.commit("refs/heads/engine/demo").hexsha == delivery.commit.hexsha
+
+def test_concurrent_request_id_submissions_share_one_execution(tmp_path: Path, monkeypatch):
+    handler = Handler()
+    executor = ActionExecutor(tmp_path, {OPEN_PR: handler})
+    original_find = executor._find_request
+    barrier = threading.Barrier(2)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def synchronized_find(request_id):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            number = calls
+        if number <= 2:
+            barrier.wait(timeout=5)
+        return original_find(request_id)
+
+    monkeypatch.setattr(executor, "_find_request", synchronized_find)
+    results, failures = [], []
+
+    def submit():
+        try:
+            results.append(
+                executor.execute(
+                    plan(), project=project(), principal="owner", request_id="racing-request"
+                )
+            )
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert len(results) == 2
+    assert len({result.id for result in results}) == 1
+    assert handler.calls == 1
+
+
+def test_concurrent_transitions_cannot_both_leave_waiting_approval(tmp_path: Path):
+    executor = ActionExecutor(tmp_path, {OPEN_PR: Handler()})
+    waiting = executor.execute(
+        plan(), project=project(approval_required=(OPEN_PR,)),
+        principal="owner", request_id="transition-race",
+    )
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def transition(target):
+        barrier.wait(timeout=5)
+        try:
+            executor._transition(waiting.id, target)
+            outcomes.append("won")
+        except ActionError:
+            outcomes.append("lost")
+
+    threads = [
+        threading.Thread(target=transition, args=(RUNNING,)),
+        threading.Thread(target=transition, args=(DENIED,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert sorted(outcomes) == ["lost", "won"]
+    assert executor.get(waiting.id, principal="owner").state in {RUNNING, DENIED}
+
+def test_action_reads_do_not_disclose_another_principal(tmp_path: Path):
+    executor = ActionExecutor(tmp_path, {OPEN_PR: Handler()})
+    result = executor.execute(
+        plan(), project=project(), principal="owner", request_id="owner-only-read"
+    )
+
+    with pytest.raises(ActionNotFound, match="action execution not found"):
+        executor.get(result.id, principal="other")
+    with pytest.raises(ActionNotFound, match="action execution not found"):
+        executor.events(result.id, principal="other")

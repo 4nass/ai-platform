@@ -16,7 +16,7 @@ from typing import Mapping, Protocol
 
 import git
 
-from core.jobs import approvals
+from core.jobs import approvals, store
 from core.orchestrator import git_remote, registry
 
 GIT_PUSH = "git_push"
@@ -309,6 +309,19 @@ class GitPushHandler:
         return CleanupResult(True, "no cleanup required for git push")
 
 
+def default_handlers() -> dict[str, ActionHandler]:
+    """Which actions this build can actually carry out, as a plain fact.
+
+    Separate from `ActionExecutor.__init__` because constructing an executor
+    creates its tables, and "can the engine perform `open_pr`?" is a question a
+    read-only health check has to be able to ask without writing to
+    `jobs.sqlite`. An action absent from this map is declarable in the registry
+    and not executable — which is a configuration error worth failing a gate
+    on, and was previously invisible.
+    """
+    return {GIT_PUSH: GitPushHandler()}
+
+
 class ActionExecutor:
     def __init__(
         self,
@@ -320,7 +333,8 @@ class ActionExecutor:
     ):
         self.engine_root = Path(engine_root)
         self.handlers = dict(handlers or {})
-        self.handlers.setdefault(GIT_PUSH, GitPushHandler())
+        for action, handler in default_handlers().items():
+            self.handlers.setdefault(action, handler)
         self.credential_provider = credential_provider
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         self._cancel_events: dict[str, threading.Event] = {}
@@ -328,9 +342,13 @@ class ActionExecutor:
             con.executescript(SCHEMA)
 
     def _connect(self):
-        con = sqlite3.connect(self.engine_root / "jobs.sqlite", timeout=10.0)
-        con.row_factory = sqlite3.Row
-        return con
+        """Use the queue's SQLite discipline for the action tables too.
+
+        Actions and jobs share one durable database. Opening a raw connection
+        here would silently skip the queue's WAL mode, foreign keys and
+        owner-only creation policy.
+        """
+        return store.connect(self.engine_root)
 
     def _now(self) -> str:
         value = self.clock()
@@ -353,31 +371,40 @@ class ActionExecutor:
         fp = approvals.fingerprint(plan.action, plan.target, detail)
         existing = self._find_request(request_id)
         if existing is not None:
-            if existing.fingerprint != fp:
-                self._audit(existing.id, "refused.replay", principal, {"reason": "fingerprint mismatch"})
-                raise ActionReplayError("request id was already used for different action inputs")
-            if approval_id is not None and existing.state == WAITING_APPROVAL:
-                return self._consume_and_run(existing, plan, project, principal, approval_id, cancel_event)
-            return existing
+            return self._replay(existing, fp, plan, project, principal, approval_id, cancel_event)
 
         execution_id = str(uuid.uuid4())
         now = self._now()
-        with self._connect() as con:
-            con.execute(
-                "INSERT INTO action_executions(id,request_id,action,project_id,principal,job_id,run_id,target,"
-                "fingerprint,plan,state,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (execution_id, request_id, plan.action, project.id, principal, job_id, run_id,
-                 plan.target, fp, json.dumps(plan.safe_payload(), sort_keys=True), REQUESTED, now),
+        try:
+            with self._connect() as con:
+                con.execute(
+                    "INSERT INTO action_executions(id,request_id,action,project_id,principal,job_id,run_id,target,"
+                    "fingerprint,plan,state,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (execution_id, request_id, plan.action, project.id, principal, job_id, run_id,
+                     plan.target, fp, json.dumps(plan.safe_payload(), sort_keys=True), REQUESTED, now),
+                )
+                self._event_con(
+                    con, execution_id, "requested", principal,
+                    {"action": plan.action, "target": plan.target},
+                )
+        except sqlite3.IntegrityError:
+            # The unique index is the durable idempotency arbiter. Two callers
+            # may both observe no row; only one inserts, and the loser returns
+            # that exact execution rather than surfacing a SQLite error.
+            existing = self._find_request(request_id)
+            if existing is None:
+                raise
+            return self._replay(
+                existing, fp, plan, project, principal, approval_id, cancel_event
             )
-            self._event_con(con, execution_id, "requested", principal, {"action": plan.action, "target": plan.target})
-        execution = self.get(execution_id)
+        execution = self._get(execution_id)
 
         decision = approvals.classify(project, plan.action)
         if decision == approvals.DENIED_BY_POLICY:
             self._transition(execution_id, DENIED, result_code="policy_denied",
                              summary="action denied by project policy")
             self._audit(execution_id, "refused.policy", principal, {"action": plan.action})
-            return self.get(execution_id)
+            return self._get(execution_id)
 
         if decision == approvals.REQUIRES_APPROVAL:
             # A supplied approval is consumed against this newly-created
@@ -397,12 +424,27 @@ class ActionExecutor:
                              result_code="approval_required", summary="waiting for approval")
             self._audit(execution_id, "approval.required", principal,
                         {"approval_id": approval.id, "fingerprint": fp})
-            return self.get(execution_id)
+            return self._get(execution_id)
 
         return self._run(execution_id, plan, project, principal, cancel_event)
 
+    def _replay(self, execution, fp, plan, project, principal, approval_id, cancel_event):
+        """Resolve an existing request after a retry or concurrent submission."""
+        self._owner(execution, principal)
+        if execution.fingerprint != fp:
+            self._audit(
+                execution.id, "refused.replay", principal,
+                {"reason": "fingerprint mismatch"},
+            )
+            raise ActionReplayError("request id was already used for different action inputs")
+        if approval_id is not None and execution.state == WAITING_APPROVAL:
+            return self._consume_and_run(
+                execution, plan, project, principal, approval_id, cancel_event
+            )
+        return execution
+
     def cancel(self, execution_id: str, *, principal: str) -> ActionExecution:
-        execution = self.get(execution_id)
+        execution = self._get(execution_id)
         self._owner(execution, principal)
         event = self._cancel_events.get(execution_id)
         if event is not None:
@@ -413,10 +455,10 @@ class ActionExecutor:
         self._transition(execution_id, target_state, result_code="cancelled",
                          summary="cancellation requested")
         self._audit(execution_id, "cancel.requested", principal, {})
-        return self.get(execution_id)
+        return self._get(execution_id)
 
-    def events(self, execution_id: str) -> list[dict]:
-        self.get(execution_id)
+    def events(self, execution_id: str, *, principal: str) -> list[dict]:
+        self.get(execution_id, principal=principal)
         with self._connect() as con:
             rows = con.execute(
                 "SELECT event,at,actor,payload FROM action_events WHERE execution_id=? ORDER BY id",
@@ -429,7 +471,17 @@ class ActionExecutor:
             result.append(item)
         return result
 
-    def get(self, execution_id: str) -> ActionExecution:
+    def get(self, execution_id: str, *, principal: str) -> ActionExecution:
+        """Return an execution only to the principal that created it.
+
+        The same not-found response is used for an unknown id and a foreign
+        principal so callers cannot use this read path to enumerate actions.
+        """
+        execution = self._get(execution_id)
+        self._owner(execution, principal)
+        return execution
+
+    def _get(self, execution_id: str) -> ActionExecution:
         with self._connect() as con:
             row = con.execute("SELECT * FROM action_executions WHERE id=?", (execution_id,)).fetchone()
         if row is None:
@@ -446,7 +498,7 @@ class ActionExecutor:
                 self._transition(execution_id, CANCELLED, result_code="cancelled",
                                  summary="cancelled before external call")
                 self._audit(execution_id, "cancelled", principal, {})
-                return self.get(execution_id)
+                return self._get(execution_id)
             if approval_id is None:
                 self._transition(execution_id, RUNNING, started_at=self._now(),
                                  summary="external action started")
@@ -454,7 +506,7 @@ class ActionExecutor:
             credentials = None
             if self.credential_provider is not None:
                 credentials = self.credential_provider.get(project.id, plan.action)
-            execution = self.get(execution_id)
+            execution = self._get(execution_id)
             context = ActionContext(
                 engine_root=self.engine_root,
                 project=project,
@@ -481,21 +533,21 @@ class ActionExecutor:
                          "external_id": result.external_id})
             if not result.ok:
                 self._cleanup(execution_id, plan, context, principal)
-            return self.get(execution_id)
+            return self._get(execution_id)
         except approvals.ApprovalError as exc:
             state = EXPIRED if "expired" in str(exc).lower() else DENIED
             self._transition(execution_id, state, result_code="approval_rejected",
                              summary="approval was not consumable", finished_at=self._now())
             self._audit(execution_id, "approval.refused", principal,
                         {"reason": type(exc).__name__})
-            return self.get(execution_id)
+            return self._get(execution_id)
         except Exception as exc:
             self._transition(execution_id, FAILED, result_code=type(exc).__name__,
                              summary="external action failed", finished_at=self._now())
             self._audit(execution_id, "provider.failure", principal,
                         {"error": type(exc).__name__})
             self._cleanup(execution_id, plan, context, principal)
-            return self.get(execution_id)
+            return self._get(execution_id)
         finally:
             self._cancel_events.pop(execution_id, None)
 
@@ -505,7 +557,7 @@ class ActionExecutor:
                              summary="cancelled before approval consumption",
                              finished_at=self._now())
             self._audit(execution.id, "cancelled", principal, {})
-            return self.get(execution.id)
+            return self._get(execution.id)
         try:
             approval_record = approvals.get(self.engine_root, approval_id)
             if approval_record.requested_by and approval_record.requested_by != principal:
@@ -520,7 +572,7 @@ class ActionExecutor:
                              summary="approval was not consumable", finished_at=self._now())
             self._audit(execution.id, "approval.refused", principal,
                         {"reason": type(exc).__name__})
-            return self.get(execution.id)
+            return self._get(execution.id)
         self._transition(execution.id, RUNNING, approval_id=approval.id,
                          started_at=self._now(), result_code="approval_consumed",
                          summary="external action started")
@@ -572,30 +624,53 @@ class ActionExecutor:
 
     def _owner(self, execution, principal):
         if execution.principal != principal:
-            raise ActionError("action is not owned by this principal")
+            # Do not disclose that an execution id belongs to another caller.
+            raise ActionNotFound("action execution not found")
 
     def _find_request(self, request_id):
         with self._connect() as con:
             row = con.execute(
                 "SELECT id FROM action_executions WHERE request_id=?", (request_id,)
             ).fetchone()
-        return self.get(row["id"]) if row else None
+        return self._get(row["id"]) if row else None
 
     def _transition(self, execution_id, state, **fields):
-        execution = self.get(execution_id)
-        if execution.state == state:
-            return
-        if state not in _ALLOWED_TRANSITIONS.get(execution.state, frozenset()):
-            raise ActionError(f"invalid action transition {execution.state} -> {state}")
-        assignments = ["state=?"]
-        values = [state]
-        for key in ("approval_id", "provider", "result_code", "summary", "started_at", "finished_at"):
-            if key in fields:
-                assignments.append(f"{key}=?")
-                values.append(fields[key])
-        values.append(execution_id)
+        """Advance one execution with the prior state in the SQL predicate.
+
+        Reading a state on one connection and writing it on another lets two
+        callers both validate different successors, then overwrite each other.
+        The conditional update makes the loser visible to its caller instead
+        of producing an audit trail that claims both transitions happened.
+        """
         with self._connect() as con:
-            con.execute(f"UPDATE action_executions SET {', '.join(assignments)} WHERE id=?", values)
+            row = con.execute(
+                "SELECT state FROM action_executions WHERE id=?", (execution_id,)
+            ).fetchone()
+            if row is None:
+                raise ActionNotFound("action execution not found")
+            current = row["state"]
+            if current == state:
+                return False
+            if state not in _ALLOWED_TRANSITIONS.get(current, frozenset()):
+                raise ActionError(f"invalid action transition {current} -> {state}")
+            assignments = ["state=?"]
+            values = [state]
+            for key in (
+                "approval_id", "provider", "result_code", "summary", "started_at",
+                "finished_at",
+            ):
+                if key in fields:
+                    assignments.append(f"{key}=?")
+                    values.append(fields[key])
+            values.extend((execution_id, current))
+            cursor = con.execute(
+                f"UPDATE action_executions SET {', '.join(assignments)} "
+                "WHERE id=? AND state=?",
+                values,
+            )
+            if cursor.rowcount != 1:
+                raise ActionError("action transition lost a concurrent race")
+        return True
 
     def _audit(self, execution_id, event, actor, payload):
         with self._connect() as con:
