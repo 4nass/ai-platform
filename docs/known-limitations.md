@@ -7,7 +7,7 @@ The local engine is usable for one owner on one workstation. The blockers below 
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| No authenticated transport | Identity and idempotency are enforced engine-side, but nothing yet authenticates a non-local caller, so there is no remote principal to enforce them for | [#26](https://github.com/4nass/ai-platform/issues/26), [#30](https://github.com/4nass/ai-platform/issues/30) |
+| No exposed authenticated API | The HMAC verifier and durable nonce ledger exist in `core/transport/`, but no REST/SSE server is listening yet; the local CLI remains the supported interface | [#47](https://github.com/4nass/ai-platform/issues/47), [#49](https://github.com/4nass/ai-platform/issues/49) |
 | Budget limits cover tokens and calls, not time or currency | An unattended run is bounded in spend but not in wall-clock duration | [#27](https://github.com/4nass/ai-platform/issues/27) |
 | Approvals exist but the actions they gate mostly do not | `open_pr`, deploy and migration are declarable and gateable, and none is implemented yet — so today the gate is exercised by budget overruns | [#28](https://github.com/4nass/ai-platform/issues/28), [#33](https://github.com/4nass/ai-platform/issues/33) |
 | Sandbox can fail open when Bubblewrap is absent | Untrusted target tests can execute with host access | security prerequisite |

@@ -25,3 +25,8 @@ telemetry.sqlite-shm
 jobs.sqlite
 jobs.sqlite-wal
 jobs.sqlite-shm
+
+# Authenticated transport nonce ledger (runtime state)
+auth.sqlite
+auth.sqlite-wal
+auth.sqlite-shm
