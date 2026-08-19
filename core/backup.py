@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-DATABASES=("jobs.sqlite","telemetry.sqlite","transport.sqlite")
+DATABASES=("jobs.sqlite","telemetry.sqlite","transport.sqlite","notifications.sqlite")
 
 class BackupError(Exception): pass
 @dataclass(frozen=True)

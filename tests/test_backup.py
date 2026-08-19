@@ -1,7 +1,7 @@
 from pathlib import Path
 import sqlite3
 import pytest
-from core import backup
+from core import backup, notifications
 from core.jobs import store
 
 def test_create_backup_is_wal_aware_and_retains_snapshots(tmp_path: Path):
@@ -38,3 +38,12 @@ def test_restore_replaces_valid_database(tmp_path: Path):
     restored = backup.restore(engine, snap)
     assert restored == ("jobs.sqlite",)
     assert len(store.recent(engine)) == 1
+
+
+def test_backup_includes_notification_outbox(tmp_path: Path):
+    engine = tmp_path / "engine"; engine.mkdir()
+    notifications.configure_preference(
+        engine, project_id="demo", channel="telegram", recipient="chat-1"
+    )
+    result = backup.create(engine)
+    assert "notifications.sqlite" in result.files

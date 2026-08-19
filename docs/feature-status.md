@@ -62,7 +62,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P2 | Incremental context indexing | [#39](https://github.com/4nass/ai-platform/issues/39) | Planned |
 | P2 | Managed local user service | [#40](https://github.com/4nass/ai-platform/issues/40) | Delivered in engine with Linux/systemd, WSL2/systemd and macOS/launchd profiles; host enablement remains operator-specific |
 | P2 | Configuration consolidation | [#41](https://github.com/4nass/ai-platform/issues/41) | Delivered; issue closed |
-| P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Planned |
+| P2 | Notification channels | [#42](https://github.com/4nass/ai-platform/issues/42) | Engine delivered: channel-neutral compact rendering, preferences, redaction and idempotent retryable outbox; concrete gateway adapters remain |
 | P1 | REST/SSE remote API | [#47](https://github.com/4nass/ai-platform/issues/47) | Planned; MVP gateway transport |
 | P1 | Local-model MVP policy and evaluation | [#48](https://github.com/4nass/ai-platform/issues/48) | Planned; constrained roles only |
 | P0 | Remote exposure security readiness gate | [#49](https://github.com/4nass/ai-platform/issues/49) | Planned; final go/no-go evidence |
