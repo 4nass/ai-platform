@@ -35,10 +35,12 @@ must match the signed envelope and is resolved through config/projects.yaml.
 The caller identity comes from the verified Principal, never from a prompt or
 tool argument.
 
-Scopes are fixed per tool: submit, read, cancel and approve. Jobs, budgets,
-provider policy, project actions, worktrees and approval fingerprints remain
-owned by AI Platform. OpenClaw cannot provide a filesystem path, shell command,
-provider/model choice, budget override or arbitrary URL.
+Scopes are fixed per tool: submit, read, cancel and approve. Job ownership is
+checked by the shared transport service used by both the REST and OpenClaw
+adapters, so the two surfaces cannot drift on principal isolation. Jobs,
+budgets, provider policy, project actions, worktrees and approval fingerprints
+remain owned by AI Platform. OpenClaw cannot provide a filesystem path, shell
+command, provider/model choice, budget override or arbitrary URL.
 
 ## Reconnect and errors
 

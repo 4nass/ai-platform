@@ -135,3 +135,23 @@ def test_signed_body_mismatch_is_rejected(tools):
             "engineering_submit", {"project": "demo", "request": "two"},
             authenticated=auth, signed_body=body,
         )
+
+def test_openclaw_and_http_share_the_principal_ownership_boundary(tools, monkeypatch):
+    adapter, _ = tools
+    job_id = store.submit(
+        adapter.engine_root, project="/safe", request="x",
+        principal="openclaw:other", envelope={"project_id": "demo"},
+    ).id
+    calls = []
+
+    def denied(engine_root, seen_job_id, principal):
+        calls.append((engine_root, seen_job_id, str(principal)))
+        raise openclaw.transport_service.OwnedResourceNotFound
+
+    monkeypatch.setattr(openclaw.transport_service, "job_for_principal", denied)
+    args = {"run_id": job_id}
+    auth, body = _signed(args, principal="owner-1", message="shared-owner-check")
+    with pytest.raises(openclaw.ToolError, match="run not found"):
+        adapter.call("engineering_status", args, authenticated=auth, signed_body=body)
+
+    assert calls == [(adapter.engine_root, job_id, "openclaw:owner-1")]

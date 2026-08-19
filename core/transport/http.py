@@ -27,7 +27,7 @@ from core.transport.auth import (
     ReplayError,
     TransportAuthError,
 )
-from core.transport.service import submit_verified
+from core.transport import service as transport_service
 
 MAX_BODY_BYTES = 1_048_576
 JOB_ID = re.compile(r"^[1-9][0-9]{0,18}$")
@@ -202,12 +202,11 @@ class RemoteAPI:
 
     def _job_for(self, job_id, auth):
         try:
-            job = store.get(self.engine_root, job_id)
-        except store.JobError:
-            raise APIError(404, "not_found", "resource not found")
-        if job.principal != str(auth.principal):
-            raise APIError(404, "not_found", "resource not found")
-        return job
+            return transport_service.job_for_principal(
+                self.engine_root, job_id, auth.principal
+            )
+        except transport_service.OwnedResourceNotFound:
+            raise APIError(404, "not_found", "resource not found") from None
 
     def _submit(self, payload, auth, body):
         project_id = payload.get("project_id")
@@ -220,7 +219,7 @@ class RemoteAPI:
             project = registry.resolve(self.engine_root, project_id, action=registry.MODIFY)
         except registry.RegistryError:
             raise APIError(404, "not_found", "resource not found")
-        submission = submit_verified(
+        submission = transport_service.submit_verified(
             self.engine_root,
             project=str(project.path),
             project_id=project_id,

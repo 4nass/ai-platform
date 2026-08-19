@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from core.jobs import approvals, budget, store, worker
 from core.orchestrator import platform_config, registry
 from core.transport.auth import AuthenticatedRequest, AuthenticationError, AuthorizationError
-from core.transport.service import submit_verified
+from core.transport import service as transport_service
 
 TOOL_VERSION = "v1"
 MAX_EVENT_PAGE = 100
@@ -183,7 +183,7 @@ class OpenClawTools:
             raise ToolError("project_not_allowed", "signed project does not match the tool project")
         project = registry.resolve(self.engine_root, project_id, action=registry.MODIFY)
         try:
-            submission = submit_verified(
+            submission = transport_service.submit_verified(
                 self.engine_root,
                 project=str(project.path),
                 project_id=project_id,
@@ -212,12 +212,11 @@ class OpenClawTools:
 
     def _job_for(self, run_id: int, authenticated: AuthenticatedRequest) -> store.Job:
         try:
-            job = store.get(self.engine_root, run_id)
-        except store.JobError:
+            return transport_service.job_for_principal(
+                self.engine_root, run_id, authenticated.principal
+            )
+        except transport_service.OwnedResourceNotFound:
             raise ToolError("run_not_found", "run not found") from None
-        if job.principal != str(authenticated.principal):
-            raise ToolError("run_not_found", "run not found")
-        return job
 
     def _status(self, run_id: int, authenticated: AuthenticatedRequest) -> dict:
         job = self._job_for(run_id, authenticated)
