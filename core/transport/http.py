@@ -153,9 +153,11 @@ class RemoteAPI:
             dirty_policy=str(payload.get("dirty_policy") or "head"),
         )
         scope = self._scope(method, path)
+        query = environ.get("QUERY_STRING", "")
+        signed_path = f"{path}?{query}" if query else path
         return self.authenticator.verify(
             method=method,
-            path=path,
+            path=signed_path,
             body=body,
             key_id=key_id,
             timestamp=timestamp,

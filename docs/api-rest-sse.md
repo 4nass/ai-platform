@@ -8,7 +8,8 @@ approvals and event cursors remain in their existing modules.
 
 Every request carries X-API-Key, X-Timestamp, X-Nonce and X-Signature. The
 signature is the HMAC-SHA256 canonical request from core.transport.auth
-(method, exact path, timestamp, nonce and SHA-256 body). TLS is still required.
+(method, exact path including its raw query string, timestamp, nonce and SHA-256
+body). TLS is still required.
 POST /v1/jobs additionally carries an envelope with channel, sender, chat and
 message identifiers; these are checked against the credential principal and
 provide durable idempotency.
