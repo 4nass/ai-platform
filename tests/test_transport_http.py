@@ -196,3 +196,53 @@ def test_json_routes_reject_an_unlabelled_or_wrong_media_type(api):
 
     assert status["status"] == "415 Unsupported Media Type"
     assert value["error"]["code"] == "unsupported_media_type"
+
+def test_invalid_signature_is_rejected_before_json_parsing(api, monkeypatch):
+    app, c = api
+    parsed = False
+
+    def fail_if_parsed(body):
+        nonlocal parsed
+        parsed = True
+        raise AssertionError("untrusted JSON must not be parsed")
+
+    monkeypatch.setattr(app, "_json", fail_if_parsed)
+    status, value = request(
+        app.application,
+        "POST",
+        "/v1/jobs",
+        b"{not valid json}",
+        credential_obj=c,
+        nonce="nonce_auth_before_json",
+        extra={"HTTP_X_SIGNATURE": "invalid"},
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"
+    assert parsed is False
+
+
+def test_signed_payload_identity_must_match_authenticated_headers(api):
+    app, c = api
+    body = json.dumps({
+        "project_id": "demo",
+        "request": "run tests",
+        "envelope": {
+            "channel": "other-channel",
+            "sender_id": "owner-1",
+            "chat_id": "chat-1",
+            "message_id": "message-1",
+        },
+    }, separators=(",", ":")).encode()
+
+    status, value = request(
+        app.application,
+        "POST",
+        "/v1/jobs",
+        body,
+        credential_obj=c,
+        nonce="nonce_identity_mismatch",
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"

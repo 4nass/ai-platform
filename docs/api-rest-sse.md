@@ -24,7 +24,7 @@ secret manager, process supervision and reverse-proxy rate/body limits.
 
 ## Endpoints
 
-JSON request bodies must include `Content-Type: application/json`; unsupported media types are rejected before JSON parsing.
+JSON request bodies must include `Content-Type: application/json`; unsupported media types are rejected after HMAC authentication and before JSON parsing. The server reads bounded raw bytes only to verify the HMAC; it parses JSON after authentication. For a job submission, the header identity used during authentication must exactly match the signed body envelope before it becomes the durable job identity.
 
 - POST /v1/jobs: JSON {project_id, request, envelope, dirty_policy?}. Project ids
   are resolved through the registry; paths and shell commands are rejected.
