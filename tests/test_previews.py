@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import threading
 import pytest
 from core.actions.executor import ActionExecutor, PreviewDeployPlan, PREVIEW_DEPLOY, SUCCEEDED, WAITING_APPROVAL
 from core.jobs import approvals
@@ -91,3 +92,68 @@ def test_preview_requires_a_registered_remote_even_without_a_base_branch(tmp_pat
         manager(tmp_path, Provider()).deploy(
             plan(), project=no_remote, principal="owner", request_id="no-remote"
         )
+
+def test_concurrent_preview_requests_share_one_deployment(tmp_path, monkeypatch):
+    provider = Provider()
+    m = manager(tmp_path, provider)
+    original_find = m._find
+    barrier = threading.Barrier(2)
+    calls = 0
+    lock = threading.Lock()
+
+    def synchronized_find(request_id):
+        nonlocal calls
+        with lock:
+            calls += 1
+            number = calls
+        if number <= 2:
+            barrier.wait(timeout=5)
+        return original_find(request_id)
+
+    monkeypatch.setattr(m, "_find", synchronized_find)
+    records, failures = [], []
+
+    def deploy():
+        try:
+            records.append(
+                m.deploy(plan(), project=project(tmp_path), principal="owner", request_id="racing")
+            )
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=deploy) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert len({record.id for record in records}) == 1
+    assert provider.deployments == 1
+
+
+def test_concurrent_preview_transitions_cannot_overwrite_each_other(tmp_path):
+    m = manager(tmp_path, Provider(status="deploying"))
+    record = m.deploy(plan(), project=project(tmp_path), principal="owner", request_id="state-race")
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def transition(status):
+        barrier.wait(timeout=5)
+        try:
+            m._transition(record.id, status, "owner", "test", {})
+            outcomes.append("won")
+        except Exception:
+            outcomes.append("lost")
+
+    threads = [
+        threading.Thread(target=transition, args=(READY,)),
+        threading.Thread(target=transition, args=(FAILED,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert sorted(outcomes) == ["lost", "won"]
+    assert get(tmp_path, record.id).status in {READY, FAILED}
