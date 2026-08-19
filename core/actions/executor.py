@@ -16,7 +16,7 @@ from typing import Mapping, Protocol
 
 import git
 
-from core.jobs import approvals
+from core.jobs import approvals, store
 from core.orchestrator import git_remote, registry
 
 GIT_PUSH = "git_push"
@@ -323,9 +323,13 @@ class ActionExecutor:
             con.executescript(SCHEMA)
 
     def _connect(self):
-        con = sqlite3.connect(self.engine_root / "jobs.sqlite", timeout=10.0)
-        con.row_factory = sqlite3.Row
-        return con
+        """Use the queue's SQLite discipline for the action tables too.
+
+        Actions and jobs share one durable database. Opening a raw connection
+        here would silently skip the queue's WAL mode, foreign keys and
+        owner-only creation policy.
+        """
+        return store.connect(self.engine_root)
 
     def _now(self) -> str:
         value = self.clock()
@@ -348,23 +352,32 @@ class ActionExecutor:
         fp = approvals.fingerprint(plan.action, plan.target, detail)
         existing = self._find_request(request_id)
         if existing is not None:
-            if existing.fingerprint != fp:
-                self._audit(existing.id, "refused.replay", principal, {"reason": "fingerprint mismatch"})
-                raise ActionReplayError("request id was already used for different action inputs")
-            if approval_id is not None and existing.state == WAITING_APPROVAL:
-                return self._consume_and_run(existing, plan, project, principal, approval_id, cancel_event)
-            return existing
+            return self._replay(existing, fp, plan, project, principal, approval_id, cancel_event)
 
         execution_id = str(uuid.uuid4())
         now = self._now()
-        with self._connect() as con:
-            con.execute(
-                "INSERT INTO action_executions(id,request_id,action,project_id,principal,job_id,run_id,target,"
-                "fingerprint,plan,state,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (execution_id, request_id, plan.action, project.id, principal, job_id, run_id,
-                 plan.target, fp, json.dumps(plan.safe_payload(), sort_keys=True), REQUESTED, now),
+        try:
+            with self._connect() as con:
+                con.execute(
+                    "INSERT INTO action_executions(id,request_id,action,project_id,principal,job_id,run_id,target,"
+                    "fingerprint,plan,state,requested_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (execution_id, request_id, plan.action, project.id, principal, job_id, run_id,
+                     plan.target, fp, json.dumps(plan.safe_payload(), sort_keys=True), REQUESTED, now),
+                )
+                self._event_con(
+                    con, execution_id, "requested", principal,
+                    {"action": plan.action, "target": plan.target},
+                )
+        except sqlite3.IntegrityError:
+            # The unique index is the durable idempotency arbiter. Two callers
+            # may both observe no row; only one inserts, and the loser returns
+            # that exact execution rather than surfacing a SQLite error.
+            existing = self._find_request(request_id)
+            if existing is None:
+                raise
+            return self._replay(
+                existing, fp, plan, project, principal, approval_id, cancel_event
             )
-            self._event_con(con, execution_id, "requested", principal, {"action": plan.action, "target": plan.target})
         execution = self.get(execution_id)
 
         decision = approvals.classify(project, plan.action)
@@ -395,6 +408,21 @@ class ActionExecutor:
             return self.get(execution_id)
 
         return self._run(execution_id, plan, project, principal, cancel_event)
+
+    def _replay(self, execution, fp, plan, project, principal, approval_id, cancel_event):
+        """Resolve an existing request after a retry or concurrent submission."""
+        self._owner(execution, principal)
+        if execution.fingerprint != fp:
+            self._audit(
+                execution.id, "refused.replay", principal,
+                {"reason": "fingerprint mismatch"},
+            )
+            raise ActionReplayError("request id was already used for different action inputs")
+        if approval_id is not None and execution.state == WAITING_APPROVAL:
+            return self._consume_and_run(
+                execution, plan, project, principal, approval_id, cancel_event
+            )
+        return execution
 
     def cancel(self, execution_id: str, *, principal: str) -> ActionExecution:
         execution = self.get(execution_id)
@@ -571,20 +599,42 @@ class ActionExecutor:
         return self.get(row["id"]) if row else None
 
     def _transition(self, execution_id, state, **fields):
-        execution = self.get(execution_id)
-        if execution.state == state:
-            return
-        if state not in _ALLOWED_TRANSITIONS.get(execution.state, frozenset()):
-            raise ActionError(f"invalid action transition {execution.state} -> {state}")
-        assignments = ["state=?"]
-        values = [state]
-        for key in ("approval_id", "provider", "result_code", "summary", "started_at", "finished_at"):
-            if key in fields:
-                assignments.append(f"{key}=?")
-                values.append(fields[key])
-        values.append(execution_id)
+        """Advance one execution with the prior state in the SQL predicate.
+
+        Reading a state on one connection and writing it on another lets two
+        callers both validate different successors, then overwrite each other.
+        The conditional update makes the loser visible to its caller instead
+        of producing an audit trail that claims both transitions happened.
+        """
         with self._connect() as con:
-            con.execute(f"UPDATE action_executions SET {', '.join(assignments)} WHERE id=?", values)
+            row = con.execute(
+                "SELECT state FROM action_executions WHERE id=?", (execution_id,)
+            ).fetchone()
+            if row is None:
+                raise ActionNotFound("action execution not found")
+            current = row["state"]
+            if current == state:
+                return False
+            if state not in _ALLOWED_TRANSITIONS.get(current, frozenset()):
+                raise ActionError(f"invalid action transition {current} -> {state}")
+            assignments = ["state=?"]
+            values = [state]
+            for key in (
+                "approval_id", "provider", "result_code", "summary", "started_at",
+                "finished_at",
+            ):
+                if key in fields:
+                    assignments.append(f"{key}=?")
+                    values.append(fields[key])
+            values.extend((execution_id, current))
+            cursor = con.execute(
+                f"UPDATE action_executions SET {', '.join(assignments)} "
+                "WHERE id=? AND state=?",
+                values,
+            )
+            if cursor.rowcount != 1:
+                raise ActionError("action transition lost a concurrent race")
+        return True
 
     def _audit(self, execution_id, event, actor, payload):
         with self._connect() as con:

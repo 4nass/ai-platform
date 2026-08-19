@@ -58,7 +58,7 @@ Before enabling OpenClaw or any network-facing API, all of the following are req
 3. idempotency keys for message retries (**delivered** in `core/jobs/envelope.py`, #26);
 4. durable jobs, heartbeat and crash recovery (**delivered** in `core/jobs/`, #24), plus structured progress events and cooperative cancellation (**planned**, #29);
 5. hard token/call admission budgets (**delivered** in `core/jobs/budget.py`, #27); elapsed-time and currency ceilings remain;
-6. approval gates plus one audited external-action executor (delivered in core/jobs/approvals.py and core/actions/executor.py, #28/#46); concrete PR/preview providers remain;
+6. approval gates plus an audited external-action executor library (core/jobs/approvals.py and core/actions/executor.py, #28/#46); no CLI, worker or REST caller instantiates it yet;
 7. a fail-closed execution sandbox;
 8. secrets isolation and retention policy;
 9. immutable artifact references and auditable preview deployments.
