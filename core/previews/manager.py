@@ -15,6 +15,15 @@ REQUESTED="requested"; DEPLOYING="deploying"; READY="ready"; FAILED="failed"
 EXPIRED="expired"; SUPERSEDED="superseded"; CLEANING="cleaning"; CLEANED="cleaned"
 CLEANUP_FAILED="cleanup_failed"; CANCELLED="cancelled"
 TERMINAL=frozenset({FAILED,EXPIRED,SUPERSEDED,CLEANED,CLEANUP_FAILED,CANCELLED})
+ALLOWED_TRANSITIONS={
+    REQUESTED:frozenset({DEPLOYING,CANCELLED,SUPERSEDED}),
+    DEPLOYING:frozenset({READY,FAILED,EXPIRED,SUPERSEDED,CANCELLED}),
+    READY:frozenset({EXPIRED,SUPERSEDED,CLEANING}),
+    EXPIRED:frozenset({CLEANING}),
+    SUPERSEDED:frozenset({CLEANING}),
+    CANCELLED:frozenset({CLEANING}),
+    CLEANING:frozenset({CLEANED,CLEANUP_FAILED}),
+}
 SCHEMA="""CREATE TABLE IF NOT EXISTS previews (
 id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL, job_id INTEGER, run_id INTEGER,
 project_id TEXT NOT NULL, principal TEXT NOT NULL, service TEXT NOT NULL, environment TEXT NOT NULL,
@@ -102,20 +111,23 @@ class PreviewManager:
         self._validate(plan,project,request_id)
         fp=approvals.fingerprint(plan.action,plan.target,plan.detail()); old=self._find(request_id)
         if old:
-            if old.fingerprint!=fp:
-                self._audit(old.id,"refused.replay",principal,{"reason":"fingerprint mismatch"})
-                raise PreviewReplayError("request id was already used for different preview inputs")
-            return old
+            return self._replay(old,fp,principal)
         if run_id is not None: self._supersede(project,principal,run_id,credentials)
         pid=str(uuid.uuid4()); now=self._now(); token=secrets.token_urlsafe(32)
         digest=hashlib.sha256(token.encode()).hexdigest()
-        with _connect(self.engine_root) as con:
-            con.execute("INSERT INTO previews(id,request_id,job_id,run_id,project_id,principal,service,environment,"
-                        "commit_sha,config_sha256,data_mode,fingerprint,status,capability_hash,ttl_seconds,requested_at)"
-                        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (pid,request_id,job_id,run_id,project.id,principal,plan.service,plan.environment,
-                         plan.commit_sha,plan.config_sha256,plan.data_mode,fp,REQUESTED,digest,plan.ttl_seconds,now))
-            self._event(con,pid,"requested",principal,{"commit_sha":plan.commit_sha,"job_id":job_id,"run_id":run_id})
+        try:
+            with _connect(self.engine_root) as con:
+                con.execute("INSERT INTO previews(id,request_id,job_id,run_id,project_id,principal,service,environment,"
+                            "commit_sha,config_sha256,data_mode,fingerprint,status,capability_hash,ttl_seconds,requested_at)"
+                            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (pid,request_id,job_id,run_id,project.id,principal,plan.service,plan.environment,
+                             plan.commit_sha,plan.config_sha256,plan.data_mode,fp,REQUESTED,digest,plan.ttl_seconds,now))
+                self._event(con,pid,"requested",principal,{"commit_sha":plan.commit_sha,"job_id":job_id,"run_id":run_id})
+        except sqlite3.IntegrityError:
+            old=self._find(request_id)
+            if old is None:
+                raise
+            return self._replay(old,fp,principal)
         self._emit(job_id,"preview.requested",{"preview_id":pid,"commit_sha":plan.commit_sha})
         if cancel_event is not None and cancel_event.is_set():
             self._transition(pid,CANCELLED,principal,"cancelled",{"reason":"cancelled before deploy"})
@@ -154,6 +166,15 @@ class PreviewManager:
             self._transition(pid,FAILED,principal,"provider.failure",{"error":type(exc).__name__},error_code=type(exc).__name__)
             self._emit(job_id,"preview.failed",{"preview_id":pid,"error":type(exc).__name__})
         return get(self.engine_root,pid)
+    def _replay(self,record,fp,principal):
+        """Return a concurrent or retried request without duplicating a deploy."""
+        if record.principal!=principal:
+            raise PreviewError("preview not found")
+        if record.fingerprint!=fp:
+            self._audit(record.id,"refused.replay",principal,{"reason":"fingerprint mismatch"})
+            raise PreviewReplayError("request id was already used for different preview inputs")
+        return record
+
     def cleanup(self,pid,*,principal,project,credentials=None,reason="requested"):
         p=get(self.engine_root,pid)
         if p.status in {CLEANED,SUPERSEDED,CLEANUP_FAILED}: return p
@@ -240,13 +261,26 @@ class PreviewManager:
                 self._audit(p.id,"cleanup.failure",principal,{"error":type(exc).__name__,"reason":"superseded"})
                 self._emit(p.job_id,"preview.cleanup_failed",{"preview_id":p.id,"reason":"superseded"})
     def _transition(self,pid,status,actor,event,payload,*,error_code=""):
-        current=get(self.engine_root,pid)
-        if current.status==status or (current.status in TERMINAL and status not in {CLEANING,CLEANED}): return
-        now=self._now()
+        """Write the next status only if the observed status is still current."""
         with _connect(self.engine_root) as con:
-            con.execute("UPDATE previews SET status=?,finished_at=?,error_code=? WHERE id=?",
-                        (status,now if status in TERMINAL or status==READY else current.finished_at,error_code,pid))
+            row=con.execute("SELECT status,finished_at FROM previews WHERE id=?",(pid,)).fetchone()
+            if row is None:
+                raise PreviewError("preview not found")
+            current=row["status"]
+            if current==status:
+                return False
+            if status not in ALLOWED_TRANSITIONS.get(current,frozenset()):
+                raise PreviewError(f"invalid preview transition {current} -> {status}")
+            now=self._now()
+            cursor=con.execute(
+                "UPDATE previews SET status=?,finished_at=?,error_code=? WHERE id=? AND status=?",
+                (status,now if status in TERMINAL or status==READY else row["finished_at"],error_code,pid,current),
+            )
+            if cursor.rowcount!=1:
+                raise PreviewError("preview transition lost a concurrent race")
             self._event(con,pid,event,actor,payload)
+        return True
+
     def _audit(self,pid,event,actor,payload):
         with _connect(self.engine_root) as con: self._event(con,pid,event,actor,payload)
     @staticmethod
