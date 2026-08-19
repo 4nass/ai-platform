@@ -4,9 +4,22 @@ import json
 import logging
 import os
 from pathlib import Path
-from wsgiref.simple_server import make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIServer, make_server
 from core.transport.auth import Authenticator, ReplayStore, credential_from_mapping
 from core.transport.http import create_app
+
+
+class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
+    """Keep a long-lived SSE connection from serializing every API request.
+
+    This is deliberately a small development-server improvement, not a claim
+    that wsgiref is a production-grade HTTP deployment. Production still
+    needs a managed WSGI/ASGI host and a reverse proxy.
+    """
+
+    daemon_threads = True
+
 
 def authenticator_from_env(engine_root: Path, *, variable: str = "AI_PLATFORM_TRANSPORT_CREDENTIALS") -> Authenticator:
     raw = os.environ.get(variable)
@@ -92,5 +105,7 @@ def serve(engine_root: Path, *, host: str = "127.0.0.1", port: int = 8787) -> No
     _remote_allowed(engine_root, host)
     _configure_access_logging()
     auth = authenticator_from_env(engine_root)
-    with make_server(host, port, create_app(engine_root, auth)) as server:
+    with make_server(
+        host, port, create_app(engine_root, auth), server_class=ThreadedWSGIServer
+    ) as server:
         server.serve_forever()
