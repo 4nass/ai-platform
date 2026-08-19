@@ -75,6 +75,8 @@ class RemoteAPI:
             if not path.startswith("/v1/"):
                 raise APIError(404, "not_found", "resource not found")
             body = self._body(environ)
+            if body:
+                self._require_json_content_type(environ)
             payload = self._json(body) if body else {}
             auth = self._authenticate(environ, method, path, body, payload)
             result = self._dispatch(method, path, payload, auth, environ, body)
@@ -144,7 +146,7 @@ class RemoteAPI:
         data = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         reasons = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
                    413: "Payload Too Large", 403: "Forbidden",
-                   500: "Internal Server Error"}
+                   415: "Unsupported Media Type", 500: "Internal Server Error"}
         start_response(f"{status} {reasons.get(status, 'Error')}", [
             ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(data))),
@@ -168,6 +170,16 @@ class RemoteAPI:
         if len(body) != length:
             raise APIError(400, "invalid_request", "incomplete request body")
         return body
+
+    @staticmethod
+    def _require_json_content_type(environ) -> None:
+        content_type = environ.get("CONTENT_TYPE", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            raise APIError(
+                415,
+                "unsupported_media_type",
+                "request body must use Content-Type application/json",
+            )
 
     @staticmethod
     def _json(body: bytes) -> dict:

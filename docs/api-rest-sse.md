@@ -23,6 +23,8 @@ manager, TLS, a process supervisor and reverse-proxy rate/body limits.
 
 ## Endpoints
 
+JSON request bodies must include `Content-Type: application/json`; unsupported media types are rejected before JSON parsing.
+
 - POST /v1/jobs: JSON {project_id, request, envelope, dirty_policy?}. Project ids
   are resolved through the registry; paths and shell commands are rejected.
 - GET /v1/jobs/{id}: compact status for the authenticated principal.
