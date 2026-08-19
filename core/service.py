@@ -36,7 +36,10 @@ def load_env_file(path:Path):
         if not stripped or stripped.startswith("#"): continue
         key,sep,value=stripped.partition("=")
         if not sep or not key.isidentifier(): raise ValueError(f"invalid service env line {number}")
-        os.environ.setdefault(key, value.strip().strip("\"'"))
+        # --env-file is an explicit operator choice. Inherited service-manager
+        # values are defaults; silently keeping one here makes a corrected file
+        # ineffective and leaves the process running under stale policy.
+        os.environ[key] = value.strip().strip("\"'")
     return path
 
 @dataclass(frozen=True)
