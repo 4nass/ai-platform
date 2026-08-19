@@ -33,7 +33,7 @@ The local CLI can run synchronous work or submit a durable job. It can select co
 | Provider policy | Claude/Codex remain available and a local provider can handle explicitly allowed low-risk tasks with measured quality; no silent provider fallback | #37, #48 |
 | Safety | Token/call/time/currency ceilings, secret redaction/retention, fail-closed sandbox policy and auditable approvals are enforced | #27, #28, #35, #45, #46, #49 |
 | Validation | A successful delivery revision is deployed by CI/CD to an authenticated, ephemeral preview URL with expiry and teardown | #34 |
-| Operability | The worker starts as a managed WSL service, survives restart, exposes health/backup status and emits a compact result view/notification | #40, #42 |
+| Operability | The worker starts as a managed local user service, survives restart, exposes health/backup status and emits a compact result view/notification | #40, #42 |
 
 The MVP is complete only when every gate has an end-to-end test through the remote contract. A local implementation of a gate is not the same thing as a reachable mobile product surface.
 
@@ -49,7 +49,7 @@ The MVP is complete only when every gate has an end-to-end test through the remo
 6. **#37/#48 - constrained local models:** add Ollama first, with an explicit low-risk role policy and acceptance evaluation; vLLM/llama.cpp use the same compatible adapter where practical.
 7. **#33/#46 - Git delivery and approved actions:** pin the base ref, define divergence policy and route push/PR actions through the shared executor.
 8. **#34 - preview environments:** build the committed delivery revision, deploy a short-lived authenticated subdomain and tear it down deterministically.
-9. **#40/#42 - service and notifications:** keep one worker healthy under WSL and return compact mobile-friendly result views.
+9. **#40/#42 - service and notifications:** keep one worker healthy on Linux, WSL2 or macOS and return compact mobile-friendly result views.
 
 ### Next - reliability and quality (P1/P2)
 

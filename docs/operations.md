@@ -97,7 +97,7 @@ Quota is a local estimate from recorded tokens versus declared rolling-window al
 
 `submit`, `status`, `jobs`, `cancel`, `work`, `resume`, `approvals`, `approve` and `deny` are delivered and tested against `core/jobs/`. This is the local CLI/queue contract, not remote exposure. Project allowlisting, idempotent submission, hard token/call budgets and scoped approvals exist in the engine; an authenticated non-local transport does not yet exist. See [Security](security.md), [MVP trajectory](mvp-trajectory.md), #29 and #30.
 
-`submit` persists the request and starts a detached worker; `status <id>` and `jobs` are readable from any process, including after the submitting terminal is closed. A job whose worker dies is reconciled to `interrupted`, keeping its branch, base revision and integration-worktree path. `work [--job ID]` runs one job or drains the queue in the foreground, which is the entry point a managed service unit will call once #40 is delivered.
+`submit` persists the request and starts a detached worker; `status <id>` and `jobs` are readable from any process, including after the submitting terminal is closed. A job whose worker dies is reconciled to `interrupted`, keeping its branch, base revision and integration-worktree path. `work [--job ID]` runs one job or drains the queue in the foreground, which is the entry point used by the managed service unit.
 
 When a run stops for a decision rather than a fault, such as a `strict` budget overrun, it lands in `waiting_approval` with a request attached:
 
@@ -139,9 +139,9 @@ Failure, conflict, interruption or cleanup error may intentionally retain it. Co
 
 For the synchronous path, inspect the provider subprocess and terminal output. For jobs, run `ai-platform status <id>`; reconciliation marks an abandoned run `interrupted` once its heartbeat is stale (default 180 seconds). From there, `ai-platform resume <id>` continues it.
 
-### WSL-specific problems
+### Host-specific service profiles
 
-Use Linux-native Git, Python and uv for a repository inside WSL. Mixing Windows processes with WSL worktrees can keep handles open and break cleanup. Reliable service startup inside WSL is tracked by #40.
+Use Linux-native Git, Python and uv for a repository inside WSL. Mixing Windows processes with WSL worktrees can keep handles open and break cleanup. The optional managed local user service is documented in [service operations](service-operations.md), with Linux/systemd, WSL2/systemd and macOS/launchd profiles.
 
 ## Remote warning
 

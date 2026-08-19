@@ -1,0 +1,27 @@
+[Unit]
+Description=ai-platform durable local worker
+After=local-fs.target network-online.target
+Wants=network-online.target
+RequiresMountsFor=%h/workspace/ai-platform
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/ai-platform
+EnvironmentFile=-%h/.config/ai-platform/service.env
+Environment=AI_PLATFORM_SERVICE_LOG=%h/.local/state/ai-platform/service.log
+ExecStart=%h/.local/bin/uv run ai-platform service-run
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=120
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=%h/workspace/ai-platform %h/.local/state/ai-platform
+
+[Install]
+WantedBy=default.target

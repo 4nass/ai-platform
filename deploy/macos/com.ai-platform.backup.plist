@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ai-platform.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/REPLACE/.local/bin/uv</string><string>run</string><string>ai-platform</string><string>backup</string><string>--keep</string><string>7</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/REPLACE/workspace/ai-platform</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/REPLACE/Library/Logs/ai-platform/backup.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/REPLACE/Library/Logs/ai-platform/backup.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ai-platform.worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/REPLACE/.local/bin/uv</string><string>run</string><string>ai-platform</string><string>service-run</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/REPLACE/workspace/ai-platform</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>AI_PLATFORM_SERVICE_LOG</key><string>/Users/REPLACE/Library/Logs/ai-platform/service.log</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/REPLACE/Library/Logs/ai-platform/worker.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/REPLACE/Library/Logs/ai-platform/worker.err.log</string>
+</dict>
+</plist>
