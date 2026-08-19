@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 from core.actions.executor import ActionContext, ActionError, ActionResult, CleanupResult, PreviewDeployPlan
 from core.jobs import approvals, store
 from core.orchestrator import registry
@@ -195,7 +195,7 @@ class PreviewManager:
         if plan.project_id!=project.id: raise PreviewError("preview project does not match registry")
         if not request_id or len(request_id)>200 or not all(c.isprintable() for c in request_id): raise PreviewError("preview request id is invalid")
         if len(plan.commit_sha)!=40 or any(c not in "0123456789abcdefABCDEF" for c in plan.commit_sha): raise PreviewError("preview must pin a 40-character hexadecimal commit SHA")
-        if project.base_branch and not project.remote: raise PreviewError("preview project has no configured remote")
+        if not project.remote: raise PreviewError("preview project has no configured remote")
     def _validate_deployment(self,d,plan):
         if d.source_commit!=plan.commit_sha: raise PreviewError("provider deployed a different commit")
         if d.auth_mode not in {"provider","capability"}: raise PreviewError("provider auth or capability auth is required")
@@ -208,10 +208,19 @@ class PreviewManager:
         host=p.hostname.lower().rstrip(".")
         if not any(host==h or host.endswith("."+h) for h in self.allowed_hosts): raise PreviewError(f"{label} is outside the configured preview domain")
     @staticmethod
-    def _access_url(url,mode,token):
-        if mode!="capability": return url
-        p=urlsplit(url); q=urlencode(parse_qsl(p.query,keep_blank_values=True)+[("ai_platform_capability",token)])
-        return urlunsplit((p.scheme,p.netloc,p.path,q,p.fragment))
+    def _access_url(url, mode, token):
+        """Return only an URL that remains safe to place in an artifact.
+
+        A bearer in a query string leaks through browser history, Referer and
+        proxy logs. The manager cannot set a cross-origin secure cookie or
+        header, so capability mode stays fail-closed until a provider-specific
+        edge exchange is implemented.
+        """
+        if mode == "capability":
+            raise PreviewError(
+                "capability previews require a secure provider edge token exchange"
+            )
+        return url
     def _find(self,request_id):
         with _connect(self.engine_root) as con: row=con.execute("SELECT * FROM previews WHERE request_id=?",(request_id,)).fetchone()
         return _row(row) if row else None
