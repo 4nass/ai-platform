@@ -27,7 +27,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt
+from providers.base import AgentTask, ProviderResult, TokenUsage, load_role_prompt, run_managed, ProviderCancelled
 
 TIMEOUT_SECONDS = 900
 READS_FILES = True  # `codex exec` opens and edits files itself
@@ -184,15 +184,14 @@ def run(task: AgentTask) -> ProviderResult:
         ])
 
         try:
-            proc = subprocess.run(
+            runner = run_managed if task.cancel_event is not None else subprocess.run
+            proc = runner(
                 cmd,
                 cwd=task.repo_root,
                 capture_output=True,
                 text=True,
                 timeout=TIMEOUT_SECONDS,
-                # Without this codex blocks waiting on stdin ("Reading
-                # additional input from stdin..."), which in a worker thread
-                # is an invisible hang rather than an error.
+                **({"cancel_event": task.cancel_event} if task.cancel_event is not None else {}),
                 stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError:

@@ -1,0 +1,35 @@
+# REST/SSE remote API (#47)
+
+The transport exposes a small authenticated WSGI application through
+core.transport.http.create_app. It is transport-only: admission, jobs,
+approvals and event cursors remain in their existing modules.
+
+## Authentication
+
+Every request carries X-API-Key, X-Timestamp, X-Nonce and X-Signature. The
+signature is the HMAC-SHA256 canonical request from core.transport.auth
+(method, exact path, timestamp, nonce and SHA-256 body). TLS is still required.
+POST /v1/jobs additionally carries an envelope with channel, sender, chat and
+message identifiers; these are checked against the credential principal and
+provide durable idempotency.
+
+Credentials for the development server are supplied through the
+AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Do not
+put secrets in YAML, Git, query strings or logs. Production needs a secret
+manager, TLS, a process supervisor and reverse-proxy rate/body limits.
+
+## Endpoints
+
+- POST /v1/jobs: JSON {project_id, request, envelope, dirty_policy?}. Project ids
+  are resolved through the registry; paths and shell commands are rejected.
+- GET /v1/jobs/{id}: compact status for the authenticated principal.
+- GET /v1/jobs/{id}/events?cursor=N: replayable SSE. id is the durable cursor;
+  Last-Event-ID is accepted for reconnects.
+- POST /v1/jobs/{id}/cancel: idempotent cooperative cancellation.
+- POST /v1/jobs/{id}/approval: {approval_id, approved, note?}; decisions are
+  principal-bound and audited.
+- GET /v1/jobs/{id}/artifacts: compact branch/diff/log/preview references.
+
+Unauthorized resources return the same 404 shape as missing resources, so the
+API does not disclose job ownership. Error responses are
+{"error":{"code":"...","message":"..."}}.

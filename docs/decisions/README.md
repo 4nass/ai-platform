@@ -19,6 +19,7 @@ ADRs preserve durable technical decisions, their context, and trade-offs. Compon
 | [ADR-011](ADR-011-admission-authorization-and-approval.md) | Admission, authorization and approval as one layered boundary | Accepted |
 | [ADR-012](ADR-012-mvp-remote-control-loop.md) | Remote control loop and constrained local models as the MVP boundary | Proposed |
 | [ADR-013](ADR-013-git-remote-base-policy.md) | Pin and validate a Git remote base before delivery | Accepted |
+| [ADR-014](ADR-014-audited-external-actions.md) | One audited executor for external actions | Accepted |
 
 The older CLI dry-run decision remains in [memory/adr/ADR-001](../../memory/adr/ADR-001-cli-dry-run-flag.md). It predates this documentation structure and is retained for history.
 

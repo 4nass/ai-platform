@@ -27,8 +27,8 @@ A request is never allowed to decide who sent it or whether it is new. Identity 
 
 | Layer | Control |
 |---|---|
-| Identity | `Principal` established by the channel, never inferred from prompt text; recorded on the job and audited decisions |
-| Replay | Idempotency key from `channel + sender + chat + message`, unique-indexed; redelivery returns the original job and conflicting payloads are refused |
+| Identity | HMAC-signed transport credential establishes a channel-scoped `Principal`; never inferred from prompt text; recorded on the job and audited decisions |
+| Replay | Signed timestamp/nonce plus durable `ReplayStore`; idempotency key from `channel + sender + chat + message`, unique-indexed; identical redelivery returns the original job and conflicting payloads are refused |
 | Admission | `--project <id>` resolves through `config/projects.yaml`; paths are canonicalized, contained and re-checked at claim time |
 | Snapshot | Identified base revision and frozen target policy |
 | Filesystem | Integration, stage and validation worktrees |
@@ -54,11 +54,11 @@ Remote operation requires per-project secret scopes, redaction, encrypted storag
 Before enabling OpenClaw or any network-facing API, all of the following are required:
 
 1. a project registry and canonical path allowlist (**delivered**, `core/orchestrator/registry.py`, #25);
-2. an authenticated principal and authorized operations (**partial**, #26/#30; the engine envelope exists, but no authenticated non-local transport exists);
+2. an authenticated principal and authorized operations (**engine delivered**, #26/#44; REST/SSE exposure and final remote gate remain #47/#49);
 3. idempotency keys for message retries (**delivered** in `core/jobs/envelope.py`, #26);
 4. durable jobs, heartbeat and crash recovery (**delivered** in `core/jobs/`, #24), plus structured progress events and cooperative cancellation (**planned**, #29);
 5. hard token/call admission budgets (**delivered** in `core/jobs/budget.py`, #27); elapsed-time and currency ceilings remain;
-6. approval gates for push, merge, deployment, secrets and destructive actions (**delivered** in `core/jobs/approvals.py`, #28); the external actions that consume them remain;
+6. approval gates plus an audited external-action executor library (core/jobs/approvals.py and core/actions/executor.py, #28/#46); no CLI, worker or REST caller instantiates it yet;
 7. a fail-closed execution sandbox;
 8. secrets isolation and retention policy;
 9. immutable artifact references and auditable preview deployments.
