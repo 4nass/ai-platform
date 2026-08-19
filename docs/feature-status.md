@@ -29,7 +29,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | Bounded review/correction loop | Delivered | Only eligible validation/review failures |
 | SQLite telemetry and cost estimates | Delivered | Analytical history, not a financial ceiling |
 | Hard budgets with reservations | Engine delivered | Token/call gate is real; time/currency ceilings remain in #45 |
-| Scoped approvals for privileged actions | Engine delivered | Fingerprint-bound, single-use approvals plus shared audited action executor (#46) |
+| Scoped approvals for privileged actions | Partially delivered | Fingerprint-bound approvals are live; the shared action-executor library has no CLI, worker or REST caller yet (#46) |
 | Durable jobs, detached worker and crash recovery | Delivered | Heartbeat and reconciliation mark abandoned runs `interrupted` |
 | Resuming an interrupted run | Delivered | `ai-platform resume <id>` skips merged stages |
 | Structured progress events and cooperative cancellation | Engine delivered | Durable lifecycle events, cursor replay and cooperative cancellation are implemented; gateway consumption remains #30/#47 |
@@ -69,7 +69,7 @@ This page is the authoritative distinction between implemented behavior and targ
 
 ## MVP gate
 
-The first expanded phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). The engine-side foundations are delivered in #29/#30/#33/#34/#40/#42/#44/#46/#47. Release readiness still requires constrained local-model execution (#37/#48), complete secrets/retention (#35), time/currency ceilings (#45), concrete provider/gateway deployment and the security readiness gate (#49).
+The first expanded phone-usable release is defined in [MVP trajectory](mvp-trajectory.md). Transport, lifecycle, sync and service foundations exist in #29/#30/#33/#40/#44/#47. Preview, notification and action modules (#34/#42/#46) still need one reachable, principal-aware integration path. Release readiness also requires constrained local-model execution (#37/#48), complete secrets/retention (#35), time/currency ceilings (#45), concrete provider/gateway deployment and the security readiness gate (#49).
 
 Local engine delivery of #25-#28 is a prerequisite, not a substitute for the remote gates. Local models are included in this MVP only for explicitly allowed low-risk roles and only after the evaluation policy in #48 passes.
 

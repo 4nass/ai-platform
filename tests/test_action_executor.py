@@ -23,6 +23,7 @@ from core.actions.executor import (
     OpenPRPlan,
     SUCCEEDED,
     WAITING_APPROVAL,
+    RUNNING,
     CANCELLED,
     DENIED,
 )
@@ -238,3 +239,74 @@ def test_git_push_handler_revalidates_pinned_remote_base(tmp_path: Path):
     )
     assert result.state == SUCCEEDED
     assert remote.commit("refs/heads/engine/demo").hexsha == delivery.commit.hexsha
+
+def test_concurrent_request_id_submissions_share_one_execution(tmp_path: Path, monkeypatch):
+    handler = Handler()
+    executor = ActionExecutor(tmp_path, {OPEN_PR: handler})
+    original_find = executor._find_request
+    barrier = threading.Barrier(2)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def synchronized_find(request_id):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            number = calls
+        if number <= 2:
+            barrier.wait(timeout=5)
+        return original_find(request_id)
+
+    monkeypatch.setattr(executor, "_find_request", synchronized_find)
+    results, failures = [], []
+
+    def submit():
+        try:
+            results.append(
+                executor.execute(
+                    plan(), project=project(), principal="owner", request_id="racing-request"
+                )
+            )
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not failures
+    assert len(results) == 2
+    assert len({result.id for result in results}) == 1
+    assert handler.calls == 1
+
+
+def test_concurrent_transitions_cannot_both_leave_waiting_approval(tmp_path: Path):
+    executor = ActionExecutor(tmp_path, {OPEN_PR: Handler()})
+    waiting = executor.execute(
+        plan(), project=project(approval_required=(OPEN_PR,)),
+        principal="owner", request_id="transition-race",
+    )
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def transition(target):
+        barrier.wait(timeout=5)
+        try:
+            executor._transition(waiting.id, target)
+            outcomes.append("won")
+        except ActionError:
+            outcomes.append("lost")
+
+    threads = [
+        threading.Thread(target=transition, args=(RUNNING,)),
+        threading.Thread(target=transition, args=(DENIED,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert sorted(outcomes) == ["lost", "won"]
+    assert executor.get(waiting.id).state in {RUNNING, DENIED}
