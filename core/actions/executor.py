@@ -378,14 +378,14 @@ class ActionExecutor:
             return self._replay(
                 existing, fp, plan, project, principal, approval_id, cancel_event
             )
-        execution = self.get(execution_id)
+        execution = self._get(execution_id)
 
         decision = approvals.classify(project, plan.action)
         if decision == approvals.DENIED_BY_POLICY:
             self._transition(execution_id, DENIED, result_code="policy_denied",
                              summary="action denied by project policy")
             self._audit(execution_id, "refused.policy", principal, {"action": plan.action})
-            return self.get(execution_id)
+            return self._get(execution_id)
 
         if decision == approvals.REQUIRES_APPROVAL:
             # A supplied approval is consumed against this newly-created
@@ -405,7 +405,7 @@ class ActionExecutor:
                              result_code="approval_required", summary="waiting for approval")
             self._audit(execution_id, "approval.required", principal,
                         {"approval_id": approval.id, "fingerprint": fp})
-            return self.get(execution_id)
+            return self._get(execution_id)
 
         return self._run(execution_id, plan, project, principal, cancel_event)
 
@@ -425,7 +425,7 @@ class ActionExecutor:
         return execution
 
     def cancel(self, execution_id: str, *, principal: str) -> ActionExecution:
-        execution = self.get(execution_id)
+        execution = self._get(execution_id)
         self._owner(execution, principal)
         event = self._cancel_events.get(execution_id)
         if event is not None:
@@ -436,10 +436,10 @@ class ActionExecutor:
         self._transition(execution_id, target_state, result_code="cancelled",
                          summary="cancellation requested")
         self._audit(execution_id, "cancel.requested", principal, {})
-        return self.get(execution_id)
+        return self._get(execution_id)
 
-    def events(self, execution_id: str) -> list[dict]:
-        self.get(execution_id)
+    def events(self, execution_id: str, *, principal: str) -> list[dict]:
+        self.get(execution_id, principal=principal)
         with self._connect() as con:
             rows = con.execute(
                 "SELECT event,at,actor,payload FROM action_events WHERE execution_id=? ORDER BY id",
@@ -452,7 +452,17 @@ class ActionExecutor:
             result.append(item)
         return result
 
-    def get(self, execution_id: str) -> ActionExecution:
+    def get(self, execution_id: str, *, principal: str) -> ActionExecution:
+        """Return an execution only to the principal that created it.
+
+        The same not-found response is used for an unknown id and a foreign
+        principal so callers cannot use this read path to enumerate actions.
+        """
+        execution = self._get(execution_id)
+        self._owner(execution, principal)
+        return execution
+
+    def _get(self, execution_id: str) -> ActionExecution:
         with self._connect() as con:
             row = con.execute("SELECT * FROM action_executions WHERE id=?", (execution_id,)).fetchone()
         if row is None:
@@ -469,7 +479,7 @@ class ActionExecutor:
                 self._transition(execution_id, CANCELLED, result_code="cancelled",
                                  summary="cancelled before external call")
                 self._audit(execution_id, "cancelled", principal, {})
-                return self.get(execution_id)
+                return self._get(execution_id)
             if approval_id is None:
                 self._transition(execution_id, RUNNING, started_at=self._now(),
                                  summary="external action started")
@@ -477,7 +487,7 @@ class ActionExecutor:
             credentials = None
             if self.credential_provider is not None:
                 credentials = self.credential_provider.get(project.id, plan.action)
-            execution = self.get(execution_id)
+            execution = self._get(execution_id)
             context = ActionContext(
                 self.engine_root, project, principal, credentials, cancel_event,
                 execution.job_id, execution.run_id,
@@ -498,21 +508,21 @@ class ActionExecutor:
                          "external_id": result.external_id})
             if not result.ok:
                 self._cleanup(execution_id, plan, context, principal)
-            return self.get(execution_id)
+            return self._get(execution_id)
         except approvals.ApprovalError as exc:
             state = EXPIRED if "expired" in str(exc).lower() else DENIED
             self._transition(execution_id, state, result_code="approval_rejected",
                              summary="approval was not consumable", finished_at=self._now())
             self._audit(execution_id, "approval.refused", principal,
                         {"reason": type(exc).__name__})
-            return self.get(execution_id)
+            return self._get(execution_id)
         except Exception as exc:
             self._transition(execution_id, FAILED, result_code=type(exc).__name__,
                              summary="external action failed", finished_at=self._now())
             self._audit(execution_id, "provider.failure", principal,
                         {"error": type(exc).__name__})
             self._cleanup(execution_id, plan, context, principal)
-            return self.get(execution_id)
+            return self._get(execution_id)
         finally:
             self._cancel_events.pop(execution_id, None)
 
@@ -522,7 +532,7 @@ class ActionExecutor:
                              summary="cancelled before approval consumption",
                              finished_at=self._now())
             self._audit(execution.id, "cancelled", principal, {})
-            return self.get(execution.id)
+            return self._get(execution.id)
         try:
             approval_record = approvals.get(self.engine_root, approval_id)
             if approval_record.requested_by and approval_record.requested_by != principal:
@@ -537,7 +547,7 @@ class ActionExecutor:
                              summary="approval was not consumable", finished_at=self._now())
             self._audit(execution.id, "approval.refused", principal,
                         {"reason": type(exc).__name__})
-            return self.get(execution.id)
+            return self._get(execution.id)
         self._transition(execution.id, RUNNING, approval_id=approval.id,
                          started_at=self._now(), result_code="approval_consumed",
                          summary="external action started")
@@ -589,14 +599,15 @@ class ActionExecutor:
 
     def _owner(self, execution, principal):
         if execution.principal != principal:
-            raise ActionError("action is not owned by this principal")
+            # Do not disclose that an execution id belongs to another caller.
+            raise ActionNotFound("action execution not found")
 
     def _find_request(self, request_id):
         with self._connect() as con:
             row = con.execute(
                 "SELECT id FROM action_executions WHERE request_id=?", (request_id,)
             ).fetchone()
-        return self.get(row["id"]) if row else None
+        return self._get(row["id"]) if row else None
 
     def _transition(self, execution_id, state, **fields):
         """Advance one execution with the prior state in the SQL predicate.

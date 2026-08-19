@@ -10,6 +10,7 @@ import git
 
 from core.actions.executor import (
     ActionError,
+    ActionNotFound,
     ActionPolicyError,
     GitPushPlan,
     ActionExecutor,
@@ -89,7 +90,7 @@ def test_policy_denial_is_audited_and_never_calls_provider(tmp_path: Path):
     )
     assert result.state == DENIED
     assert handler.calls == 0
-    assert any(e["event"] == "refused.policy" for e in executor.events(result.id))
+    assert any(e["event"] == "refused.policy" for e in executor.events(result.id, principal="owner"))
 
 
 def test_approval_is_consumed_only_for_the_exact_plan(tmp_path: Path):
@@ -134,7 +135,7 @@ def test_reused_approval_with_new_request_is_rejected_by_fingerprint(tmp_path: P
     assert changed.state == DENIED
     assert handler.calls == 0
     assert approvals.get(tmp_path, approval.id).state == approvals.APPROVED
-    assert any(e["event"] == "approval.refused" for e in executor.events(changed.id))
+    assert any(e["event"] == "approval.refused" for e in executor.events(changed.id, principal="owner"))
 
 
 def test_expired_approval_is_terminal_and_never_calls_provider(tmp_path: Path):
@@ -163,7 +164,7 @@ def test_provider_failure_is_audited_and_cleanup_is_attempted(tmp_path: Path):
     result = executor.execute(plan(), project=project(), principal="owner", request_id="failure-1")
     assert result.state == FAILED
     assert handler.cleanups == 1
-    events = [e["event"] for e in executor.events(result.id)]
+    events = [e["event"] for e in executor.events(result.id, principal="owner")]
     assert "provider.failure" in events
     assert "cleanup.result" in events
     assert "do-not-persist" not in json.dumps(events)
@@ -309,4 +310,15 @@ def test_concurrent_transitions_cannot_both_leave_waiting_approval(tmp_path: Pat
         thread.join(timeout=10)
 
     assert sorted(outcomes) == ["lost", "won"]
-    assert executor.get(waiting.id).state in {RUNNING, DENIED}
+    assert executor.get(waiting.id, principal="owner").state in {RUNNING, DENIED}
+
+def test_action_reads_do_not_disclose_another_principal(tmp_path: Path):
+    executor = ActionExecutor(tmp_path, {OPEN_PR: Handler()})
+    result = executor.execute(
+        plan(), project=project(), principal="owner", request_id="owner-only-read"
+    )
+
+    with pytest.raises(ActionNotFound, match="action execution not found"):
+        executor.get(result.id, principal="other")
+    with pytest.raises(ActionNotFound, match="action execution not found"):
+        executor.events(result.id, principal="other")
