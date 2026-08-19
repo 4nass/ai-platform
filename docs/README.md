@@ -16,8 +16,9 @@ The current implementation is the local execution half of that loop. The remote 
 4. [Architecture](architecture.md) - component boundaries and end-to-end flows.
 5. [REST/SSE API contract](api-contract.md) - stable interface for OpenClaw, browser and CLI adapters.
 6. [Audited external actions](action-executor.md) - approval-gated delivery and integration boundary.
-7. [Security model](security.md) - trust boundaries and enforcement layers.
-8. [Operations](operations.md) - how to run and troubleshoot it.
+7. [Per-run previews](preview-environments.md) - immutable commits, authenticated URLs, TTL and cleanup.
+8. [Security model](security.md) - trust boundaries and enforcement layers.
+9. [Operations](operations.md) - how to run and troubleshoot it.
 
 ## Component documentation
 
@@ -34,6 +35,7 @@ The current implementation is the local execution half of that loop. The remote 
 | Configuration | [Configuration reference](configuration.md) | `config/*.yaml`, `.ai-platform.yml` |
 | Remote interface | [REST/SSE API contract](api-contract.md) and [implementation](api-rest-sse.md) | core/transport/ |
 | External actions | [Audited action executor](action-executor.md) | core/actions/executor.py, core/jobs/approvals.py |
+| Previews | [Per-run preview environments](preview-environments.md) | core/previews/manager.py, core/transport/http.py |
 | Verification | [Testing](testing.md) | `tests/`, `pyproject.toml` |
 
 ## Governance and history

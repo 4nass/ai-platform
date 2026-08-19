@@ -8,6 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from core.jobs import store
+from core.orchestrator.registry import Project
+from core.actions.executor import PreviewDeployPlan, PREVIEW_DEPLOY
+from core.previews.manager import PreviewDeployment, PreviewManager
 from core.transport.auth import Authenticator, ReplayStore, TransportCredential
 from core.transport.http import RemoteAPI
 
@@ -157,3 +160,53 @@ def test_malformed_or_oversized_requests_fail_without_disclosure(api):
     )
     assert status["status"] == "400 Bad Request"
     assert value["error"]["code"] == "invalid_json"
+
+
+def test_preview_status_and_artifact_link_are_principal_bound(api, tmp_path):
+    app, c = api
+    job_id = store.submit(
+        app.engine_root, project="/safe", request="x", principal="openclaw:owner-1",
+        envelope={"project_id": "demo"},
+    ).id
+
+    class Provider:
+        def deploy(self, plan, context):
+            return PreviewDeployment(
+                "ci", "deployment-1", "https://run.preview.example.com/",
+                plan.commit_sha, "provider", "https://logs.preview.example.com/1",
+            )
+        def cleanup(self, preview, context):
+            from core.previews.manager import PreviewCleanup
+            return PreviewCleanup(True, "cleaned")
+
+    project = Project(
+        id="demo", path=tmp_path, remote="https://git.example.com/demo.git",
+        base_branch="main", allowed_actions=(PREVIEW_DEPLOY,),
+    )
+    preview = PreviewManager(
+        app.engine_root, Provider(), allowed_hosts=("preview.example.com",)
+    ).deploy(
+        PreviewDeployPlan(
+            project_id="demo", service="web", environment="pr-1",
+            commit_sha="a" * 40, ttl_seconds=60,
+        ),
+        project=project, principal="openclaw:owner-1",
+        request_id="api-preview", job_id=job_id, run_id=3,
+    )
+
+    status, value = request(
+        app.application, "GET", f"/v1/jobs/{job_id}/preview",
+        credential_obj=c, nonce="nonce_preview_status_1",
+    )
+    assert status["status"] == "200 OK"
+    assert value["preview_id"] == preview.id
+    assert value["commit_sha"] == "a" * 40
+
+    status, value = request(
+        app.application, "GET", f"/v1/jobs/{job_id}/artifacts",
+        credential_obj=c, nonce="nonce_preview_artifacts_1",
+    )
+    assert status["status"] == "200 OK"
+    item = next(item for item in value["artifacts"] if item["kind"] == "preview")
+    assert item["ref"] == preview.url
+    assert item["available"] is True
