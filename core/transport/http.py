@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
@@ -75,10 +76,14 @@ class RemoteAPI:
             if not path.startswith("/v1/"):
                 raise APIError(404, "not_found", "resource not found")
             body = self._body(environ)
+            # HMAC verification needs raw bytes, not parsed JSON. Authenticate
+            # first so malformed attacker-controlled JSON cannot consume parser
+            # work before credentials and the request signature are checked.
+            auth = self._authenticate(environ, method, path, body)
             if body:
                 self._require_json_content_type(environ)
             payload = self._json(body) if body else {}
-            auth = self._authenticate(environ, method, path, body, payload)
+            auth = self._bind_signed_payload(method, path, payload, auth, environ)
             result = self._dispatch(method, path, payload, auth, environ, body)
             status, outcome = 200, "ok"
             if isinstance(result, _SSE):
@@ -191,25 +196,17 @@ class RemoteAPI:
             raise APIError(400, "invalid_json", "request body must be a JSON object")
         return value
 
-    def _authenticate(self, environ, method, path, body, payload):
+    def _authenticate(self, environ, method, path, body):
         key_id = environ.get("HTTP_X_API_KEY", "")
         signature = environ.get("HTTP_X_SIGNATURE", "")
         nonce = environ.get("HTTP_X_NONCE", "")
         timestamp = environ.get("HTTP_X_TIMESTAMP", "")
         if not all((key_id, signature, nonce, timestamp)):
             raise AuthenticationError("missing authentication headers")
-        envelope_data = payload.get("envelope") if method == "POST" else None
-        envelope_data = envelope_data if isinstance(envelope_data, dict) else {}
-        envelope = Envelope(
-            channel=str(envelope_data.get("channel") or environ.get("HTTP_X_CHANNEL", "")),
-            sender_id=str(envelope_data.get("sender_id") or environ.get("HTTP_X_SENDER_ID", "")),
-            chat_id=str(envelope_data.get("chat_id") or environ.get("HTTP_X_CHAT_ID", "")),
-            message_id=str(envelope_data.get("message_id") or environ.get("HTTP_X_MESSAGE_ID", "")),
-            sent_at=str(envelope_data.get("sent_at") or ""),
-            project_id=str(payload.get("project_id") or envelope_data.get("project_id") or "") or None,
-            session_id=payload.get("session_id"),
-            dirty_policy=str(payload.get("dirty_policy") or "head"),
-        )
+        # These header identity values are only a pre-authentication envelope:
+        # after the signed JSON is parsed, _bind_signed_payload requires the
+        # two representations to agree and replaces this provisional value.
+        envelope = self._header_envelope(environ)
         scope = self._scope(method, path)
         query = environ.get("QUERY_STRING", "")
         signed_path = f"{path}?{query}" if query else path
@@ -225,6 +222,51 @@ class RemoteAPI:
             scope=scope,
             require_delivery_identity=(method == "POST" and path == "/v1/jobs"),
         )
+
+    @staticmethod
+    def _header_envelope(environ) -> Envelope:
+        return Envelope(
+            channel=str(environ.get("HTTP_X_CHANNEL", "")),
+            sender_id=str(environ.get("HTTP_X_SENDER_ID", "")),
+            chat_id=str(environ.get("HTTP_X_CHAT_ID", "")),
+            message_id=str(environ.get("HTTP_X_MESSAGE_ID", "")),
+        )
+
+    @staticmethod
+    def _payload_envelope(payload, environ) -> Envelope:
+        data = payload.get("envelope")
+        data = data if isinstance(data, dict) else {}
+        return Envelope(
+            channel=str(data.get("channel") or environ.get("HTTP_X_CHANNEL", "")),
+            sender_id=str(data.get("sender_id") or environ.get("HTTP_X_SENDER_ID", "")),
+            chat_id=str(data.get("chat_id") or environ.get("HTTP_X_CHAT_ID", "")),
+            message_id=str(data.get("message_id") or environ.get("HTTP_X_MESSAGE_ID", "")),
+            sent_at=str(data.get("sent_at") or ""),
+            project_id=str(payload.get("project_id") or data.get("project_id") or "") or None,
+            session_id=payload.get("session_id"),
+            dirty_policy=str(payload.get("dirty_policy") or "head"),
+        )
+
+    def _bind_signed_payload(self, method, path, payload, auth, environ):
+        """Bind the JSON envelope after the raw signed request is verified.
+
+        The remote identity in headers is needed before parsing to select and
+        authenticate the credential. The body is still authoritative for the
+        durable envelope: it is HMAC-signed, and any identity disagreement is
+        rejected rather than letting a header alter a signed submission.
+        """
+        if method != "POST" or path != "/v1/jobs":
+            return auth
+        envelope = self._payload_envelope(payload, environ)
+        header = auth.envelope
+        if (
+            envelope.channel != header.channel
+            or envelope.sender_id != header.sender_id
+            or envelope.chat_id != header.chat_id
+            or envelope.message_id != header.message_id
+        ):
+            raise AuthenticationError("signed envelope does not match request identity")
+        return replace(auth, envelope=envelope)
 
     @staticmethod
     def _scope(method, path):
