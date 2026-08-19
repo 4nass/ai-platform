@@ -22,6 +22,7 @@ from rich.console import Console
 
 from core.context.manager import ContextManager, SelectedContext
 from core.jobs import budget
+from core import security
 from core.errors import ConfigError
 from core.orchestrator import (
     checkpoint,
@@ -319,8 +320,9 @@ def _run_stage_in_worktree(
         # failure mid-commit — all of it becomes this one stage's failure
         # rather than the run's. The type name is kept because "why did this
         # stage fail" is unanswerable from a bare message.
-        console.print(f"[bold red]{task.id} failed[/bold red]: {type(exc).__name__}: {exc}")
-        failure = ProviderResult(success=False, summary=f"{type(exc).__name__}: {exc}")
+        safe_error = security.redactor(engine_root).exception(exc)
+        console.print(f"[bold red]{task.id} failed[/bold red]: {safe_error}")
+        failure = ProviderResult(success=False, summary=safe_error)
         return StageResult(task=task, status="failed", result=failure), worktree_path, task_branch
 
 
@@ -911,13 +913,14 @@ def run(
                     try:
                         stage_result, worktree_path, task_branch = future.result()
                     except Exception as exc:
+                        safe_error = security.redactor(engine_root).exception(exc)
                         console.print(
-                            f"[bold red]{task.id} crashed[/bold red]: {type(exc).__name__}: {exc}"
+                            f"[bold red]{task.id} crashed[/bold red]: {safe_error}"
                         )
                         stage_result = StageResult(
                             task=task,
                             status="failed",
-                            result=ProviderResult(success=False, summary=f"{type(exc).__name__}: {exc}"),
+                            result=ProviderResult(success=False, summary=security.redactor(engine_root).exception(exc)),
                         )
                         worktree_path, task_branch = None, None
 

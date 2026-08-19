@@ -74,3 +74,16 @@ budgets:
 #     min_lift: 1.2
 #     max_files: 20
 #     max_context_chars: 20000
+
+
+# Secrets are redacted before telemetry, job events, diagnostics and outbound
+# payloads. Add project-specific regexes only when the built-in formats do not
+# cover a private token; the matched value is never written.
+security:
+  redaction_patterns: []
+  retention:
+    runs_days: 30
+    calls_days: 30
+    events_days: 30
+    diffs_days: 7
+    attachments_days: 7

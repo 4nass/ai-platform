@@ -372,6 +372,23 @@ def reconcile(engine_root: Path, *, stale_after_seconds: float = STALE_AFTER_SEC
         return cursor.rowcount
 
 
+def purge_older_than(engine_root: Path, *, days: float) -> int:
+    """Delete settled coordination records once retention permits it.
+
+    Held reservations are live admission state and are never removed here.
+    Zero uses the platform-wide retention convention of keep indefinitely.
+    """
+    if days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with connect(engine_root) as con:
+        _ensure(con)
+        return con.execute(
+            "DELETE FROM reservations WHERE state <> ? AND COALESCE(settled_at, created_at) < ?",
+            (HELD, cutoff),
+        ).rowcount
+
+
 def report(engine_root: Path, limits: Limits, *, run_key: str, mode: str = SOFT) -> Report:
     """The closing figures for one run: reserved, consumed, remaining."""
     with connect(engine_root) as con:

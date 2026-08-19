@@ -18,12 +18,14 @@ concurrent writers a non-issue at this volume.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from providers.base import ProviderResult
+from core import security
 
 DB_PATH = Path("telemetry.sqlite")
 BUSY_TIMEOUT_SECONDS = 10.0
@@ -71,6 +73,16 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX IF NOT EXISTS idx_calls_run    ON calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_calls_agent  ON calls(agent, provider);
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id);
+
+CREATE TABLE IF NOT EXISTS tombstones (
+  id INTEGER PRIMARY KEY,
+  scope TEXT NOT NULL,
+  selector TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  rows_deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_tombstones_scope ON tombstones(scope);
 """
 
 
@@ -117,6 +129,11 @@ def connect(engine_root: Path):
     path = engine_root / DB_PATH
     con = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
     try:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.executescript(SCHEMA)
@@ -150,12 +167,17 @@ class RunRecorder:
         metadata: dict | None = None,
     ) -> None:
         self.engine_root = engine_root
+        self._redactor = security.redactor(
+            engine_root, Path(target_repo) if target_repo else None
+        )
+        request = self._redactor.text(request)
+        metadata = self._redactor.value(metadata or {})
         self._started_at = _now()
         with connect(engine_root) as con:
             cursor = con.execute(
                 "INSERT INTO runs(session_id, target_repo, request, engine_commit, started_at, metadata) "
                 "VALUES(?, ?, ?, ?, ?, ?)",
-                (session_id, target_repo, request, engine_commit, self._started_at, json.dumps(metadata or {})),
+                (session_id, target_repo, request, engine_commit, self._started_at, json.dumps(metadata)),
             )
             self.run_id = cursor.lastrowid
 
@@ -177,6 +199,10 @@ class RunRecorder:
         metadata: dict | None = None,
     ) -> None:
         usage = result.usage
+        result = self._redactor.result(result)
+        routing_reason = self._redactor.text(routing_reason)
+        context_reason = self._redactor.text(context_reason)
+        metadata = self._redactor.value(metadata or {})
         with connect(self.engine_root) as con:
             con.execute(
                 "INSERT INTO calls("
@@ -206,7 +232,7 @@ class RunRecorder:
                     context_chars,
                     routing_reason,
                     context_reason,
-                    json.dumps(metadata or {}),
+                    json.dumps(metadata),
                 ),
             )
 
@@ -217,7 +243,7 @@ class RunRecorder:
         with connect(self.engine_root) as con:
             con.execute(
                 "UPDATE runs SET branch = ?, summary = ?, finished_at = ?, duration_ms = ? WHERE id = ?",
-                (branch, summary, finished_at, duration_ms, self.run_id),
+                (self._redactor.text(branch), self._redactor.text(summary), finished_at, duration_ms, self.run_id),
             )
 
 
@@ -358,3 +384,109 @@ def recent_runs(
 
     with connect(engine_root) as con:
         return [dict(row) for row in con.execute(query, params)]
+
+
+def _delete_runs(
+    con: sqlite3.Connection,
+    engine_root: Path,
+    *,
+    scope: str,
+    selector: str,
+    actor: str = "",
+) -> int:
+    """Delete telemetry rows while leaving a non-sensitive audit tombstone."""
+    if scope == "run":
+        rows = con.execute("SELECT id FROM runs WHERE id = ?", (int(selector),)).fetchall()
+    elif scope == "session":
+        rows = con.execute("SELECT id FROM runs WHERE session_id = ?", (selector,)).fetchall()
+    elif scope == "project":
+        rows = con.execute("SELECT id FROM runs WHERE target_repo = ?", (selector,)).fetchall()
+    else:
+        raise ValueError(f"Unknown deletion scope {scope!r}")
+    run_ids = [int(row["id"]) for row in rows]
+    if run_ids:
+        marks = ",".join("?" for _ in run_ids)
+        con.execute(f"DELETE FROM calls WHERE run_id IN ({marks})", run_ids)
+        con.execute(f"DELETE FROM runs WHERE id IN ({marks})", run_ids)
+    redactor = security.redactor(engine_root)
+    con.execute(
+        "INSERT INTO tombstones(scope, selector, deleted_at, actor, rows_deleted) VALUES(?,?,?,?,?)",
+        (scope, redactor.text(selector), _now(), redactor.text(actor), len(run_ids)),
+    )
+    return len(run_ids)
+
+
+def delete_run(engine_root: Path, run_id: int, *, actor: str = "") -> int:
+    with connect(engine_root) as con:
+        return _delete_runs(con, engine_root, scope="run", selector=str(run_id), actor=actor)
+
+
+def delete_session(engine_root: Path, session_id: str, *, actor: str = "") -> int:
+    with connect(engine_root) as con:
+        return _delete_runs(con, engine_root, scope="session", selector=session_id, actor=actor)
+
+
+def delete_project(engine_root: Path, target_repo: str, *, actor: str = "") -> int:
+    with connect(engine_root) as con:
+        return _delete_runs(con, engine_root, scope="project", selector=target_repo, actor=actor)
+
+
+def purge_expired(engine_root: Path, policy: security.RetentionPolicy | None = None) -> dict[str, int]:
+    """Apply retention to durable records that are safe to delete.
+
+    Diffs and attachments are returned as zero until those artifact stores
+    exist. Zero days means retain indefinitely. Active jobs and held
+    reservations are never selected for deletion.
+    """
+    policy = policy or security.load_policy(engine_root).retention
+    now = datetime.now(timezone.utc)
+    counts = {
+        "runs": 0,
+        "calls": 0,
+        "events": 0,
+        "jobs": 0,
+        "reservations": 0,
+        "diffs": 0,
+        "attachments": 0,
+    }
+    with connect(engine_root) as con:
+        if policy.calls_days > 0:
+            call_cutoff = (now - timedelta(days=policy.calls_days)).isoformat()
+            counts["calls"] = con.execute(
+                "DELETE FROM calls WHERE finished_at IS NOT NULL AND finished_at < ?",
+                (call_cutoff,),
+            ).rowcount
+        if policy.runs_days > 0:
+            run_cutoff = (now - timedelta(days=policy.runs_days)).isoformat()
+            old_runs = con.execute(
+                "SELECT id FROM runs WHERE COALESCE(finished_at, started_at) < ?",
+                (run_cutoff,),
+            ).fetchall()
+            if old_runs:
+                ids = [int(row["id"]) for row in old_runs]
+                marks = ",".join("?" for _ in ids)
+                counts["calls"] += con.execute(
+                    f"DELETE FROM calls WHERE run_id IN ({marks})", ids
+                ).rowcount
+                counts["runs"] = con.execute(
+                    f"DELETE FROM runs WHERE id IN ({marks})", ids
+                ).rowcount
+
+    from core.jobs import budget, store as job_store
+
+    with job_store.connect(engine_root) as con:
+        if policy.events_days > 0:
+            event_cutoff = (now - timedelta(days=policy.events_days)).isoformat()
+            counts["events"] = con.execute(
+                "DELETE FROM job_events WHERE at < ?", (event_cutoff,)
+            ).rowcount
+            approval_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approval_events'"
+            ).fetchone()
+            if approval_table:
+                counts["events"] += con.execute(
+                    "DELETE FROM approval_events WHERE at < ?", (event_cutoff,)
+                ).rowcount
+    counts["jobs"] = job_store.purge_older_than(engine_root, days=policy.runs_days)
+    counts["reservations"] = budget.purge_older_than(engine_root, days=policy.calls_days)
+    return counts

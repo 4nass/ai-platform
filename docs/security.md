@@ -47,7 +47,7 @@ Repository context is wrapped as untrusted data and control words such as `VERDI
 
 Provider CLIs reuse local authenticated sessions. API adapters use environment credentials with separate billing. Secrets, provider transcripts, SQLite databases, vector indexes and preview credentials must not be committed.
 
-Remote operation requires per-project secret scopes, redaction, encrypted storage where appropriate, rotation, access logging and retention/deletion rules. This is tracked by [#35](https://github.com/4nass/ai-platform/issues/35).
+Remote operation requires per-project secret scopes, redaction, encrypted storage where appropriate, rotation, access logging and retention/deletion rules. Redaction, SQLite retention and auditable deletion are delivered by #35; remote readiness still depends on #49.
 
 ## Remote-readiness gates
 
@@ -60,7 +60,7 @@ Before enabling OpenClaw or any network-facing API, all of the following are req
 5. hard token/call admission budgets (**delivered** in `core/jobs/budget.py`, #27); elapsed-time and currency ceilings remain;
 6. approval gates for push, merge, deployment, secrets and destructive actions (**delivered** in `core/jobs/approvals.py`, #28); the external actions that consume them remain;
 7. a fail-closed execution sandbox;
-8. secrets isolation and retention policy;
+8. secrets isolation and retention policy (**delivered** in `core/security.py` and telemetry/jobs stores, #35);
 9. immutable artifact references and auditable preview deployments.
 
 OpenClaw should receive narrow tools such as submit, status, events, cancel, approve/deny and fetch-artifact. It should never receive an unrestricted shell into the workstation.
@@ -74,6 +74,11 @@ OpenClaw should receive narrow tools such as submit, status, events, cancel, app
 - Context artifacts may write to the original target checkout.
 - Advisory subscription quota estimates do not prevent overspend; hard token/call budgets do not yet cover time/currency.
 - Prompt injection can influence model judgment even when filesystem policy contains its effects.
-- SQLite and vector data have no centralized retention or encryption policy.
+- Vector data and future diff/attachment stores still need centralized retention/encryption policy (#38).
 
 These limits are acceptable only inside the documented local single-user boundary. See [Known limitations](known-limitations.md) and [MVP trajectory](mvp-trajectory.md).
+
+
+## Deterministic redaction and retention
+
+Issue #35 is implemented by `core.security`: built-in credential formats and configured regexes are applied before requests, provider errors, metadata, job events, diagnostics and outbound-ready summaries are persisted or emitted. The original match is never included in the replacement. Retention is configured under `security.retention` in `config/platform.yaml`; telemetry deletion leaves auditable tombstones for run, session and project scopes.

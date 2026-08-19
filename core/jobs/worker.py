@@ -288,11 +288,13 @@ def reconcile(engine_root: Path) -> list:
     import git
 
     from core.orchestrator import git_ops
+    from core.telemetry import store as telemetry
 
     # Reservations held by a run that is no longer spending would otherwise
     # shrink every later run's window forever — a budget that tightens itself
     # every time something crashes (see core.jobs.budget.reconcile).
     budget.reconcile(engine_root)
+    telemetry.purge_expired(engine_root)
 
     interrupted = store.reconcile(engine_root)
     for job in interrupted:

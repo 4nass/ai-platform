@@ -20,7 +20,7 @@ The local engine is usable for one owner on one workstation. The blockers below 
 | No structured event stream/cancellation contract | Mobile clients cannot follow or stop a run robustly | [#29](https://github.com/4nass/ai-platform/issues/29) |
 | No per-run preview deployment | Browser validation requires manual setup | [#34](https://github.com/4nass/ai-platform/issues/34) |
 | No remote base sync/delivery policy | Branches can start from stale local state | [#33](https://github.com/4nass/ai-platform/issues/33) |
-| Secrets and data retention are incomplete | Remote operation risks credential and source leakage | [#35](https://github.com/4nass/ai-platform/issues/35) |
+| Diff/attachment retention and encrypted backup handling remain incomplete | Artifact stores are not yet implemented | [#38](https://github.com/4nass/ai-platform/issues/38) |
 | Provider health/quality routing is limited | Failover is deterministic but not deeply adaptive | [#31](https://github.com/4nass/ai-platform/issues/31), [#32](https://github.com/4nass/ai-platform/issues/32) |
 | Decomposer only prunes a fixed DAG | Novel workflows cannot be composed dynamically | [#18](https://github.com/4nass/ai-platform/issues/18) |
 | Upstream summaries can mislead downstream agents | Dependency hand-off quality can reduce correctness | [#6](https://github.com/4nass/ai-platform/issues/6), [#14](https://github.com/4nass/ai-platform/issues/14) |

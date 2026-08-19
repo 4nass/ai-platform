@@ -29,6 +29,7 @@ raise rather than silently corrupting the lifecycle — a job going from
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sqlite3
 from contextlib import contextmanager
@@ -36,6 +37,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
+
+from core import security
 
 DB_PATH = Path("jobs.sqlite")
 BUSY_TIMEOUT_SECONDS = 10.0
@@ -285,8 +288,13 @@ def connect(engine_root: Path):
     the queue is the engine's, not any one project's. Which project a job
     targets is a column.
     """
-    con = sqlite3.connect(engine_root / DB_PATH, timeout=BUSY_TIMEOUT_SECONDS)
+    path = engine_root / DB_PATH
+    con = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
     try:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
@@ -335,6 +343,15 @@ def submit(
     worker for a run that is already going.
     """
     payload_hash = payload_hash or ""
+    # The durable queue keeps the exact instruction a later worker must execute.
+    # Redacting it here changes valid requests after a restart. The owner-only
+    # job database is the execution boundary; telemetry and audit output have
+    # their own redaction boundary.
+    envelope = envelope or {}
+    redactor = security.redactor(engine_root, Path(project) if project else None)
+    submitted_note = redactor.text(
+        f"submitted via {channel} by {principal or 'unknown'}"
+    )
     with connect(engine_root) as con:
         try:
             cursor = con.execute(
@@ -347,7 +364,7 @@ def submit(
                     request,
                     channel,
                     submitted_by,
-                    json.dumps(envelope or {}),
+                    json.dumps(envelope),
                     principal,
                     idempotency_key,
                     payload_hash,
@@ -362,7 +379,7 @@ def submit(
         job_id = cursor.lastrowid
         con.execute(
             "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
-            (job_id, None, QUEUED, _now(), f"submitted via {channel} by {principal or 'unknown'}"),
+            (job_id, None, QUEUED, _now(), submitted_note),
         )
         return Submission(id=job_id, created=True)
 
@@ -475,6 +492,8 @@ def transition(
     """
     if to_state not in TRANSITIONS:
         raise JobError(f"Unknown job state {to_state!r}")
+    redactor = security.redactor(engine_root)
+    note = redactor.text(note)
 
     with connect(engine_root) as con:
         row = con.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -678,6 +697,8 @@ def purge_older_than(engine_root: Path, *, days: float) -> int:
     """Drops terminal jobs past their useful life. Active jobs are never
     touched, whatever their age — an old `running` row is reconciliation's
     problem, not something to delete out from under a live worker."""
+    if days <= 0:
+        return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with connect(engine_root) as con:
         ids = [
