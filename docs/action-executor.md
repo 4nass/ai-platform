@@ -30,7 +30,9 @@ Changing any of those inputs invalidates the approval.
 
 Each request, refusal, approval consumption, provider result, failure, cleanup
 result and cancellation is appended to action_events. Only a bounded provider summary and provider identifier are persisted; credentials
-and unbounded provider output are never stored or returned.
+and unbounded provider output are never stored or returned. Public execution and
+event reads require the creating principal and return the same not-found result
+for an unknown or foreign execution id, preventing cross-principal enumeration.
 
 ## Handlers and deployment
 
