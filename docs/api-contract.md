@@ -169,8 +169,10 @@ GET /v1/jobs/{job_id}/preview
 Returns the authenticated preview record when a deployment exists. It includes
 the immutable commit_sha, provider status, expiring URL, optional logs URL,
 data isolation mode and expires_at. The URL is an artifact, not an
-authorization bypass: the provider edge must enforce its provider auth or
-capability token. The endpoint is principal-bound like the other job reads.
+authorization bypass: the provider edge must enforce its own authentication.
+Capability-token previews are fail-closed until a secure cookie or header
+exchange is implemented. The endpoint is principal-bound like the other job
+reads.
 
 The SSE stream also carries preview.requested, preview.deploying, preview.ready,
 preview.failed, preview.expired, preview.cleaned and preview.cleanup_failed

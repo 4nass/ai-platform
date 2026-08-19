@@ -54,7 +54,7 @@ This page is the authoritative distinction between implemented behavior and targ
 | P1 | Provider failover hardening | [#31](https://github.com/4nass/ai-platform/issues/31) | Planned |
 | P1 | Quality-aware routing | [#32](https://github.com/4nass/ai-platform/issues/32) | Planned |
 | P1 | Base synchronization and remote delivery | [#33](https://github.com/4nass/ai-platform/issues/33) | Engine delivered: pinned base, fetch/divergence policy and approval-only push guard; end-to-end PR delivery remains #30/#46/#47 |
-| P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Engine delivered: immutable provider contract, capability URLs, TTL/reconcile/cleanup, REST status/artifact links; concrete CI provider remains |
+| P1 | Per-run preview environments | [#34](https://github.com/4nass/ai-platform/issues/34) | Library only: immutable provider contract and lifecycle exist; no reachable deploy/reconcile caller, concrete CI provider or secure capability exchange |
 | P1 | Secrets isolation and retention | [#35](https://github.com/4nass/ai-platform/issues/35) | Planned; required by #49 |
 | P1 | Multi-turn run references | [#36](https://github.com/4nass/ai-platform/issues/36) | Planned |
 | P1 | Local-model provider | [#37](https://github.com/4nass/ai-platform/issues/37) | Planned; MVP policy/evaluation is #48 |

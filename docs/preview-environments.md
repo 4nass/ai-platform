@@ -25,8 +25,8 @@ A provider implements:
 - cleanup(preview, context) -> PreviewCleanup.
 
 The deploy response must contain an HTTPS URL under an allowed preview domain,
-the exact source commit, an external deployment id, and either provider-side
-authentication or capability authentication. Public URLs are rejected.
+the exact source commit, an external deployment id, and provider-side
+authentication. Public URLs are rejected.
 
 ## Security and reproducibility
 
@@ -34,12 +34,13 @@ The plan pins a 40-character commit SHA, service, environment, configuration
 digest, data mode and bounded TTL. The shared action executor applies project
 allowlists and exact fingerprint-bound approvals before the provider is called.
 
-For capability authentication, the manager creates a random expiring bearer
-token, passes it to the provider in PreviewContext and appends it to the
-returned URL. Only its SHA-256 digest is used for capability authorization.
-The URL is an expiring artifact and must be retained with the restrictive
-permissions of jobs.sqlite; issue #35 defines future centralized retention and
-redaction.
+Capability authentication is intentionally fail-closed for now. Appending a
+bearer token to a URL would leak it through browser history, Referer headers
+and proxy logs. A future provider-specific edge exchange must set a Secure,
+HttpOnly cookie or accept a protected header; only then may capability mode be
+enabled. The URL is an expiring artifact and must be retained with the
+restrictive permissions of jobs.sqlite; issue #35 defines future centralized
+retention and redaction.
 
 Credentials are requested by project id and passed opaquely to the provider.
 They are never included in plans, audit payloads, mobile responses or provider
