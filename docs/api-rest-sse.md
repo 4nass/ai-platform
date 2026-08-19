@@ -18,6 +18,8 @@ AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Do not
 put secrets in YAML, Git, query strings or logs. Production needs a secret
 manager, TLS, a process supervisor and reverse-proxy rate/body limits.
 
+`ai-platform serve --host 127.0.0.1 --port 8787` starts the built-in local development server. It emits an access record for every request, including route template, HTTP status, outcome and direct client address. It never logs request bodies, query strings, credential identifiers, signatures, nonces, delivery identifiers or arbitrary paths. A production WSGI host must configure the same `ai_platform.transport.access` logger itself and keep its proxy access logs subject to the same redaction and retention policy.
+
 ## Endpoints
 
 - POST /v1/jobs: JSON {project_id, request, envelope, dirty_policy?}. Project ids

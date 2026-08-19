@@ -9,6 +9,7 @@ the built-in server helper is for local development and smoke tests.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -31,6 +32,7 @@ from core.transport.service import submit_verified
 
 MAX_BODY_BYTES = 1_048_576
 JOB_ID = re.compile(r"^[1-9][0-9]{0,18}$")
+ACCESS_LOG = logging.getLogger("ai_platform.transport.access")
 SCOPES = {
     ("POST", "/v1/jobs"): "jobs:submit",
     ("GET", "job"): "jobs:read",
@@ -65,15 +67,18 @@ class RemoteAPI:
         self.clock = clock
 
     def application(self, environ, start_response):
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        path = environ.get("PATH_INFO", "")
+        status = 500
+        outcome = "internal_error"
         try:
-            method = environ.get("REQUEST_METHOD", "GET").upper()
-            path = environ.get("PATH_INFO", "")
             if not path.startswith("/v1/"):
                 raise APIError(404, "not_found", "resource not found")
             body = self._body(environ)
             payload = self._json(body) if body else {}
             auth = self._authenticate(environ, method, path, body, payload)
             result = self._dispatch(method, path, payload, auth, environ, body)
+            status, outcome = 200, "ok"
             if isinstance(result, _SSE):
                 headers = [
                     ("Content-Type", "text/event-stream; charset=utf-8"),
@@ -83,17 +88,56 @@ class RemoteAPI:
                 ]
                 start_response("200 OK", headers)
                 return result.iter_bytes()
-            return self._json_response(start_response, 200, result)
+            return self._json_response(start_response, status, result)
         except APIError as exc:
-            return self._error(start_response, exc.status, exc.code, exc.message)
+            status, outcome = exc.status, exc.code
+            return self._error(start_response, status, exc.code, exc.message)
         except AuthorizationError:
-            return self._error(start_response, 403, "forbidden", "operation not authorized")
+            status, outcome = 403, "authorization_denied"
+            return self._error(start_response, status, "forbidden", "operation not authorized")
         except (AuthenticationError, ReplayError, TransportAuthError):
-            return self._error(start_response, 401, "unauthorized", "request not authorized")
+            status, outcome = 401, "authentication_failed"
+            return self._error(start_response, status, "unauthorized", "request not authorized")
         except (registry.RegistryError, store.JobError, approvals.ApprovalError):
-            return self._error(start_response, 404, "not_found", "resource not found")
+            status, outcome = 404, "not_found"
+            return self._error(start_response, status, "not_found", "resource not found")
         except Exception:
-            return self._error(start_response, 500, "internal_error", "internal server error")
+            return self._error(start_response, status, outcome, "internal server error")
+        finally:
+            self._log_access(environ, method=method, path=path, status=status, outcome=outcome)
+
+    @staticmethod
+    def _log_path(path: str) -> str:
+        """Return a route template rather than logging a caller-controlled path."""
+        if path == "/v1/jobs":
+            return path
+        parts = path.rstrip("/").split("/")
+        if len(parts) == 4 and JOB_ID.fullmatch(parts[3]):
+            return "/v1/jobs/{id}"
+        if len(parts) == 5 and JOB_ID.fullmatch(parts[3]) and parts[4] in {
+            "events", "cancel", "approval", "artifacts", "preview"
+        }:
+            return f"/v1/jobs/{{id}}/{parts[4]}"
+        return "invalid"
+
+    @staticmethod
+    def _log_access(environ, *, method: str, path: str, status: int, outcome: str) -> None:
+        """Log bounded, non-secret request evidence for incident response.
+
+        Do not log bodies, query strings, credential ids, signatures, nonces,
+        envelope ids or an arbitrary PATH_INFO value. Those are all supplied by
+        the caller and may contain sensitive data.
+        """
+        level = logging.INFO if status < 400 else logging.WARNING
+        ACCESS_LOG.log(
+            level,
+            "transport_request method=%s route=%s status=%s outcome=%s client=%s",
+            method,
+            RemoteAPI._log_path(path),
+            status,
+            outcome,
+            environ.get("REMOTE_ADDR", "-"),
+        )
 
     @staticmethod
     def _json_response(start_response, status, value):

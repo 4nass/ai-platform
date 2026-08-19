@@ -801,3 +801,19 @@ def test_cli_approving_a_budget_pause_points_at_resume(
     result = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
 
     assert "ai-platform resume 7" in result.stdout
+
+def test_serve_command_starts_the_transport_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict = {}
+    monkeypatch.setattr(
+        "core.transport.server.serve",
+        lambda engine_root, host, port: called.update(
+            engine_root=engine_root, host=host, port=port
+        ),
+    )
+
+    result = runner.invoke(ai_platform.app, ["serve", "--host", "127.0.0.1", "--port", "9911"])
+
+    assert result.exit_code == 0
+    assert called["engine_root"] == ai_platform.ENGINE_ROOT
+    assert called["host"] == "127.0.0.1"
+    assert called["port"] == 9911

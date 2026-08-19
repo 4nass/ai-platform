@@ -1,6 +1,7 @@
 """Development server wiring for the transport API."""
 from __future__ import annotations
 import json
+import logging
 import os
 from pathlib import Path
 from wsgiref.simple_server import make_server
@@ -24,6 +25,22 @@ def authenticator_from_env(engine_root: Path, *, variable: str = "AI_PLATFORM_TR
         credential = credential_from_mapping(item)
         credentials[credential.key_id] = credential
     return Authenticator(credentials, ReplayStore(Path(engine_root) / "transport.sqlite"))
+
+def _configure_access_logging() -> None:
+    """Give the built-in development server useful, redacted access logs.
+
+    A production WSGI host owns its logging configuration; this only makes the
+    CLI server observable without changing an embedding application's handlers.
+    """
+    logger = logging.getLogger("ai_platform.transport.access")
+    logger.setLevel(logging.INFO)
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+    logger.propagate = False
+
 
 def _loopback(host: str) -> bool:
     return host in {"127.0.0.1", "::1", "localhost"}
@@ -73,6 +90,7 @@ def _remote_allowed(engine_root: Path, host: str) -> None:
 def serve(engine_root: Path, *, host: str = "127.0.0.1", port: int = 8787) -> None:
     engine_root = Path(engine_root)
     _remote_allowed(engine_root, host)
+    _configure_access_logging()
     auth = authenticator_from_env(engine_root)
     with make_server(host, port, create_app(engine_root, auth)) as server:
         server.serve_forever()

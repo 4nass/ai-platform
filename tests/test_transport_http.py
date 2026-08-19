@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -210,3 +211,34 @@ def test_preview_status_and_artifact_link_are_principal_bound(api, tmp_path):
     item = next(item for item in value["artifacts"] if item["kind"] == "preview")
     assert item["ref"] == preview.url
     assert item["available"] is True
+
+def test_access_logs_are_useful_without_recording_request_secrets(api, caplog) -> None:
+    app, c = api
+    caplog.set_level(logging.INFO, logger="ai_platform.transport.access")
+    secret_path = "/v1/not-a-route/sk-test-12345678901234567890"
+    status, value = request(app.application, "GET", secret_path, credential_obj=c)
+
+    assert status["status"] == "404 Not Found"
+    assert value["error"]["code"] == "not_found"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("status=404" in message and "route=invalid" in message for message in messages)
+    assert all("sk-test-12345678901234567890" not in message for message in messages)
+
+
+def test_access_logs_authentication_failures(api, caplog) -> None:
+    app, c = api
+    caplog.set_level(logging.WARNING, logger="ai_platform.transport.access")
+    status, value = request(
+        app.application,
+        "GET",
+        "/v1/jobs/1",
+        credential_obj=c,
+        extra={"HTTP_X_SIGNATURE": "not-a-valid-signature"},
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"
+    assert any(
+        "status=401" in record.getMessage() and "outcome=authentication_failed" in record.getMessage()
+        for record in caplog.records
+    )
