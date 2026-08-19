@@ -44,8 +44,9 @@ def request(app, method, path, body=b"", *, credential_obj=None, nonce="nonce_12
         "PATH_INFO": path,
         "QUERY_STRING": query,
     }
+    signed_path = f"{path}?{query}" if query else path
     headers["HTTP_X_SIGNATURE"] = c.sign(
-        method=method, path=path, body=body, timestamp=NOW, nonce=nonce
+        method=method, path=signed_path, body=body, timestamp=NOW, nonce=nonce
     )
     if extra:
         headers.update(extra)
@@ -242,3 +243,23 @@ def test_access_logs_authentication_failures(api, caplog) -> None:
         "status=401" in record.getMessage() and "outcome=authentication_failed" in record.getMessage()
         for record in caplog.records
     )
+
+def test_signed_query_parameters_cannot_be_changed_after_authentication(api):
+    app, c = api
+    job_id = store.submit(
+        app.engine_root, project="/safe", request="x", principal="openclaw:owner-1",
+        envelope={"project_id": "demo"},
+    ).id
+
+    status, value = request(
+        app.application,
+        "GET",
+        f"/v1/jobs/{job_id}/events",
+        credential_obj=c,
+        nonce="nonce_tampered_query",
+        query="cursor=0",
+        extra={"QUERY_STRING": "cursor=999"},
+    )
+
+    assert status["status"] == "401 Unauthorized"
+    assert value["error"]["code"] == "unauthorized"
