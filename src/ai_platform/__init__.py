@@ -47,6 +47,18 @@ def _target_root(repo: Path | None) -> Path:
     return (repo or Path.cwd()).resolve()
 
 
+def _display_request(job) -> str:
+    """Redact a queued instruction when it is rendered for an operator.
+
+    The worker must keep the original value in its owner-only queue so it can
+    execute after a restart; it must never be echoed back to a terminal.
+    """
+    from core import security
+
+    target_root = Path(job.project) if job.project else None
+    return security.redactor(ENGINE_ROOT, target_root).text(job.request)
+
+
 def _admit(repo: Path | None, project_id: str | None, *, action: str):
     """Resolves what a command may operate on, and returns (path, project).
 
@@ -636,7 +648,7 @@ def jobs(
             str(row.id),
             f"[{_STATE_STYLE.get(row.state, 'white')}]{row.state}[/]",
             row.submitted_at[:19].replace("T", " "),
-            row.request[:40],
+            _display_request(row)[:40],
             row.stage or "-",
             row.branch or "-",
             row.summary or "-",
@@ -664,7 +676,7 @@ def status(job_id: int = typer.Argument(..., help="Job to describe.")) -> None:
 
     console.print(
         f"[bold]Job {job.id}[/bold] "
-        f"[{_STATE_STYLE.get(job.state, 'white')}]{job.state}[/] — {job.request}"
+        f"[{_STATE_STYLE.get(job.state, 'white')}]{job.state}[/] — {_display_request(job)}"
     )
     fields = [
         ("project", job.project),
@@ -738,7 +750,7 @@ def resume(
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)
 
-    console.print(f"[bold]Job {job_id}[/bold] re-queued — {job.request}")
+    console.print(f"[bold]Job {job_id}[/bold] re-queued — {_display_request(job)}")
     done = _completed_stages(job)
     if done:
         console.print(f"Skipping {len(done)} stage(s) already merged: {', '.join(done)}")
@@ -872,6 +884,32 @@ def cancel(job_id: int = typer.Argument(..., help="Job to cancel.")) -> None:
     except store.JobError as exc:
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(1)
+
+
+@app.command()
+def purge(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit the retention result as JSON for automation."
+    ),
+) -> None:
+    """Purge expired telemetry and completed queue records now.
+
+    The same policy also runs during worker reconciliation. A retention value
+    of zero means keep that record type indefinitely.
+    """
+    import json
+
+    from core.telemetry import store as telemetry
+
+    counts = telemetry.purge_expired(ENGINE_ROOT)
+    if json_output:
+        console.print(json.dumps(counts, sort_keys=True))
+        return
+    deleted = sum(counts.values())
+    details = ", ".join(f"{key}={value}" for key, value in counts.items() if value)
+    console.print(
+        f"Purged {deleted} expired record(s)" + (f": {details}" if details else ".")
+    )
 
 
 _STATE_STYLE = {

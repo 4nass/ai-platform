@@ -386,7 +386,14 @@ def recent_runs(
         return [dict(row) for row in con.execute(query, params)]
 
 
-def _delete_runs(con: sqlite3.Connection, *, scope: str, selector: str, actor: str = "") -> int:
+def _delete_runs(
+    con: sqlite3.Connection,
+    engine_root: Path,
+    *,
+    scope: str,
+    selector: str,
+    actor: str = "",
+) -> int:
     """Delete telemetry rows while leaving a non-sensitive audit tombstone."""
     if scope == "run":
         rows = con.execute("SELECT id FROM runs WHERE id = ?", (int(selector),)).fetchall()
@@ -401,67 +408,85 @@ def _delete_runs(con: sqlite3.Connection, *, scope: str, selector: str, actor: s
         marks = ",".join("?" for _ in run_ids)
         con.execute(f"DELETE FROM calls WHERE run_id IN ({marks})", run_ids)
         con.execute(f"DELETE FROM runs WHERE id IN ({marks})", run_ids)
-    safe_selector = security.redactor(Path(".")).text(selector)
+    redactor = security.redactor(engine_root)
     con.execute(
         "INSERT INTO tombstones(scope, selector, deleted_at, actor, rows_deleted) VALUES(?,?,?,?,?)",
-        (scope, safe_selector, _now(), security.redactor(Path(".")).text(actor), len(run_ids)),
+        (scope, redactor.text(selector), _now(), redactor.text(actor), len(run_ids)),
     )
     return len(run_ids)
 
 
 def delete_run(engine_root: Path, run_id: int, *, actor: str = "") -> int:
     with connect(engine_root) as con:
-        return _delete_runs(con, scope="run", selector=str(run_id), actor=actor)
+        return _delete_runs(con, engine_root, scope="run", selector=str(run_id), actor=actor)
 
 
 def delete_session(engine_root: Path, session_id: str, *, actor: str = "") -> int:
     with connect(engine_root) as con:
-        return _delete_runs(con, scope="session", selector=session_id, actor=actor)
+        return _delete_runs(con, engine_root, scope="session", selector=session_id, actor=actor)
 
 
 def delete_project(engine_root: Path, target_repo: str, *, actor: str = "") -> int:
     with connect(engine_root) as con:
-        return _delete_runs(con, scope="project", selector=target_repo, actor=actor)
+        return _delete_runs(con, engine_root, scope="project", selector=target_repo, actor=actor)
 
 
 def purge_expired(engine_root: Path, policy: security.RetentionPolicy | None = None) -> dict[str, int]:
-    """Apply retention to the stores currently implemented by the engine.
+    """Apply retention to durable records that are safe to delete.
 
     Diffs and attachments are returned as zero until those artifact stores
-    exist; callers can still expose one stable retention report today.
+    exist. Zero days means retain indefinitely. Active jobs and held
+    reservations are never selected for deletion.
     """
     policy = policy or security.load_policy(engine_root).retention
     now = datetime.now(timezone.utc)
-    counts = {"runs": 0, "calls": 0, "events": 0, "diffs": 0, "attachments": 0}
+    counts = {
+        "runs": 0,
+        "calls": 0,
+        "events": 0,
+        "jobs": 0,
+        "reservations": 0,
+        "diffs": 0,
+        "attachments": 0,
+    }
     with connect(engine_root) as con:
-        call_cutoff = (now - timedelta(days=policy.calls_days)).isoformat()
-        run_cutoff = (now - timedelta(days=policy.runs_days)).isoformat()
-        counts["calls"] = con.execute(
-            "DELETE FROM calls WHERE finished_at IS NOT NULL AND finished_at < ?",
-            (call_cutoff,),
-        ).rowcount
-        old_runs = con.execute(
-            "SELECT id FROM runs WHERE finished_at IS NOT NULL AND finished_at < ?",
-            (run_cutoff,),
-        ).fetchall()
-        if old_runs:
-            ids = [int(row["id"]) for row in old_runs]
-            marks = ",".join("?" for _ in ids)
-            counts["calls"] += con.execute(
-                f"DELETE FROM calls WHERE run_id IN ({marks})", ids
+        if policy.calls_days > 0:
+            call_cutoff = (now - timedelta(days=policy.calls_days)).isoformat()
+            counts["calls"] = con.execute(
+                "DELETE FROM calls WHERE finished_at IS NOT NULL AND finished_at < ?",
+                (call_cutoff,),
             ).rowcount
-            counts["runs"] = con.execute(
-                f"DELETE FROM runs WHERE id IN ({marks})", ids
-            ).rowcount
-    from core.jobs import store as job_store
+        if policy.runs_days > 0:
+            run_cutoff = (now - timedelta(days=policy.runs_days)).isoformat()
+            old_runs = con.execute(
+                "SELECT id FROM runs WHERE COALESCE(finished_at, started_at) < ?",
+                (run_cutoff,),
+            ).fetchall()
+            if old_runs:
+                ids = [int(row["id"]) for row in old_runs]
+                marks = ",".join("?" for _ in ids)
+                counts["calls"] += con.execute(
+                    f"DELETE FROM calls WHERE run_id IN ({marks})", ids
+                ).rowcount
+                counts["runs"] = con.execute(
+                    f"DELETE FROM runs WHERE id IN ({marks})", ids
+                ).rowcount
+
+    from core.jobs import budget, store as job_store
+
     with job_store.connect(engine_root) as con:
-        event_cutoff = (now - timedelta(days=policy.events_days)).isoformat()
-        counts["events"] = con.execute("DELETE FROM job_events WHERE at < ?", (event_cutoff,)).rowcount
-        approval_table = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approval_events'"
-        ).fetchone()
-        if approval_table:
-            counts["events"] += con.execute(
-                "DELETE FROM approval_events WHERE at < ?", (event_cutoff,)
+        if policy.events_days > 0:
+            event_cutoff = (now - timedelta(days=policy.events_days)).isoformat()
+            counts["events"] = con.execute(
+                "DELETE FROM job_events WHERE at < ?", (event_cutoff,)
             ).rowcount
+            approval_table = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approval_events'"
+            ).fetchone()
+            if approval_table:
+                counts["events"] += con.execute(
+                    "DELETE FROM approval_events WHERE at < ?", (event_cutoff,)
+                ).rowcount
+    counts["jobs"] = job_store.purge_older_than(engine_root, days=policy.runs_days)
+    counts["reservations"] = budget.purge_older_than(engine_root, days=policy.calls_days)
     return counts

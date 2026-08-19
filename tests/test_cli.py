@@ -799,3 +799,41 @@ def test_cli_approving_a_budget_pause_points_at_resume(
     result = runner.invoke(ai_platform.app, ["approve", str(approval.id)])
 
     assert "ai-platform resume 7" in result.stdout
+
+def test_purge_command_reports_retention_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.telemetry.store.purge_expired",
+        lambda engine_root: {
+            "runs": 1,
+            "calls": 2,
+            "events": 0,
+            "jobs": 3,
+            "reservations": 4,
+            "diffs": 0,
+            "attachments": 0,
+        },
+    )
+
+    result = runner.invoke(ai_platform.app, ["purge", "--json"])
+
+    assert result.exit_code == 0
+    assert '"jobs": 3' in result.stdout
+    assert '"reservations": 4' in result.stdout
+
+def test_status_redacts_the_durable_job_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from core.jobs import store, worker
+
+    secret = "sk-test-12345678901234567890"
+    monkeypatch.setattr(ai_platform, "ENGINE_ROOT", tmp_path)
+    monkeypatch.setattr(worker, "reconcile", lambda engine_root: [])
+    job_id = store.submit(
+        tmp_path, project=str(tmp_path), request=f"fix {secret}"
+    ).id
+
+    result = runner.invoke(ai_platform.app, ["status", str(job_id)])
+
+    assert result.exit_code == 0
+    assert secret not in result.stdout
+    assert "[REDACTED]" in result.stdout

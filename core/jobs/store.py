@@ -343,11 +343,15 @@ def submit(
     worker for a run that is already going.
     """
     payload_hash = payload_hash or ""
+    # The durable queue keeps the exact instruction a later worker must execute.
+    # Redacting it here changes valid requests after a restart. The owner-only
+    # job database is the execution boundary; telemetry and audit output have
+    # their own redaction boundary.
+    envelope = envelope or {}
     redactor = security.redactor(engine_root, Path(project) if project else None)
-    request = redactor.text(request)
-    envelope = redactor.value(envelope or {})
-    submitted_by = redactor.text(submitted_by)
-    principal = redactor.text(principal)
+    submitted_note = redactor.text(
+        f"submitted via {channel} by {principal or 'unknown'}"
+    )
     with connect(engine_root) as con:
         try:
             cursor = con.execute(
@@ -375,7 +379,7 @@ def submit(
         job_id = cursor.lastrowid
         con.execute(
             "INSERT INTO job_events(job_id, from_state, to_state, at, note) VALUES(?,?,?,?,?)",
-            (job_id, None, QUEUED, _now(), f"submitted via {channel} by {principal or 'unknown'}"),
+            (job_id, None, QUEUED, _now(), submitted_note),
         )
         return Submission(id=job_id, created=True)
 
@@ -693,6 +697,8 @@ def purge_older_than(engine_root: Path, *, days: float) -> int:
     """Drops terminal jobs past their useful life. Active jobs are never
     touched, whatever their age — an old `running` row is reconciliation's
     problem, not something to delete out from under a live worker."""
+    if days <= 0:
+        return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with connect(engine_root) as con:
         ids = [

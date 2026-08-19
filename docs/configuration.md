@@ -167,9 +167,11 @@ Use a command array. Keep allowed patterns narrow and repository-relative. Commi
 
 ## Redaction and retention
 
-The optional `security` block in `config/platform.yaml` defines deterministic secret redaction and retention: `redaction_patterns` adds project-independent regular expressions, while `retention` accepts `runs_days`, `calls_days`, `events_days`, `diffs_days` and `attachments_days`. A target may add `redaction_patterns` in `.ai-platform.yml`. Built-in token, bearer, JWT, private-key and credential-assignment formats are always covered. Values are replaced before SQLite persistence, diagnostics, console summaries and future mobile payloads.
+The optional `security` block in `config/platform.yaml` defines deterministic secret redaction and retention: `redaction_patterns` adds project-independent regular expressions, while `retention` accepts `runs_days`, `calls_days`, `events_days`, `diffs_days` and `attachments_days`. A target may add `redaction_patterns` in `.ai-platform.yml`. Built-in token, bearer, JWT, private-key and credential-assignment formats are always covered.
 
-`telemetry.purge_expired()` applies the configured retention to stores that exist today. `delete_run`, `delete_session` and `delete_project` remove telemetry rows and leave non-sensitive tombstones for audit. Diff/attachment counts remain zero until those artifact stores are introduced. SQLite files are created with owner-only permissions; backups must preserve those permissions and be encrypted when leaving the workstation.
+Provider results, telemetry, audit notes and CLI job displays are redacted before they are persisted or shown. The durable job queue intentionally retains the original instruction and signed envelope: a detached worker must be able to execute the exact request after a restart. Its SQLite database is owner-only; do not export it unencrypted. This is an execution-at-rest boundary, not encrypted secret storage.
+
+`ai-platform purge` applies retention on demand, and worker reconciliation applies the same policy automatically. It removes expired telemetry, completed jobs, settled or released reservations and old events; active jobs and held reservations are never purged. A retention value of `0` means retain that record class indefinitely. `delete_run`, `delete_session` and `delete_project` remove telemetry rows and leave non-sensitive tombstones for audit. Diff/attachment counts remain zero until those artifact stores are introduced. SQLite files are created with owner-only permissions; backups must preserve those permissions and be encrypted when leaving the workstation.
 
 ## Authentication and sensitive values
 

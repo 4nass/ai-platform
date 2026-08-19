@@ -52,17 +52,24 @@ def test_telemetry_never_persists_canary_secret(tmp_path: Path) -> None:
     assert all(secret not in value for value in values)
 
 
-def test_jobs_never_persist_canary_request_or_envelope(tmp_path: Path) -> None:
+def test_job_queue_preserves_the_executable_request_but_telemetry_redacts_it(
+    tmp_path: Path,
+) -> None:
     secret = "sk-test-12345678901234567890"
+    request = f"fix {secret}"
     submission = store.submit(
         tmp_path,
         project=str(tmp_path),
-        request=f"fix {secret}",
+        request=request,
         envelope={"request": secret},
     )
-    with store.connect(tmp_path) as con:
-        values = [str(value) for row in con.execute("SELECT * FROM jobs") for value in row]
     assert submission.created
+    assert store.get(tmp_path, submission.id).request == request
+
+    recorder = telemetry.RunRecorder(tmp_path, request, metadata={"request": secret})
+    recorder.finish(summary=f"completed {secret}")
+    with telemetry.connect(tmp_path) as con:
+        values = [str(value) for row in con.execute("SELECT * FROM runs") for value in row]
     assert all(secret not in value for value in values)
 
 
@@ -102,3 +109,71 @@ def test_artifact_directory_helper_is_owner_only(tmp_path: Path) -> None:
     path = security.secure_directory(tmp_path / "artifacts")
     assert path.is_dir()
     assert path.stat().st_mode & 0o077 == 0
+
+def test_retention_purges_completed_jobs_and_settled_reservations(tmp_path: Path) -> None:
+    from core.jobs import budget
+
+    submission = store.submit(tmp_path, project=str(tmp_path), request="safe request")
+    assert store.cancel(tmp_path, submission.id)
+    reservation = budget.reserve(tmp_path, run_key="completed", estimated=10)
+    budget.settle(tmp_path, reservation, actual=5)
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    with store.connect(tmp_path) as con:
+        con.execute(
+            "UPDATE jobs SET finished_at = ? WHERE id = ?", (old, submission.id)
+        )
+        con.execute(
+            "UPDATE reservations SET settled_at = ? WHERE id = ?", (old, reservation)
+        )
+
+    counts = telemetry.purge_expired(
+        tmp_path, security.RetentionPolicy(runs_days=1, calls_days=1, events_days=1)
+    )
+
+    assert counts["jobs"] == 1
+    assert counts["reservations"] == 1
+    assert store.recent(tmp_path) == []
+
+
+def test_zero_retention_keeps_completed_queue_records(tmp_path: Path) -> None:
+    from core.jobs import budget
+
+    submission = store.submit(tmp_path, project=str(tmp_path), request="safe request")
+    assert store.cancel(tmp_path, submission.id)
+    reservation = budget.reserve(tmp_path, run_key="keep", estimated=10)
+    budget.settle(tmp_path, reservation, actual=5)
+
+    counts = telemetry.purge_expired(
+        tmp_path, security.RetentionPolicy(runs_days=0, calls_days=0, events_days=0)
+    )
+
+    assert counts["jobs"] == counts["reservations"] == 0
+    assert len(store.recent(tmp_path)) == 1
+
+def test_delete_tombstones_use_the_engine_redaction_policy(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "platform.yaml").write_text(
+        "security:\n  redaction_patterns: ['CANARY-[A-Z0-9]+']\n",
+        encoding="utf-8",
+    )
+
+    telemetry.delete_session(tmp_path, "CANARY-SESSION", actor="CANARY-ACTOR")
+
+    with telemetry.connect(tmp_path) as con:
+        row = con.execute("SELECT selector, actor FROM tombstones").fetchone()
+    assert tuple(row) == ("[REDACTED:CUSTOM]", "[REDACTED:CUSTOM]")
+
+
+def test_retention_removes_stale_incomplete_telemetry_runs(tmp_path: Path) -> None:
+    recorder = telemetry.RunRecorder(tmp_path, "incomplete")
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    with telemetry.connect(tmp_path) as con:
+        con.execute("UPDATE runs SET started_at = ? WHERE id = ?", (old, recorder.run_id))
+
+    counts = telemetry.purge_expired(
+        tmp_path, security.RetentionPolicy(runs_days=1, calls_days=1, events_days=1)
+    )
+
+    assert counts["runs"] == 1
+    assert telemetry.recent_runs(tmp_path) == []

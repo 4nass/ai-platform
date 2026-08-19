@@ -581,3 +581,17 @@ def test_filing_the_approval_cannot_turn_a_pause_into_a_crash(
     job_id = _queue(fake_repo, fake_repo, project_id="mine")
 
     assert worker.run_job(fake_repo, job_id) == store.WAITING_APPROVAL
+
+def test_reconcile_applies_retention_policy(
+    monkeypatch: pytest.MonkeyPatch, fake_repo: Path
+) -> None:
+    from core.telemetry import store as telemetry
+
+    called: list[Path] = []
+    monkeypatch.setattr(
+        telemetry, "purge_expired", lambda engine_root: called.append(engine_root) or {}
+    )
+
+    worker.reconcile(fake_repo)
+
+    assert called == [fake_repo]
