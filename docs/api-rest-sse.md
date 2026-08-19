@@ -16,8 +16,11 @@ provide durable idempotency.
 
 Credentials for the development server are supplied through the
 AI_PLATFORM_TRANSPORT_CREDENTIALS environment variable as a JSON list. Do not
-put secrets in YAML, Git, query strings or logs. Production needs a secret
-manager, TLS, a process supervisor and reverse-proxy rate/body limits.
+put secrets in YAML, Git, query strings or logs. The built-in local development
+server uses a request thread per connection, so a long-lived SSE subscription
+does not block job status, cancellation or approval calls. It is not a
+production WSGI deployment: production needs a managed WSGI/ASGI host, TLS, a
+secret manager, process supervision and reverse-proxy rate/body limits.
 
 ## Endpoints
 
